@@ -1,3 +1,3 @@
 # Builds Diorama (see build.bat).
-& "$PSScriptRootuild.bat" @args
+& "$PSScriptRoot\build.bat" @args
 exit $LASTEXITCODE

@@ -555,6 +555,7 @@ static void lines(const std::vector<float>& pts, const float* colour, const M4& 
 }
 
 static int lastPicked = -1;
+static std::map<int, std::pair<M4, M4>> lastWorld;   // id -> (world, parent world), as last drawn
 static std::vector<std::pair<int, std::pair<float, float>>> screenCentres;   // id, its centre on screen (for clicks)
 
 unsigned render(const Project& p, int mi, int selected, int w, int h, bool hovered, int& picked) {
@@ -629,6 +630,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     // the objects: world matrices down the hierarchy; opaque first, then see-through ones far to near
     std::vector<Draw> draws;
     screenCentres.clear();
+    lastWorld.clear();
     if (m) {
         std::map<int, M4> worldOf;
         for (const Object& o : m->objects) {
@@ -639,6 +641,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
             if (!parentOn) continue;
             const M4 world = mul(parent, localOf(o, t, nullptr));
             worldOf[o.id] = world;
+            lastWorld[o.id] = {world, parent};
             const float c[3] = {world.m[12], world.m[13], world.m[14]};
             const float vz = viewM.m[2] * c[0] + viewM.m[6] * c[1] + viewM.m[10] * c[2] + viewM.m[14];
             const bool blend = o.kind == PICTURE || o.kind == SPRITES || o.kind == RAYS || o.kind == WORDS || o.colour[3] < 0.999f || o.glow;
@@ -680,6 +683,22 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     (void)lastPicked;
     return fboTex;
 }
+
+bool matrices(int id, float world[16], float parent[16]) {
+    auto it = lastWorld.find(id);
+    if (it == lastWorld.end()) return false;
+    memcpy(world, it->second.first.m, 64); memcpy(parent, it->second.second.m, 64);
+    return true;
+}
+bool toScreen(const float p[3], float& x, float& y) {
+    float c[4];
+    for (int r = 0; r < 4; ++r) c[r] = viewProj.m[r] * p[0] + viewProj.m[4 + r] * p[1] + viewProj.m[8 + r] * p[2] + viewProj.m[12 + r];
+    if (c[3] <= 1e-4f) return false;
+    x = (c[0] / c[3] * 0.5f + 0.5f) * fbW; y = (1 - (c[1] / c[3] * 0.5f + 0.5f)) * fbH;
+    return true;
+}
+void eyePos(float out[3]) { out[0] = eye[0]; out[1] = eye[1]; out[2] = eye[2]; }
+void focusOn(const float p[3], float size) { target[0] = p[0]; target[1] = p[1]; target[2] = p[2]; dist = std::clamp(size * 3.0f, 0.4f, 30.0f); }
 
 void readPixels(std::vector<unsigned char>& rgba, int& w, int& h) {
     w = fbW; h = fbH; rgba.assign((size_t)w * h * 4, 0);

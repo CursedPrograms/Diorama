@@ -14,6 +14,7 @@
 #include <imgui.h>
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
+#include <imgui_internal.h>
 #include <stb_image_write.h>
 
 #include <algorithm>
@@ -152,6 +153,18 @@ static Object* curObject() {
     Marker* m = curMarker(); if (!m || selObject < 0) return nullptr;
     const int i = indexOfId(*m, selObject); return i >= 0 ? &m->objects[i] : nullptr;
 }
+
+
+// ---------- undo / redo: the whole project before each edit (projects are small) ----------
+static std::vector<Project> undoStack, redoStack;
+static Project frameStart;   // the project as this frame began
+static void beginEdit() {
+    undoStack.push_back(frameStart);
+    if (undoStack.size() > 200) undoStack.erase(undoStack.begin());
+    redoStack.clear();
+}
+static void undo() { if (undoStack.empty()) return; redoStack.push_back(proj); proj = undoStack.back(); undoStack.pop_back(); if (!curObject()) selObject = -1; }
+static void redo() { if (redoStack.empty()) return; undoStack.push_back(proj); proj = redoStack.back(); redoStack.pop_back(); if (!curObject()) selObject = -1; }
 
 // ---------- the printed marker ----------
 static std::string markerAssets() { return (fs::u8path(exeDir) / "assets" / "markers").u8string(); }
@@ -350,6 +363,17 @@ static bool buildGame(const std::string& out, std::string& err) {
     lastBuild = out;
     return true;
 }
+static void playInBrowser() {
+    std::error_code ec;
+    const fs::path tmp = fs::temp_directory_path(ec) / "Diorama Play";
+    std::string err;
+    if (!buildGame(tmp.u8string(), err)) { say(err); return; }
+    if (!Serve::start(tmp.u8string(), 8765)) { say("Couldn't start the test server on port 8765"); return; }
+#ifdef _WIN32
+    ShellExecuteW(nullptr, L"open", L"http://localhost:8765/", nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+    say("Playing in the browser: allow the webcam and hold up the printed marker (File > Build Game to keep it)");
+}
 static void buildDialog(bool run) {
     std::string out = lastBuild;
     if (out.empty() || !run) {
@@ -405,6 +429,7 @@ static void menuBar() {
         if (ImGui::MenuItem("Save As...")) saveProject(true);
         if (!folder.empty() && ImGui::MenuItem("Show the project folder")) openInExplorer(folder);
         ImGui::Separator();
+        if (ImGui::MenuItem("Play in the browser", "Ctrl+P")) playInBrowser();
         if (ImGui::MenuItem("Build Game...", "Ctrl+B")) buildDialog(false);
         if (ImGui::MenuItem("Build And Run", "Ctrl+Shift+B")) buildDialog(true);
         ImGui::Separator();
@@ -514,7 +539,12 @@ static void vec3Row(const char* label, float* v, float speed) {
         ImGui::SameLine(k == 0 ? labelW : 0, k == 0 ? -1 : 4);
         ImGui::PushStyleColor(ImGuiCol_Text, col4(cols[k])); ImGui::TextUnformatted(names[k]); ImGui::PopStyleColor();
         ImGui::SameLine(0, 3); ImGui::SetNextItemWidth(w);
-        ImGui::PushID(k); ImGui::DragFloat("##v", &v[k], speed, 0, 0, "%.3f"); ImGui::PopID();
+        ImGui::PushID(k);
+        ImGui::DragFloat("##v", &v[k], speed, 0, 0, "%.3f");
+        // up/down drags too (up: more), as well as ImGui's sideways drag
+        if (ImGui::IsItemActive() && !ImGui::GetIO().WantTextInput && ImGui::GetIO().MouseDelta.y != 0) v[k] -= ImGui::GetIO().MouseDelta.y * speed;
+        if (ImGui::IsItemHovered()) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        ImGui::PopID();
     }
     ImGui::PopID();
 }
@@ -657,11 +687,149 @@ static void inspector() {
     ImGui::EndChild();
 }
 
+
+// ---------- the editing handles (Unity's Q W E R): move arrows, rotate rings, scale boxes ----------
+static int tool = 1;                  // 0 hand (just the camera), 1 move, 2 rotate, 3 scale
+static int dragAxis = -1;             // the handle being dragged: 0 x, 1 y, 2 z, 3 all (scale's centre)
+static float dragStart[3];            // the value when the drag began
+static ImVec2 dragMouse;
+static bool handles(const ImVec2& origin, const ImVec2& size) {   // true while the handles have the mouse
+    Object* o = curObject();
+    if (!o || tool == 0) { dragAxis = -1; return false; }
+    float world[16], parent[16];
+    if (!Viewer::matrices(o->id, world, parent)) return false;
+    const float c[3] = {world[12], world[13], world[14]};
+    float cx, cy;
+    if (!Viewer::toScreen(c, cx, cy)) return false;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
+    const ImVec2 C(origin.x + cx, origin.y + cy);
+    // the handle's length: about 90 pixels on screen whatever the zoom
+    float eye[3]; Viewer::eyePos(eye);
+    const float dist = std::sqrt((eye[0] - c[0]) * (eye[0] - c[0]) + (eye[1] - c[1]) * (eye[1] - c[1]) + (eye[2] - c[2]) * (eye[2] - c[2]));
+    const float len = dist * 0.16f;
+    // the axes: the parent's (so the numbers in the Inspector move with the handle)
+    float ax[3][3];
+    for (int k = 0; k < 3; ++k) {
+        float l = std::sqrt(parent[k * 4] * parent[k * 4] + parent[k * 4 + 1] * parent[k * 4 + 1] + parent[k * 4 + 2] * parent[k * 4 + 2]);
+        if (l < 1e-6f) l = 1;
+        for (int r = 0; r < 3; ++r) ax[k][r] = parent[k * 4 + r] / l;
+    }
+    if (tool == 3)   // scale: the object's own axes
+        for (int k = 0; k < 3; ++k) {
+            float l = std::sqrt(world[k * 4] * world[k * 4] + world[k * 4 + 1] * world[k * 4 + 1] + world[k * 4 + 2] * world[k * 4 + 2]);
+            if (l < 1e-6f) l = 1;
+            for (int r = 0; r < 3; ++r) ax[k][r] = world[k * 4 + r] / l;
+        }
+    const ImU32 cols[3] = {IM_COL32(0xe0, 0x50, 0x50, 255), IM_COL32(0x6c, 0xc8, 0x4c, 255), IM_COL32(0x40, 0x8c, 0xe8, 255)};
+    const ImU32 hot = IM_COL32(0xff, 0xe0, 0x40, 255);
+    const ImVec2 mouse = ImGui::GetMousePos();
+    ImVec2 tips[3]; bool tipOk[3];
+    for (int k = 0; k < 3; ++k) {
+        const float p[3] = {c[0] + ax[k][0] * len, c[1] + ax[k][1] * len, c[2] + ax[k][2] * len};
+        float x, y; tipOk[k] = Viewer::toScreen(p, x, y); tips[k] = ImVec2(origin.x + x, origin.y + y);
+    }
+    auto distToSeg = [](ImVec2 p, ImVec2 a, ImVec2 b) {
+        const float dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy;
+        float t = l2 > 0 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2 : 0; t = std::clamp(t, 0.0f, 1.0f);
+        const float ex = a.x + dx * t - p.x, ey = a.y + dy * t - p.y; return std::sqrt(ex * ex + ey * ey);
+    };
+    // the rotate rings: each axis's circle, as points on screen
+    std::vector<ImVec2> ring[3];
+    if (tool == 2)
+        for (int k = 0; k < 3; ++k) {
+            const int u = (k + 1) % 3, v = (k + 2) % 3;
+            for (int i = 0; i <= 48; ++i) {
+                const float a = i * 6.2831853f / 48;
+                const float p[3] = {c[0] + (ax[u][0] * std::cos(a) + ax[v][0] * std::sin(a)) * len, c[1] + (ax[u][1] * std::cos(a) + ax[v][1] * std::sin(a)) * len,
+                                    c[2] + (ax[u][2] * std::cos(a) + ax[v][2] * std::sin(a)) * len};
+                float x, y; if (Viewer::toScreen(p, x, y)) ring[k].push_back(ImVec2(origin.x + x, origin.y + y));
+            }
+        }
+    // which handle is under the mouse
+    int over = -1; float best = 9;
+    if (dragAxis < 0) {
+        for (int k = 0; k < 3; ++k) {
+            float d = 1e9f;
+            if (tool == 2) { for (size_t i = 0; i + 1 < ring[k].size(); ++i) d = std::min(d, distToSeg(mouse, ring[k][i], ring[k][i + 1])); }
+            else if (tipOk[k]) d = distToSeg(mouse, C, tips[k]);
+            if (d < best) { best = d; over = k; }
+        }
+        if (tool == 3 && std::fabs(mouse.x - C.x) < 8 && std::fabs(mouse.y - C.y) < 8) over = 3;
+    }
+    const bool inView = mouse.x >= origin.x && mouse.y >= origin.y && mouse.x < origin.x + size.x && mouse.y < origin.y + size.y;
+    if (over >= 0 && inView && ImGui::IsMouseClicked(0)) {
+        dragAxis = over; dragMouse = mouse;
+        const float* src = tool == 1 ? o->pos : tool == 2 ? o->rot : o->scl;
+        memcpy(dragStart, src, sizeof dragStart);
+        beginEdit();
+    }
+    if (dragAxis >= 0) {
+        if (!ImGui::IsMouseDown(0)) dragAxis = -1;
+        else {
+            const ImVec2 d(mouse.x - dragMouse.x, mouse.y - dragMouse.y);
+            const int k = dragAxis == 3 ? 0 : dragAxis;
+            ImVec2 sd(tips[k].x - C.x, tips[k].y - C.y);
+            const float sl = std::max(1.0f, std::sqrt(sd.x * sd.x + sd.y * sd.y));
+            const float along = (d.x * sd.x + d.y * sd.y) / sl;   // pixels along the handle on screen
+            if (tool == 1) {   // move: as far along the axis as the mouse went along the arrow
+                const float units = along / sl * len;
+                // into the parent's own units (its scale)
+                float pl = std::sqrt(parent[k * 4] * parent[k * 4] + parent[k * 4 + 1] * parent[k * 4 + 1] + parent[k * 4 + 2] * parent[k * 4 + 2]);
+                if (pl < 1e-6f) pl = 1;
+                memcpy(o->pos, dragStart, sizeof dragStart);
+                o->pos[k] = dragStart[k] + units / pl;
+                if (ImGui::GetIO().KeyCtrl) o->pos[k] = std::round(o->pos[k] / 0.05f) * 0.05f;   // Ctrl snaps (0.05)
+            } else if (tool == 2) {   // rotate: sideways and up/down both turn it
+                memcpy(o->rot, dragStart, sizeof dragStart);
+                o->rot[k] = dragStart[k] + (d.x - d.y) * 0.5f;
+                if (ImGui::GetIO().KeyCtrl) o->rot[k] = std::round(o->rot[k] / 15) * 15;   // Ctrl snaps (15 degrees)
+            } else {   // scale: the axis, or all three from the centre box
+                const float f = std::max(0.01f, 1 + (dragAxis == 3 ? (d.x - d.y) : along) / 100.0f);
+                memcpy(o->scl, dragStart, sizeof dragStart);
+                if (dragAxis == 3) for (int q = 0; q < 3; ++q) o->scl[q] = dragStart[q] * f; else o->scl[k] = dragStart[k] * f;
+            }
+        }
+    }
+    // draw them
+    for (int k = 0; k < 3; ++k) {
+        const ImU32 col = (k == dragAxis || (dragAxis < 0 && k == over)) ? hot : cols[k];
+        if (tool == 2) { if (ring[k].size() > 1) dl->AddPolyline(ring[k].data(), (int)ring[k].size(), col, 0, 2.5f); continue; }
+        if (!tipOk[k]) continue;
+        dl->AddLine(C, tips[k], col, 2.5f);
+        if (tool == 1) {   // an arrowhead
+            ImVec2 dir(tips[k].x - C.x, tips[k].y - C.y); const float l = std::max(1.0f, std::sqrt(dir.x * dir.x + dir.y * dir.y)); dir.x /= l; dir.y /= l;
+            const ImVec2 nrm(-dir.y, dir.x);
+            dl->AddTriangleFilled(ImVec2(tips[k].x + dir.x * 14, tips[k].y + dir.y * 14), ImVec2(tips[k].x + nrm.x * 6, tips[k].y + nrm.y * 6), ImVec2(tips[k].x - nrm.x * 6, tips[k].y - nrm.y * 6), col);
+        } else dl->AddRectFilled(ImVec2(tips[k].x - 5, tips[k].y - 5), ImVec2(tips[k].x + 5, tips[k].y + 5), col);
+    }
+    if (tool == 3) dl->AddRectFilled(ImVec2(C.x - 6, C.y - 6), ImVec2(C.x + 6, C.y + 6), dragAxis == 3 || over == 3 ? hot : IM_COL32(0xd0, 0xd0, 0xd0, 255));
+    dl->PopClipRect();
+    return dragAxis >= 0 || (over >= 0 && inView);
+}
+
 // ---------- the Scene view ----------
 static void sceneView() {
     Viewer::Look& lk = Viewer::look();
-    if (ImGui::Button(lk.animate ? "Pause" : "Play", ImVec2(70, 0))) lk.animate = !lk.animate;
-    ImGui::SameLine(); ImGui::Checkbox("Desk", &lk.desk);
+    ImGui::PushStyleColor(ImGuiCol_Button, col4(C_DEEP));
+    if (ImGui::Button("\xe2\x96\xb6 Play", ImVec2(80, 0))) playInBrowser();
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play it in the browser with the webcam (Ctrl+P)");
+    ImGui::SameLine();
+    if (ImGui::Button(lk.animate ? "Pause" : "Animate", ImVec2(80, 0))) lk.animate = !lk.animate;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The animations in this view");
+    ImGui::SameLine(0, 14);
+    const char* toolNames[4] = {"Hand (Q)", "Move (W)", "Rotate (E)", "Scale (R)"};
+    const char* toolLabels[4] = {"Q", "W", "E", "R"};
+    for (int k = 0; k < 4; ++k) {
+        if (k) ImGui::SameLine(0, 2);
+        const bool on = tool == k;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_BLUE));
+        if (ImGui::Button(toolLabels[k], ImVec2(28, 0))) tool = k;
+        if (on) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", toolNames[k]);
+    }
+    ImGui::SameLine(0, 14); ImGui::Checkbox("Desk", &lk.desk);
     ImGui::SameLine(); ImGui::Checkbox("Axes", &lk.gizmo);
     ImGui::SameLine(); if (ImGui::Button("Front")) Viewer::frameMarker();
     ImGui::SameLine();
@@ -678,10 +846,13 @@ static void sceneView() {
     const ImVec2 avail = ImGui::GetContentRegionAvail(), a = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("view", avail, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
     const bool hov = ImGui::IsItemHovered() || ImGui::IsItemActive();
+    // the handles first take the mouse when it's on them; else the view turns, and a click picks
+    static bool handleHasMouse = false;
     int picked = -1;
-    const unsigned tex = Viewer::render(proj, selMarker, selObject, (int)avail.x, (int)avail.y, hov, picked);
-    if (picked >= 0) selObject = picked;
+    const unsigned tex = Viewer::render(proj, selMarker, selObject, (int)avail.x, (int)avail.y, hov && !handleHasMouse, picked);
+    if (picked >= 0) selObject = picked; else if (picked == -2 && !handleHasMouse) selObject = -1;
     ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)tex, a, ImVec2(a.x + avail.x, a.y + avail.y), ImVec2(0, 1), ImVec2(1, 0));
+    handleHasMouse = handles(a, avail);
 }
 
 static void about() {
@@ -699,17 +870,32 @@ static void about() {
 static void keys() {
     ImGuiIO& io = ImGui::GetIO();
     if (io.WantTextInput) return;
+    if (!io.KeyCtrl && !io.KeyAlt) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Q)) tool = 0;
+        if (ImGui::IsKeyPressed(ImGuiKey_W)) tool = 1;
+        if (ImGui::IsKeyPressed(ImGuiKey_E)) tool = 2;
+        if (ImGui::IsKeyPressed(ImGuiKey_R)) tool = 3;
+        if (ImGui::IsKeyPressed(ImGuiKey_F)) {   // frame the selected object
+            float w[16], pa[16];
+            if (Object* o = curObject()) { if (Viewer::matrices(o->id, w, pa)) { const float c[3] = {w[12], w[13], w[14]}; Viewer::focusOn(c, std::max({o->scl[0], o->scl[1], o->scl[2], 0.3f})); } }
+            else Viewer::frameMarker();
+        }
+    }
+    if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)) undo();
+    if (io.KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Y) || (io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)))) redo();
     Scene::Marker* m = curMarker();
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) saveProject(false);
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Q)) quit = true;
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) { const std::string f = openDialog(L"Diorama project\0*.diorama\0\0"); if (!f.empty()) openProject(f); }
     if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_N)) create(EMPTY);
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_B)) buildDialog(io.KeyShift);
-    if (m && selObject >= 0 && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) selObject = duplicate(proj, *m, selObject);
-    if (m && selObject >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) { remove(*m, selObject); selObject = -1; }
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) playInBrowser();
+    if (m && selObject >= 0 && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) { beginEdit(); selObject = duplicate(proj, *m, selObject); }
+    if (m && selObject >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) { beginEdit(); remove(*m, selObject); selObject = -1; }
 }
 
 static void frame() {
+    frameStart = proj;
     keys();
     menuBar();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -733,6 +919,12 @@ static void frame() {
     ImGui::End();
     ImGui::PopStyleVar();
     about();
+    // a field, checkbox or menu item that just began an edit: undoable (the handles call beginEdit themselves)
+    const ImGuiID active = ImGui::GetActiveID();
+    static ImGuiID lastActive = 0;
+    if (active != 0 && active != lastActive && dragAxis < 0 && ImGui::IsAnyItemActive()) beginEdit();
+    lastActive = active;
+    if (undoStack.size() > 1 && Scene::toJson(undoStack.back()) == Scene::toJson(proj) && active == 0) undoStack.pop_back();   // an edit that changed nothing
 }
 
 int main(int argc, char** argv) {

@@ -1,3 +1,3 @@
-# Installs Diorama for this user (see install.bat).
+# Installs Diorama (see install.bat).
 & "$PSScriptRoot\install.bat" @args
 exit $LASTEXITCODE
