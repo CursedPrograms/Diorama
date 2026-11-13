@@ -928,7 +928,7 @@ static void frame() {
 }
 
 int main(int argc, char** argv) {
-    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1;
+    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1;
     std::vector<std::string> args;
 #ifdef _WIN32
     { int n; LPWSTR* wa = CommandLineToArgvW(GetCommandLineW(), &n); if (wa) { for (int i = 1; i < n; ++i) args.push_back(fs::path(wa[i]).u8string()); LocalFree(wa); } }
@@ -942,6 +942,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--template" && i + 1 < args.size()) tmpl = args[++i];
         else if (args[i] == "--select" && i + 1 < args.size()) selectArg = atoi(args[++i].c_str());
         else if (args[i] == "--build" && i + 1 < args.size()) buildArg = args[++i];
+        else if (args[i] == "--pick" && i + 2 < args.size()) { pickX = atoi(args[i + 1].c_str()); pickY = atoi(args[i + 2].c_str()); i += 2; }
         else openArg = args[i];
     }
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) return 1;
@@ -1016,7 +1017,9 @@ int main(int argc, char** argv) {
         int w, h; SDL_GL_GetDrawableSize(window, &w, &h);
         glViewport(0, 0, w, h); glClearColor(0.1f, 0.1f, 0.1f, 1); glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        if (pickX >= 0 && frames == 20) Viewer::clickAt(pickX, pickY);
         if (!capture.empty() && ++frames >= 40) {
+            if (pickX >= 0) { std::ofstream(fs::u8path(capture + ".txt")) << (curObject() ? curObject()->name : std::string("(nothing)")) << "\n"; }
             std::vector<unsigned char> px((size_t)w * h * 4);
             glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
             std::vector<unsigned char> flip(px.size());

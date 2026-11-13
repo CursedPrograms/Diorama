@@ -143,7 +143,7 @@ static GLuint program(const char* vs, const char* fs) {
 }
 
 static GLuint prog = 0, progLine = 0;
-static GLint uClip; static GLint uMVP, uModel, uColour, uUseTex, uLit, uSunDir, uSun, uAmbient, uTex, uLineMVP, uLineColour;
+static GLint uClip, uPick, uPickCol; static GLint uMVP, uModel, uColour, uUseTex, uLit, uSunDir, uSun, uAmbient, uTex, uLineMVP, uLineColour;
 
 struct Mesh { GLuint vao = 0, vbo = 0, ibo = 0; int count = 0; };   // interleaved pos 3, normal 3, uv 2
 static Mesh upload(const std::vector<float>& v, const std::vector<unsigned>& idx, bool dynamic = false) {
@@ -371,13 +371,14 @@ bool init(const std::string& dir) {
         "uniform mat4 mvp, model; uniform vec4 clipPlane; out vec3 N; out vec2 T;\n"
         "void main(){ gl_Position = mvp * vec4(p,1); N = mat3(model) * n; T = t; gl_ClipDistance[0] = dot(model * vec4(p,1), clipPlane); }",
         "#version 330\nin vec3 N; in vec2 T; uniform sampler2D tex; uniform vec4 colour; uniform int useTex, lit;\n"
-        "uniform vec3 sunDir, sun, ambient; out vec4 o;\n"
+        "uniform vec3 sunDir, sun, ambient; uniform int pick; uniform vec3 pickCol; out vec4 o;\n"
         "void main(){ vec4 c = colour; if (useTex == 1) c *= texture(tex, T); if (c.a < 0.01) discard;\n"
+        "  if (pick == 1) { if (c.a < 0.35) discard; o = vec4(pickCol, 1); return; }\n"
         "  if (lit == 1) { vec3 n = normalize(N); if (!gl_FrontFacing) n = -n; c.rgb *= ambient + sun * max(dot(n, sunDir), 0.0); }\n"
         "  o = c; }");
     uMVP = glGetUniformLocation_(prog, "mvp"); uModel = glGetUniformLocation_(prog, "model"); uColour = glGetUniformLocation_(prog, "colour");
     uUseTex = glGetUniformLocation_(prog, "useTex"); uLit = glGetUniformLocation_(prog, "lit"); uSunDir = glGetUniformLocation_(prog, "sunDir");
-    uSun = glGetUniformLocation_(prog, "sun"); uAmbient = glGetUniformLocation_(prog, "ambient"); uTex = glGetUniformLocation_(prog, "tex"); uClip = glGetUniformLocation_(prog, "clipPlane");
+    uSun = glGetUniformLocation_(prog, "sun"); uAmbient = glGetUniformLocation_(prog, "ambient"); uTex = glGetUniformLocation_(prog, "tex"); uClip = glGetUniformLocation_(prog, "clipPlane"); uPick = glGetUniformLocation_(prog, "pick"); uPickCol = glGetUniformLocation_(prog, "pickCol");
     progLine = program(
         "#version 330\nlayout(location=0) in vec3 p; uniform mat4 mvp; void main(){ gl_Position = mvp * vec4(p,1); }",
         "#version 330\nuniform vec4 colour; out vec4 o; void main(){ o = colour; }");
@@ -555,6 +556,8 @@ static void lines(const std::vector<float>& pts, const float* colour, const M4& 
 }
 
 static int lastPicked = -1;
+static int clickX = -1, clickY = -1;   // a click to answer this frame (pixels from the view's top-left)
+static bool redrawing = false;          // drawing the picture again after a pick (time doesn't move)
 static std::map<int, std::pair<M4, M4>> lastWorld;   // id -> (world, parent world), as last drawn
 static std::vector<std::pair<int, std::pair<float, float>>> screenCentres;   // id, its centre on screen (for clicks)
 
@@ -569,18 +572,13 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
             target[0] -= (std::cos(yaw) * io.MouseDelta.x) * k; target[2] -= (-std::sin(yaw) * io.MouseDelta.x) * k; target[1] += io.MouseDelta.y * k;
         }
         if (io.MouseWheel != 0) dist = std::clamp(dist * std::pow(0.88f, io.MouseWheel), 0.3f, 30.0f);
-        // a click (not a drag) picks the nearest object centre on screen
-        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).x == 0 && ImGui::GetMouseDragDelta(ImGuiMouseButton_Left).y == 0) {
+        // a click (not a drag): what's under the mouse is found after drawing (each object in its own colour)
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0).x == 0 && ImGui::GetMouseDragDelta(ImGuiMouseButton_Left, 0).y == 0) {
             const ImVec2 mp = ImGui::GetMousePos(), wp = ImGui::GetItemRectMin();
-            float best = 30 * 30;
-            for (const auto& c : screenCentres) {
-                const float dx = c.second.first - (mp.x - wp.x), dy = c.second.second - (mp.y - wp.y);
-                if (dx * dx + dy * dy < best) { best = dx * dx + dy * dy; picked = c.first; }
-            }
-            if (picked < 0) picked = -2;   // clicked on nothing
+            clickX = (int)(mp.x - wp.x); clickY = (int)(mp.y - wp.y);
         }
     }
-    if (lk.animate) lk.time += io.DeltaTime;
+    if (lk.animate && !redrawing) lk.time += io.DeltaTime;
     const float t = lk.time;
 
     ensureTarget(w, h);
@@ -597,7 +595,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     const Marker* m = mi >= 0 && mi < (int)p.markers.size() ? &p.markers[mi] : nullptr;
     curMarker = m;
     glUseProgram_(prog);
-    glUniform1i_(uTex, 0); glUniform4f_(uClip, 0, 0, 0, 1);
+    glUniform1i_(uTex, 0); glUniform4f_(uClip, 0, 0, 0, 1); glUniform1i_(uPick, 0);
     const float sy = m ? m->sunYaw * D2R : 0.6f, sp = m ? m->sunPitch * D2R : 0.9f;
     glUniform3f_(uSunDir, std::cos(sp) * std::sin(sy), std::sin(sp), std::cos(sp) * std::cos(sy));
     if (m) { glUniform3f_(uSun, m->sun[0] * m->sunStrength, m->sun[1] * m->sunStrength, m->sun[2] * m->sunStrength); glUniform3f_(uAmbient, m->ambient[0], m->ambient[1], m->ambient[2]); }
@@ -668,6 +666,51 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     glDisable(GL_CLIP_DISTANCE0); glUniform4f_(uClip, 0, 0, 0, 1);
     glDisable(GL_STENCIL_TEST);
 
+    // a click: draw again in id colours and read the pixel under the mouse (0: nothing)
+    if (clickX >= 0 && clickY >= 0 && clickX < w && clickY < h) {
+        glClearColor(0, 0, 0, 1); glClearStencil(0);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        glDisable(GL_BLEND);
+        glUniform1i_(uPick, 1);
+        if (portal) {   // the opening, as before, and the desk round it hiding what's under the paper
+            glEnable(GL_STENCIL_TEST);
+            glStencilFunc(GL_ALWAYS, 1, 0xff); glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE); glDepthMask(GL_FALSE);
+            const float c[4] = {1, 1, 1, 1};
+            setCommon(portalM, c, 0, false); draw(mPicture);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE); glDepthMask(GL_TRUE);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            glStencilFunc(GL_NOTEQUAL, 1, 0xff);
+        }
+        {   // the desk and paper: they hide what's under them, but aren't objects (black)
+            glUniform3f_(uPickCol, 0, 0, 0);
+            const float c[4] = {1, 1, 1, 1};
+            setCommon(mul(translate(0, -0.002f, 0), scale(1.2f, 1, 1.2f)), c, 0, false); draw(mPlane);
+        }
+        if (portal) glEnable(GL_CLIP_DISTANCE0);
+        for (const Draw& d : draws) {
+            const int id = d.o->id;
+            glUniform3f_(uPickCol, (id & 255) / 255.0f, ((id >> 8) & 255) / 255.0f, ((id >> 16) & 255) / 255.0f);
+            if (portal) {
+                glStencilFunc(GL_EQUAL, 1, 0xff); glUniform4f_(uClip, 0, -1, 0, 0); drawObject(d, t);
+                glStencilFunc(GL_ALWAYS, 0, 0xff); glUniform4f_(uClip, 0, 1, 0, 0); drawObject(d, t);
+            } else drawObject(d, t);
+        }
+        glDisable(GL_CLIP_DISTANCE0); glUniform4f_(uClip, 0, 0, 0, 1); glDisable(GL_STENCIL_TEST);
+        unsigned char px[4] = {0, 0, 0, 0};
+        glReadPixels(clickX, h - 1 - clickY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        const int id = px[0] | (px[1] << 8) | (px[2] << 16);
+        picked = id > 0 ? id : -2;   // -2: clicked on nothing
+        glUniform1i_(uPick, 0);
+        glEnable(GL_BLEND);
+        // the picture as it was (the pick pass drew over it)
+        clickX = clickY = -1;
+        glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+        redrawing = true; int none = -1; render(p, mi, selected, w, h, false, none); redrawing = false;
+        return fboTex;
+    }
+    clickX = clickY = -1;
+
     // the selected object: its axes (red x, green y, blue z), drawn over everything
     if (lk.gizmo && selected >= 0) {
         for (const Draw& d : draws) if (d.o->id == selected) {
@@ -697,6 +740,7 @@ bool toScreen(const float p[3], float& x, float& y) {
     x = (c[0] / c[3] * 0.5f + 0.5f) * fbW; y = (1 - (c[1] / c[3] * 0.5f + 0.5f)) * fbH;
     return true;
 }
+void clickAt(int x, int y) { clickX = x; clickY = y; }
 void eyePos(float out[3]) { out[0] = eye[0]; out[1] = eye[1]; out[2] = eye[2]; }
 void focusOn(const float p[3], float size) { target[0] = p[0]; target[1] = p[1]; target[2] = p[2]; dist = std::clamp(size * 3.0f, 0.4f, 30.0f); }
 

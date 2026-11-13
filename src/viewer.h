@@ -26,5 +26,6 @@ bool matrices(int id, float world[16], float parent[16]);
 bool toScreen(const float p[3], float& x, float& y);
 void eyePos(float out[3]);
 void focusOn(const float p[3], float size);
+void clickAt(int x, int y);   // as if the view were clicked there (for testing)
 
 }
