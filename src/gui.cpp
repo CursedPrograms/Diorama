@@ -340,6 +340,8 @@ static void addMarker() {
 
 
 static void playInBrowser();
+static bool savePrefab(const Scene::Marker& m, int rootId, const std::string& dir);
+static bool loadPrefab(const std::string& file, std::vector<Object>& out);
 // ---------- the Console: what Play's scripts said (log, errors) ----------
 struct ConsoleLine { std::string level, file, text; int line = 0; };
 static std::vector<ConsoleLine> consoleLines;
@@ -522,7 +524,7 @@ static void projectPanel() {
     }
     ImGui::SameLine(0, 20); if (ImGui::SmallButton("Import...")) { const std::string f = openDialog(L"Assets\0*.png;*.jpg;*.jpeg;*.glb;*.gltf;*.js;*.mp3;*.ogg;*.wav\0All files\0*.*\0\0"); if (!f.empty()) importFiles({f}); }
     ImGui::SameLine(); if (ImGui::SmallButton("Show in Explorer")) openInExplorer(projectDir);
-    ImGui::SameLine(); ImGui::TextDisabled("drag a file onto the Hierarchy or an object; drop files here from Explorer to import");
+    ImGui::SameLine(); ImGui::TextDisabled("drag files onto the Hierarchy or an object; an object here makes a prefab; drop files from Explorer to import");
     ImGui::BeginChild("##files", ImVec2(0, 0), true);
     std::vector<fs::directory_entry> items;
     for (const auto& e : fs::directory_iterator(cur, ec)) items.push_back(e);
@@ -589,6 +591,13 @@ static void projectPanel() {
         ImGui::EndPopup();
     }
     ImGui::EndChild();
+    if (ImGui::BeginDragDropTarget()) {   // an object from the Hierarchy: a prefab of it here
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("OBJ")) {
+            const int* d = (const int*)pl->Data;
+            if (d[0] >= 0 && d[0] < (int)proj.markers.size()) savePrefab(proj.markers[d[0]], d[1], cur.u8string());
+        }
+        ImGui::EndDragDropTarget();
+    }
     if (!renaming.empty()) { ImGui::OpenPopup("Rename"); }
     if (ImGui::BeginPopupModal("Rename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::SetNextItemWidth(320);
@@ -700,7 +709,29 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
             f << (first ? "\n  " : ",\n  ") << Json::quote(d.second) << ": " << Json::quote(ss.str());
             first = false;
         }
+        f << "\n};\nwindow.DIORAMA_PREFABS = {";
+        // the project's prefabs, by name (spawn("Name")), their files in the build too
+        bool firstP = true;
+        std::error_code pe;
+        if (!folder.empty())
+            for (const auto& e : fs::recursive_directory_iterator(fs::u8path(folder) / "assets", pe)) {
+                if (e.path().extension() != ".prefab") continue;
+                std::vector<Object> objs;
+                if (!loadPrefab(e.path().u8string(), objs)) continue;
+                for (auto& o : objs) { take(o.file); for (auto& sc : o.scripts) take(sc.file); }
+                Project tmp; Scene::Marker k; k.objects = objs; tmp.markers.push_back(k);
+                f << (firstP ? "\n  " : ",\n  ") << Json::quote(e.path().stem().u8string()) << ": (" << Scene::toJson(tmp) << ").markers[0].objects";
+                firstP = false;
+            }
         f << "\n};\n";
+        // scripts the prefabs brought in
+        f << "(function (s) {";
+        for (const auto& d : done) {
+            if (fs::u8path(d.first).extension() != ".js") continue;
+            std::ifstream in(fs::u8path(d.first), std::ios::binary); std::stringstream ss; ss << in.rdbuf();
+            f << " s[" << Json::quote(d.second) << "] = s[" << Json::quote(d.second) << "] || " << Json::quote(ss.str()) << ";";
+        }
+        f << " })(window.DIORAMA_SCRIPTS);\n";
         if (!f) { err = "Couldn't write scene.js"; return false; }
     }
     // Play.bat: play it on this PC without a web host (a tiny local server: browsers only let a page load its pictures
@@ -870,6 +901,48 @@ static void menuBar() {
     ImGui::EndMainMenuBar();
 }
 
+
+// ---------- prefabs: an object and everything under it, kept as a file (assets/<name>.prefab) ----------
+// the file is a small Diorama project with one marker holding the objects (paths relative to the project)
+static bool savePrefab(const Scene::Marker& m, int rootId, const std::string& dir) {
+    Project tmp; Scene::Marker k; k.name = "prefab";
+    for (const Object& o : m.objects) if (isUnder(m, o.id, rootId)) { Object c = o; if (c.id == rootId) c.parent = -1; k.objects.push_back(c); }
+    if (k.objects.empty()) return false;
+    const fs::path base = fs::u8path(folder);
+    for (auto& o : k.objects) {
+        auto rel = [&](std::string& f) { if (f.empty()) return; std::error_code ec; const fs::path r = fs::relative(fs::u8path(f), base, ec); if (!ec && r.u8string().rfind("..", 0) != 0) f = r.generic_u8string(); };
+        rel(o.file); for (auto& sc : o.scripts) rel(sc.file);
+    }
+    tmp.markers.push_back(k);
+    std::string name = k.objects[0].name; for (auto& c : name) if (strchr("<>:\"/\\|?*", c)) c = '_';
+    fs::path f = fs::u8path(dir) / fs::u8path(name + ".prefab");
+    std::ofstream(f, std::ios::binary) << Scene::toJson(tmp);
+    say("Made a prefab: " + f.filename().u8string());
+    return true;
+}
+static bool loadPrefab(const std::string& file, std::vector<Object>& out) {
+    std::ifstream in(fs::u8path(file), std::ios::binary); std::stringstream ss; ss << in.rdbuf();
+    Project tmp; std::string err;
+    if (!Scene::fromJson(ss.str(), tmp, err) || tmp.markers.empty()) return false;
+    out = tmp.markers[0].objects;
+    const fs::path base = fs::u8path(folder);
+    for (auto& o : out) {
+        auto abs = [&](std::string& f) { if (!f.empty() && fs::u8path(f).is_relative()) f = (base / fs::u8path(f)).u8string(); };
+        abs(o.file); for (auto& sc : o.scripts) abs(sc.file);
+    }
+    return !out.empty();
+}
+// a copy of the prefab under onto (-1: the marker's top level), with new ids
+static int placePrefab(Scene::Marker& m, const std::string& file, int onto) {
+    std::vector<Object> objs;
+    if (!loadPrefab(file, objs)) { say("Couldn't read " + fs::u8path(file).filename().u8string()); return -1; }
+    std::map<int, int> ids;
+    for (auto& o : objs) ids[o.id] = newId(proj);
+    for (auto& o : objs) { o.parent = o.parent == -1 ? onto : ids[o.parent]; o.id = ids[o.id]; o.prefab = file; m.objects.push_back(o); }
+    reparent(m, objs[0].id, onto);
+    return objs[0].id;
+}
+
 // ---------- assets dropped from the Project window ----------
 static void dropAsset(Scene::Marker& m, int mi, int onto, const std::string& file) {
     beginEdit();
@@ -881,6 +954,7 @@ static void dropAsset(Scene::Marker& m, int mi, int onto, const std::string& fil
         selMarker = mi; selObject = onto;
         return;
     }
+    if (e == ".prefab") { const int id = placePrefab(m, file, onto); if (id >= 0) { selMarker = mi; selObject = id; } return; }
     int kind = -1;
     if (e == ".png" || e == ".jpg" || e == ".jpeg") kind = PICTURE;
     if (e == ".glb" || e == ".gltf") kind = MODEL;

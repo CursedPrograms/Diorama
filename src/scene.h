@@ -35,6 +35,7 @@ struct Object {
     bool lookOn = true;                // the look component's tick (kind EMPTY: none)
     bool animOn = true, hasAnim = false;   // the Animate component: there, and its tick
     std::vector<Script> scripts;
+    std::string prefab;                // the prefab it was placed from ("" none)
     bool expanded = true;              // open in the hierarchy
     // Transform
     float pos[3] = {0, 0, 0};

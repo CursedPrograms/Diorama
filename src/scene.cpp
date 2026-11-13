@@ -123,7 +123,7 @@ std::string toJson(const Project& p) {
               .s("file", o.file).b("lit", o.lit).b("glow", o.glow).b("billboard", o.billboard).s("anim", ANIM_NAMES[o.anim])
               .f("animSpeed", o.animSpeed).f("animAmount", o.animAmount).i("count", o.count).f("spriteSize", o.spriteSize).f("flap", o.flap)
               .i("rays", o.rays).s("text", o.text).s("clip", o.clip).f("clipSpeed", o.clipSpeed).b("clipLoop", o.clipLoop)
-              .b("lookOn", o.lookOn).b("hasAnim", o.hasAnim).b("animOn", o.animOn);
+              .b("lookOn", o.lookOn).b("hasAnim", o.hasAnim).b("animOn", o.animOn).s("prefab", o.prefab);
             ow.key("scripts"); ow.out += "[";
             for (size_t si = 0; si < o.scripts.size(); ++si) ow.out += std::string(si ? "," : "") + "{\"file\":" + Json::quote(o.scripts[si].file) + ",\"on\":" + (o.scripts[si].on ? "true" : "false") + "}";
             ow.out += "]";
@@ -168,6 +168,7 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
                 o.rays = (int)ov.num("rays", 6); o.text = ov.str("text", o.text);
                 o.clip = ov.str("clip"); o.clipSpeed = (float)ov.num("clipSpeed", 1); o.clipLoop = readBool(ov, "clipLoop", true);
                 o.lookOn = readBool(ov, "lookOn", true); o.animOn = readBool(ov, "animOn", true);
+                o.prefab = ov.str("prefab");
                 o.hasAnim = readBool(ov, "hasAnim", o.anim != A_STILL);
                 if (const Json::Value* ss = ov.get("scripts"))
                     for (const Json::Value& sv : ss->a) { Script sc; sc.file = sv.str("file"); sc.on = readBool(sv, "on", true); if (!sc.file.empty()) o.scripts.push_back(sc); }

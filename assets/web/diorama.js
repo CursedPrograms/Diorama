@@ -305,27 +305,21 @@
     }
     // a copy of an object (by name in the scene, or a prefab) and everything under it, made now
     function spawn(what, at) {
-      var src = null, data = null;
-      if (what && what.data) src = what.data;
-      else {
-        var hit = find(what);
-        if (hit) src = hit.data;
-        else if (window.DIORAMA_PREFABS && window.DIORAMA_PREFABS[what]) data = window.DIORAMA_PREFABS[what];
-      }
-      if (!src && !data) { report('error', '', 0, 'spawn: nothing called ' + what); return null; }
-      var list = data ? JSON.parse(JSON.stringify(data)) : null;
-      if (!list) {   // the object and its children, out of its anchor
-        list = []; var ids = {};
-        Object.keys(R.roots).forEach(function (k) {
-          (R.roots[k].userData.objects || []).forEach(function (o) { if (o.id === src.id || ids[o.parent]) { ids[o.id] = true; list.push(JSON.parse(JSON.stringify(o))); } });
-        });
-      }
+      // a prefab by that name first (like Instantiate(prefab)), else an object in the scene (spawned ones too)
+      var srcNode = null, data = null;
+      if (what && what.node) srcNode = what.node;
+      else if (window.DIORAMA_PREFABS && window.DIORAMA_PREFABS[what]) data = window.DIORAMA_PREFABS[what];
+      else { var hit = find(what); if (hit) srcNode = hit.node; }
+      if (!srcNode && !data) { report('error', '', 0, 'spawn: nothing called ' + what); return null; }
+      var list = data ? JSON.parse(JSON.stringify(data)) : [];
+      if (srcNode) srcNode.traverse(function (c) { if (c.userData.o) list.push(JSON.parse(JSON.stringify(c.userData.o))); });   // it and its children, parents first
+      var src = srcNode ? srcNode.userData.o : null;
       var remap = {}; list.forEach(function (o) { remap[o.id] = ++R.nextId; });
-      var parentNode = at && at.node ? at.node.parent : (src ? find(src.name).node.parent : R.roots[Object.keys(R.roots)[0]]);
+      var parentNode = at && at.node ? at.node.parent : (srcNode ? srcNode.parent : R.roots[Object.keys(R.roots)[0]]);
       var first = null, made = {};
       list.forEach(function (o, i) {
         var oldParent = o.parent;
-        o.id = remap[o.id]; o.parent = remap[oldParent] || -1;
+        o.id = remap[o.id]; o.parent = i === 0 ? -1 : (remap[oldParent] || -1);
         var n = build(o, R.players);
         (i === 0 ? parentNode : made[o.parent]).add(n); made[o.id] = n;
         R.nodes.push(n); attachScripts(n);
