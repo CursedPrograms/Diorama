@@ -114,7 +114,11 @@ std::string toJson(const Project& p) {
             ow.i("id", o.id).i("parent", o.parent).s("name", o.name).s("kind", KIND_NAMES[o.kind]).b("active", o.active).b("expanded", o.expanded)
               .s("file", o.file).b("lit", o.lit).b("glow", o.glow).b("billboard", o.billboard).s("anim", ANIM_NAMES[o.anim])
               .f("animSpeed", o.animSpeed).f("animAmount", o.animAmount).i("count", o.count).f("spriteSize", o.spriteSize).f("flap", o.flap)
-              .i("rays", o.rays).s("text", o.text).s("clip", o.clip).f("clipSpeed", o.clipSpeed).b("clipLoop", o.clipLoop);
+              .i("rays", o.rays).s("text", o.text).s("clip", o.clip).f("clipSpeed", o.clipSpeed).b("clipLoop", o.clipLoop)
+              .b("lookOn", o.lookOn).b("hasAnim", o.hasAnim).b("animOn", o.animOn);
+            ow.key("scripts"); ow.out += "[";
+            for (size_t si = 0; si < o.scripts.size(); ++si) ow.out += std::string(si ? "," : "") + "{\"file\":" + Json::quote(o.scripts[si].file) + ",\"on\":" + (o.scripts[si].on ? "true" : "false") + "}";
+            ow.out += "]";
             ow.key("position"); ow.out += arr(o.pos, 3);
             ow.key("rotation"); ow.out += arr(o.rot, 3);
             ow.key("scale"); ow.out += arr(o.scl, 3);
@@ -152,6 +156,10 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
                 o.count = (int)ov.num("count", 12); o.spriteSize = (float)ov.num("spriteSize", 0.15); o.flap = (float)ov.num("flap", 1);
                 o.rays = (int)ov.num("rays", 6); o.text = ov.str("text", o.text);
                 o.clip = ov.str("clip"); o.clipSpeed = (float)ov.num("clipSpeed", 1); o.clipLoop = readBool(ov, "clipLoop", true);
+                o.lookOn = readBool(ov, "lookOn", true); o.animOn = readBool(ov, "animOn", true);
+                o.hasAnim = readBool(ov, "hasAnim", o.anim != A_STILL);
+                if (const Json::Value* ss = ov.get("scripts"))
+                    for (const Json::Value& sv : ss->a) { Script sc; sc.file = sv.str("file"); sc.on = readBool(sv, "on", true); if (!sc.file.empty()) o.scripts.push_back(sc); }
                 readArr(ov, "position", o.pos, 3); readArr(ov, "rotation", o.rot, 3); readArr(ov, "scale", o.scl, 3); readArr(ov, "colour", o.colour, 4);
                 k.objects.push_back(o);
                 p.nextId = std::max(p.nextId, o.id + 1);
@@ -183,7 +191,7 @@ Project basicTemplate() {
     Project p;
     p.title = "My diorama";
     Marker k; k.id = newId(p); k.name = "Hiro"; k.preset = "hiro";
-    Object cube = make(p, CUBE, -1); cube.colour[0] = 0; cube.colour[1] = 0.48f; cube.colour[2] = 0.72f; cube.anim = A_SPIN; cube.animSpeed = 0.5f;
+    Object cube = make(p, CUBE, -1); cube.colour[0] = 0; cube.colour[1] = 0.48f; cube.colour[2] = 0.72f; cube.anim = A_SPIN; cube.hasAnim = true; cube.animSpeed = 0.5f;
     Object w = make(p, WORDS, -1); w.name = "Hello"; w.pos[1] = 0.6f;
     k.objects = {cube, w};
     p.markers.push_back(k);
@@ -206,11 +214,11 @@ Project galleryTemplate(const std::string& dir) {
     frame.colour[0] = 0.485f; frame.colour[1] = 0.171f; frame.colour[2] = 0.0f;
     Object bg = pic("BG", "tex_treesBG.png", 0, -0.418f, 0, 1.9155f);
     Object rays1 = pic("Godrays", "tex_godrays.png", 0, -0.189f, 0, 1.9155f); rays1.glow = true; rays1.colour[3] = 0.8f;
-    rays1.anim = A_PULSE; rays1.animSpeed = 0.4f; rays1.animAmount = 0.25f;
+    rays1.anim = A_PULSE; rays1.hasAnim = true; rays1.animSpeed = 0.4f; rays1.animAmount = 0.25f;
     Object rays2 = pic("Godrays", "tex_godrays.png", 0.116f, -0.175f, 0, 1.9155f); rays2.glow = true; rays2.colour[3] = 0.6f;
-    rays2.anim = A_PULSE; rays2.animSpeed = 0.3f; rays2.animAmount = 0.3f;
+    rays2.anim = A_PULSE; rays2.hasAnim = true; rays2.animSpeed = 0.3f; rays2.animAmount = 0.3f;
     Object woman = pic("Woman", "tex_woman00.png", 0.288f, -0.118f, -0.278f, 1.3644f);
-    woman.anim = A_FLOAT; woman.animSpeed = 0.5f; woman.animAmount = 0.015f;
+    woman.anim = A_FLOAT; woman.hasAnim = true; woman.animSpeed = 0.5f; woman.animAmount = 0.015f;
     Object bf = make(p, SPRITES, root.id); bf.name = "Butterflies"; bf.file = dir + "tex_butterfly.png"; bf.count = 10; bf.spriteSize = 0.22f;
     bf.scl[0] = 1.6f; bf.scl[2] = 1.1f; bf.scl[1] = 1.1f; bf.pos[1] = 0.15f; bf.animSpeed = 0.6f;
     k.objects = {root, bg, rays1, rays2, woman, frame, bf};

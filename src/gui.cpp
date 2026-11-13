@@ -611,66 +611,180 @@ static void markerInspector(Scene::Marker& m) {
     }
 }
 
+// a component's header, Unity's way: open/close, its tick (when it has one), its name, and a menu (Reset, Remove)
+enum { C_KEEP, C_RESET, C_REMOVE };
+static int componentHeader(const char* name, bool* on, bool removable) {
+    ImGui::Spacing();
+    ImGui::PushID(name);
+    ImGui::PushFont(boldFont);
+    const bool open = ImGui::CollapsingHeader("##hdr", ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_AllowOverlap);
+    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+    const ImVec2 after = ImGui::GetCursorScreenPos();
+    float x = a.x + 26;
+    if (on) {
+        ImGui::SetCursorScreenPos(ImVec2(x, a.y + 1));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 2));
+        ImGui::Checkbox("##on", on);
+        ImGui::PopStyleVar();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("On / off");
+        x += 24;
+    }
+    ImGui::GetWindowDrawList()->AddText(ImVec2(x, a.y + (b.y - a.y - ImGui::GetFontSize()) / 2), on && !*on ? C_DIM : C_TEXT, name);
+    ImGui::PopFont();
+    int act = C_KEEP;
+    ImGui::SetCursorScreenPos(ImVec2(b.x - 24, a.y + 1));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 2));
+    if (ImGui::SmallButton("\xe2\x8b\xae")) ImGui::OpenPopup("menu");   // a vertical ellipsis
+    ImGui::PopStyleVar();
+    if (ImGui::BeginPopup("menu")) {
+        if (ImGui::MenuItem("Reset")) act = C_RESET;
+        if (ImGui::MenuItem("Remove Component", nullptr, false, removable)) act = C_REMOVE;
+        if (!removable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Every object has a Transform");
+        ImGui::EndPopup();
+    }
+    ImGui::SetCursorScreenPos(after);
+    ImGui::PopID();
+    return open ? act | 0x100 : act;   // 0x100: open
+}
+
+// a look for the object: a mesh, a picture (asks which), a model (asks which), sprites, rays or words
+static bool giveLook(Object& o, int kind) {
+    const Object fresh = make(proj, kind, o.parent);
+    std::string file;
+    if (kind == PICTURE || kind == SPRITES) { file = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); if (file.empty()) return false; file = bring(file); }
+    if (kind == MODEL) { file = openDialog(L"3D models (glTF)\0*.glb;*.gltf\0\0"); if (file.empty()) return false; file = bring(file); }
+    o.kind = kind; o.lookOn = true; o.file = file;
+    memcpy(o.colour, fresh.colour, sizeof o.colour); o.lit = fresh.lit; o.glow = fresh.glow; o.billboard = fresh.billboard;
+    if (kind == MODEL) { const auto c = Viewer::clipsOf(o.file); o.clip = c.empty() ? "" : c[0]; }
+    return true;
+}
+static std::string scriptsDir() {
+    const fs::path d = folder.empty() ? fs::u8path(documents()) / "Diorama" / "scripts" : fs::u8path(folder) / "assets" / "scripts";
+    std::error_code ec; fs::create_directories(d, ec);
+    return d.u8string();
+}
+static void newScript(Object& o) {
+    std::string base = o.name; for (auto& c : base) if (!isalnum((unsigned char)c)) c = '_';
+    fs::path f = fs::u8path(scriptsDir()) / (base + ".js");
+    for (int k = 2; fs::exists(f); ++k) f = fs::u8path(scriptsDir()) / (base + std::to_string(k) + ".js");
+    std::ofstream(f, std::ios::binary) <<
+        "// " << o.name << ": runs on this object, in Diorama and on the phone.\n"
+        "// this.position, this.rotation, this.scale: its Transform (arrays of 3). time(): seconds since it started.\n\n"
+        "function start() {\n  // once, when the marker is first seen\n}\n\n"
+        "function update(dt) {\n  // every frame; dt: seconds since the last one\n}\n\n"
+        "function onTap() {\n  // when it's tapped\n}\n";
+    o.scripts.push_back({f.u8string(), true});
+}
+static void addComponentMenu(Object& o) {
+    const bool hasLook = o.kind != EMPTY;
+    if (ImGui::BeginMenu("Mesh", !hasLook)) {
+        for (int k : {PLANE, CUBE, SPHERE, CAPSULE, CYLINDER, QUAD}) if (ImGui::MenuItem(KIND_NAMES[k])) giveLook(o, k);
+        ImGui::EndMenu();
+    }
+    if (ImGui::MenuItem("Picture...", nullptr, false, !hasLook)) giveLook(o, PICTURE);
+    if (ImGui::MenuItem("Model...", nullptr, false, !hasLook)) giveLook(o, MODEL);
+    if (ImGui::MenuItem("Sprites...", nullptr, false, !hasLook)) giveLook(o, SPRITES);
+    if (ImGui::MenuItem("Light rays", nullptr, false, !hasLook)) giveLook(o, RAYS);
+    if (ImGui::MenuItem("Words", nullptr, false, !hasLook)) giveLook(o, WORDS);
+    if (hasLook) ImGui::TextDisabled("(it has a look already: remove it to pick another)");
+    ImGui::Separator();
+    if (ImGui::MenuItem("Animate", nullptr, false, !o.hasAnim)) { o.hasAnim = true; o.animOn = true; if (o.anim == A_STILL) o.anim = A_FLOAT; }
+    if (ImGui::BeginMenu("Script")) {
+        if (ImGui::MenuItem("New Script")) newScript(o);
+        if (ImGui::MenuItem("Existing Script...")) { const std::string f = openDialog(L"JavaScript\0*.js\0\0"); if (!f.empty()) o.scripts.push_back({bring(f), true}); }
+        ImGui::EndMenu();
+    }
+}
+
 static void objectInspector(Scene::Marker& m, Object& o) {
-    ImGui::Checkbox("##active", &o.active); tip("Active");
+    ImGui::Checkbox("##active", &o.active); tip("Active: off hides it and everything under it");
     ImGui::SameLine();
     char name[96]; snprintf(name, sizeof name, "%s", o.name.c_str());
     ImGui::SetNextItemWidth(-1); if (ImGui::InputText("##name", name, sizeof name)) o.name = name;
-    ImGui::TextDisabled("%s", KIND_NAMES[o.kind]);
-    if (section("Transform")) {
-        vec3Row("Position", o.pos, 0.005f);
-        vec3Row("Rotation", o.rot, 0.5f);
-        vec3Row("Scale", o.scl, 0.005f);
-        if (ImGui::SmallButton("Reset")) { for (int k = 0; k < 3; ++k) { o.pos[k] = 0; o.rot[k] = 0; o.scl[k] = 1; } }
-    }
+    // Transform: every object has one
+    int h = componentHeader("Transform", nullptr, false);
+    if ((h & 0xff) == C_RESET) for (int k = 0; k < 3; ++k) { o.pos[k] = 0; o.rot[k] = 0; o.scl[k] = 1; }
+    if (h & 0x100) { vec3Row("Position", o.pos, 0.005f); vec3Row("Rotation", o.rot, 0.5f); vec3Row("Scale", o.scl, 0.005f); }
+
     const wchar_t* PICS = L"Pictures\0*.png;*.jpg;*.jpeg\0\0";
-    if (o.kind == MODEL && section("Model")) {
-        if (fileRow("File", o.file, L"3D models (glTF)\0*.glb;*.gltf\0\0")) { Viewer::reload(o.file); const auto c = Viewer::clipsOf(o.file); o.clip = c.empty() ? "" : c[0]; }
-        const auto clips = o.file.empty() ? std::vector<std::string>() : Viewer::clipsOf(o.file);
-        labelled("Animation");
-        if (ImGui::BeginCombo("##clip", o.clip.empty() ? "(none)" : o.clip.c_str())) {
-            if (ImGui::Selectable("(none)", o.clip.empty())) o.clip.clear();
-            for (const auto& c : clips) if (ImGui::Selectable(c.c_str(), o.clip == c)) o.clip = c;
-            ImGui::EndCombo();
+    // the look, with its material
+    if (o.kind != EMPTY) {
+        const std::string title = isPrimitive(o.kind) ? std::string("Mesh: ") + KIND_NAMES[o.kind] : KIND_NAMES[o.kind];
+        h = componentHeader(title.c_str(), &o.lookOn, true);
+        if ((h & 0xff) == C_REMOVE) { o.kind = EMPTY; o.file.clear(); }
+        else {
+            if ((h & 0xff) == C_RESET) { const int k = o.kind; const std::string f = o.file; const Object fresh = make(proj, k, o.parent);
+                memcpy(o.colour, fresh.colour, sizeof o.colour); o.lit = fresh.lit; o.glow = fresh.glow; o.billboard = fresh.billboard; o.file = f;
+                o.count = fresh.count; o.spriteSize = fresh.spriteSize; o.flap = fresh.flap; o.rays = fresh.rays; o.text = fresh.text; o.clipSpeed = 1; o.clipLoop = true; }
+            if (h & 0x100) {
+                if (o.kind == MODEL) {
+                    if (fileRow("File", o.file, L"3D models (glTF)\0*.glb;*.gltf\0\0")) { Viewer::reload(o.file); const auto c = Viewer::clipsOf(o.file); o.clip = c.empty() ? "" : c[0]; }
+                    const auto clips = o.file.empty() ? std::vector<std::string>() : Viewer::clipsOf(o.file);
+                    labelled("Animation");
+                    if (ImGui::BeginCombo("##clip", o.clip.empty() ? "(none)" : o.clip.c_str())) {
+                        if (ImGui::Selectable("(none)", o.clip.empty())) o.clip.clear();
+                        for (const auto& c : clips) if (ImGui::Selectable(c.c_str(), o.clip == c)) o.clip = c;
+                        ImGui::EndCombo();
+                    }
+                    if (clips.empty() && !o.file.empty()) ImGui::TextDisabled("This model has no animations.");
+                    labelled("Speed"); ImGui::SliderFloat("##cs", &o.clipSpeed, 0, 3, "%.2f");
+                    ImGui::Checkbox("Loop", &o.clipLoop);
+                }
+                if (o.kind == PICTURE) { fileRow("File", o.file, PICS); ImGui::TextDisabled("Lies on the marker (Rotation X 90 stands it up)."); }
+                if (o.kind == SPRITES) {
+                    fileRow("Picture", o.file, PICS);
+                    labelled("How many"); ImGui::SliderInt("##cnt", &o.count, 1, 100);
+                    labelled("Size"); ImGui::SliderFloat("##ss", &o.spriteSize, 0.01f, 1, "%.2f");
+                    labelled("Flapping"); ImGui::SliderFloat("##flap", &o.flap, 0, 3, "%.2f"); tip("0: still pictures; 1: butterflies");
+                    labelled("Speed"); ImGui::SliderFloat("##spd", &o.animSpeed, 0, 3, "%.2f");
+                    ImGui::TextDisabled("They fly round inside the object's box (its scale).");
+                }
+                if (o.kind == RAYS) { labelled("How many"); ImGui::SliderInt("##rays", &o.rays, 1, 24); }
+                if (o.kind == WORDS) { char t[256]; snprintf(t, sizeof t, "%s", o.text.c_str()); ImGui::SetNextItemWidth(-1); if (ImGui::InputText("##text", t, sizeof t)) o.text = t; }
+                // its material
+                ImGui::SeparatorText("Material");
+                labelled("Colour"); ImGui::ColorEdit4("##col", o.colour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                if (isPrimitive(o.kind)) fileRow("Texture", o.file, PICS);
+                ImGui::Checkbox("Lit", &o.lit); tip("Shaded by the marker's lights");
+                ImGui::SameLine(); ImGui::Checkbox("Glow", &o.glow); tip("Added on as light (god rays, sparks)");
+                if (o.kind == QUAD || o.kind == PICTURE || o.kind == WORDS) { ImGui::SameLine(); ImGui::Checkbox("Faces the phone", &o.billboard); }
+            }
         }
-        if (clips.empty() && !o.file.empty()) ImGui::TextDisabled("This model has no animations.");
-        labelled("Speed"); ImGui::SliderFloat("##cs", &o.clipSpeed, 0, 3, "%.2f");
-        ImGui::Checkbox("Loop", &o.clipLoop);
-        ImGui::TextDisabled("Bones and animations from glTF / GLB play as they were made.");
     }
-    if (o.kind == PICTURE && section("Picture")) {
-        fileRow("File", o.file, PICS);
-        ImGui::TextDisabled("Lies on the marker (rotate X by 90 to stand it up); see-through where the picture is.");
-    }
-    if (o.kind == SPRITES && section("Sprites")) {
-        fileRow("Picture", o.file, PICS);
-        labelled("How many"); ImGui::SliderInt("##cnt", &o.count, 1, 100);
-        labelled("Size"); ImGui::SliderFloat("##ss", &o.spriteSize, 0.01f, 1, "%.2f");
-        labelled("Flapping"); ImGui::SliderFloat("##flap", &o.flap, 0, 3, "%.2f"); tip("0: still pictures; 1: butterflies");
-        labelled("Speed"); ImGui::SliderFloat("##spd", &o.animSpeed, 0, 3, "%.2f");
-        ImGui::TextDisabled("They fly round inside the object's box (its scale).");
-    }
-    if (o.kind == RAYS && section("Light rays")) { labelled("How many"); ImGui::SliderInt("##rays", &o.rays, 1, 24); }
-    if (o.kind == WORDS && section("Words")) {
-        char t[256]; snprintf(t, sizeof t, "%s", o.text.c_str());
-        ImGui::SetNextItemWidth(-1); if (ImGui::InputText("##text", t, sizeof t)) o.text = t;
-    }
-    if (o.kind != EMPTY && section("Material")) {
-        labelled("Colour"); ImGui::ColorEdit4("##col", o.colour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
-        if (isPrimitive(o.kind)) fileRow("Texture", o.file, PICS);
-        ImGui::Checkbox("Lit", &o.lit); tip("Shaded by the marker's lights");
-        ImGui::SameLine(); ImGui::Checkbox("Glow", &o.glow); tip("Added on as light (god rays, sparks)");
-        if (o.kind == QUAD || o.kind == PICTURE || o.kind == WORDS) { ImGui::SameLine(); ImGui::Checkbox("Faces the phone", &o.billboard); }
-    }
-    if (o.kind != SPRITES && section("Animate")) {
-        labelled("Does"); ImGui::Combo("##anim", &o.anim, ANIM_NAMES, ANIM_COUNT);
-        if (o.anim != A_STILL) {
-            labelled("Speed"); ImGui::SliderFloat("##asp", &o.animSpeed, 0, 3, "%.2f");
-            if (o.anim != A_SPIN) { labelled("Amount"); ImGui::SliderFloat("##aam", &o.animAmount, 0, 1, "%.3f"); }
+    // Animate
+    if (o.hasAnim) {
+        h = componentHeader("Animate", &o.animOn, true);
+        if ((h & 0xff) == C_REMOVE) { o.hasAnim = false; o.anim = A_STILL; }
+        else {
+            if ((h & 0xff) == C_RESET) { o.anim = A_FLOAT; o.animSpeed = 1; o.animAmount = 0.1f; }
+            if (h & 0x100) {
+                labelled("Does"); ImGui::Combo("##anim", &o.anim, ANIM_NAMES, ANIM_COUNT);
+                if (o.anim != A_STILL) {
+                    labelled("Speed"); ImGui::SliderFloat("##asp", &o.animSpeed, 0, 3, "%.2f");
+                    if (o.anim != A_SPIN) { labelled("Amount"); ImGui::SliderFloat("##aam", &o.animAmount, 0, 1, "%.3f"); }
+                }
+            }
         }
     }
-    ImGui::Spacing();
-    if (section("Script")) ImGui::TextDisabled("JavaScript behaviours (start, update, onTap) come next:\nthey run here and on the phone.");
+    // Scripts
+    for (size_t si = 0; si < o.scripts.size(); ++si) {
+        ImGui::PushID((int)si);
+        Script& sc = o.scripts[si];
+        const std::string title = "Script: " + fs::u8path(sc.file).filename().u8string();
+        h = componentHeader(title.c_str(), &sc.on, true);
+        if ((h & 0xff) == C_REMOVE) { o.scripts.erase(o.scripts.begin() + si); ImGui::PopID(); break; }
+        if (h & 0x100) {
+            fileRow("File", sc.file, L"JavaScript\0*.js\0\0");
+            ImGui::TextDisabled("The script editor and running scripts come next.");
+        }
+        ImGui::PopID();
+    }
+    // Add Component
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    const float bw = 200;
+    ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - bw) / 2 + ImGui::GetCursorPosX());
+    if (ImGui::Button("Add Component", ImVec2(bw, 28))) ImGui::OpenPopup("addcomp");
+    if (ImGui::BeginPopup("addcomp")) { addComponentMenu(o); ImGui::EndPopup(); }
     (void)m;
 }
 

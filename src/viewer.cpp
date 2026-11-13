@@ -439,7 +439,7 @@ static M4 localOf(const Object& o, float t, float* opacityMul) {
     float pos[3] = {o.pos[0], o.pos[1], o.pos[2]}, rot[3] = {o.rot[0], o.rot[1], o.rot[2]};
     const float ph = t * o.animSpeed * 6.2831853f;
     if (opacityMul) *opacityMul = 1;
-    switch (o.anim) {
+    switch (o.hasAnim && o.animOn ? o.anim : A_STILL) {
     case A_FLOAT: pos[1] += std::sin(ph) * o.animAmount; break;
     case A_SPIN: rot[1] += t * o.animSpeed * 360.0f; break;
     case A_SWAY: rot[2] += std::sin(ph) * o.animAmount * 90.0f; break;
@@ -642,6 +642,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
             lastWorld[o.id] = {world, parent};
             const float c[3] = {world.m[12], world.m[13], world.m[14]};
             const float vz = viewM.m[2] * c[0] + viewM.m[6] * c[1] + viewM.m[10] * c[2] + viewM.m[14];
+            if (!o.lookOn || o.kind == EMPTY) continue;   // (its children are placed already)
             const bool blend = o.kind == PICTURE || o.kind == SPRITES || o.kind == RAYS || o.kind == WORDS || o.colour[3] < 0.999f || o.glow;
             draws.push_back({world, &o, vz, portal && c[1] < -0.01f, blend});
             // where it is on screen (for clicking it)

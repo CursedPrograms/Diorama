@@ -16,12 +16,19 @@ enum Anim { A_STILL, A_FLOAT, A_SPIN, A_SWAY, A_PULSE, ANIM_COUNT };
 extern const char* ANIM_NAMES[ANIM_COUNT];
 enum MarkerType { MK_PATTERN, MK_BARCODE, MARKER_TYPE_COUNT };
 
+struct Script { std::string file; bool on = true; };   // a JavaScript behaviour (assets/...js), muted when off
+
+// an object is an empty with a Transform; the rest are components, each can be switched off or removed:
+// its look (kind: a mesh, a picture, a model, sprites, light rays or words, with its material), Animate, Scripts
 struct Object {
     int id = 0;                        // unique in the project; parents are named by it
     int parent = -1;                   // -1: right under the marker
     std::string name = "GameObject";
     int kind = EMPTY;
     bool active = true;
+    bool lookOn = true;                // the look component's tick (kind EMPTY: none)
+    bool animOn = true, hasAnim = false;   // the Animate component: there, and its tick
+    std::vector<Script> scripts;
     bool expanded = true;              // open in the hierarchy
     // Transform
     float pos[3] = {0, 0, 0};
