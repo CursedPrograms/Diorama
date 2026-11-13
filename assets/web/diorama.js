@@ -193,8 +193,13 @@
   window.Diorama = {
     say: say,
     start: function (sceneUrl) {
+      if (location.protocol === 'file:') {
+        // a page opened straight from the disk can't load its pictures and models: say how to play it
+        say('Double-click Play.bat in this folder to play it here, or put the folder on a web host (https) for phones.');
+        return;
+      }
       say('Loading the scene...');
-      loadJSON(sceneUrl, function (proj) {
+      var got = function (proj) {
         say('Starting the camera...');
         document.title = proj.title;
         window.ARThreeOnLoad = function () {
@@ -206,6 +211,9 @@
               document.body.className = arController.orientation;
               arController.setPatternDetectionMode(artoolkit.AR_TEMPLATE_MATCHING_COLOR_AND_MATRIX);
               arController.setMatrixCodeType(artoolkit.AR_MATRIX_CODE_3x3);
+              // the black-and-white split worked out from each picture (Otsu), not a fixed level: copes with dim or
+              // uneven light on the paper
+              try { arController.setThresholdMode(2); } catch (e) {}
               var renderer = new THREE.WebGLRenderer({ antialias: true });
               var fit = function () {
                 var vw = arController.videoWidth, vh = arController.videoHeight;
@@ -214,7 +222,7 @@
               };
               fit(); window.addEventListener('resize', fit);
               document.body.insertBefore(renderer.domElement, document.body.firstChild);
-              var nodes = [], players = [];
+              var nodes = [], players = [], roots = [];
               proj.markers.forEach(function (m) {
                 var root = new THREE.Group();
                 // the editor's Y-up marker space, laid on ARToolKit's (Z up out of the marker, Y towards its top)
@@ -233,14 +241,22 @@
                   var n = build(o, '', players);
                   byId[o.id] = n; parent.add(n); nodes.push(n);
                 });
-                var add = function (markerRoot) { markerRoot.add(root); arScene.scene.add(markerRoot); };
+                var add = function (markerRoot) { markerRoot.add(root); arScene.scene.add(markerRoot); markerRoot.userData.name = m.name; roots.push(markerRoot); };
                 if (m.type === 'barcode') add(arController.createThreeBarcodeMarker(m.barcode, 1));
                 else arController.loadMarker(m.patt, function (id) { add(arController.createThreeMarker(id, 1)); });
               });
-              var clock = new THREE.Clock(), t = 0;
+              var clock = new THREE.Clock(), t = 0, lastLine = '';
               var tick = function () {
                 var dt = clock.getDelta(); t += dt;
                 arScene.process();
+                // tracking flickers (a blurred frame, a glint): keep showing a marker for a moment where it last was
+                roots.forEach(function (r) {
+                  if (r.visible) { r.userData.seen = t; r.userData.last = r.matrix.clone(); }
+                  else if (r.userData.last && t - r.userData.seen < 0.35) { r.visible = true; r.matrix.copy(r.userData.last); }
+                });
+                var found = roots.filter(function (r) { return r.visible; }).map(function (r) { return r.userData.name; });
+                var line = found.length ? 'Found: ' + found.join(', ') : 'Point the camera at the marker.';
+                if (line !== lastLine) { say(line); lastLine = line; }
                 nodes.forEach(function (n) { animate(n, t, arScene.camera); });
                 players.forEach(function (p) { p.update(dt); });
                 arScene.renderOn(renderer);
@@ -252,7 +268,8 @@
           delete window.ARThreeOnLoad;
         };
         if (window.ARController && ARController.getUserMediaThreeScene) window.ARThreeOnLoad();
-      });
+      };
+      if (window.DIORAMA_SCENE) got(window.DIORAMA_SCENE); else loadJSON(sceneUrl, got);
     }
   };
 })();

@@ -170,6 +170,15 @@ static void redo() { if (redoStack.empty()) return; undoStack.push_back(proj); p
 static std::string markerAssets() { return (fs::u8path(exeDir) / "assets" / "markers").u8string(); }
 static Markers::Image insidePicture(const Scene::Marker& m) {
     Markers::Image im;
+    if (!m.preset.empty()) {   // Hiro, Kanji: the middle half of their black square
+        Markers::Image full;
+        if (Markers::load((fs::u8path(markerAssets()) / (m.preset + ".png")).u8string(), full)) {
+            const int x0 = full.w / 4, y0 = full.h / 4, w = full.w / 2, h = full.h / 2;
+            im.w = w; im.h = h; im.px.resize((size_t)w * h * 4);
+            for (int y = 0; y < h; ++y) memcpy(&im.px[(size_t)y * w * 4], &full.px[((size_t)(y + y0) * full.w + x0) * 4], (size_t)w * 4);
+            return im;
+        }
+    }
     if (!m.letter.empty()) return Markers::letterPicture(m.letter, 512, fontFile);
     if (!m.picture.empty() && Markers::load(m.picture, im)) return im;
     return im;
@@ -325,8 +334,8 @@ static bool buildGame(const std::string& out, std::string& err) {
         const std::string slug = slugOf(m.name) + "-" + std::to_string(i + 1);
         for (auto& ob : m.objects) take(ob.file);
         if (m.type == MK_PATTERN) {
-            if (!m.preset.empty()) fs::copy_file(fs::u8path(markerAssets()) / ("patt." + m.preset), o / "markers" / (slug + ".patt"), fs::copy_options::overwrite_existing, ec);
-            else { std::ofstream(o / "markers" / (slug + ".patt"), std::ios::binary) << Markers::pattFrom(insidePicture(m)); }
+            // every pattern file is written from the very picture that's printed, so the two always agree
+            std::ofstream(o / "markers" / (slug + ".patt"), std::ios::binary) << Markers::pattFrom(insidePicture(m));
             m.patt = "markers/" + slug + ".patt";
         }
         m.picture.clear();
@@ -337,6 +346,38 @@ static bool buildGame(const std::string& out, std::string& err) {
     if (!sheet.empty()) Markers::savePng((o / "markers.png").u8string(), Markers::sheet(sheet, fontFile));
     fs::copy_file(fs::u8path(exeDir) / "assets" / "logo.png", o / "icon.png", fs::copy_options::overwrite_existing, ec);
     { std::ofstream f(o / "scene.json", std::ios::binary); f << Scene::toJson(b); if (!f) { err = "Couldn't write scene.json"; return false; } }
+    { std::ofstream f(o / "scene.js", std::ios::binary); f << "// the scene, inside the page (so it needs no loading)\nwindow.DIORAMA_SCENE = " << Scene::toJson(b) << ";\n"; }
+    // Play.bat: play it on this PC without a web host (a tiny local server: browsers only let a page load its pictures
+    // and use the webcam when it comes from a server)
+    std::ofstream(o / "play.ps1", std::ios::binary) <<
+        "# Serves this folder on http://localhost:8765/ and opens it: the game, played on this PC.\r\n"
+        "$root = $PSScriptRoot; $port = 8765\r\n"
+        "$l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)\r\n"
+        "try { $l.Start() } catch { Write-Host \"Port $port is busy: is it already open?\"; Start-Process \"http://localhost:$port/\"; exit }\r\n"
+        "Start-Process \"http://localhost:$port/\"\r\n"
+        "Write-Host \"Playing on http://localhost:$port/  (close this window to stop)\"\r\n"
+        "$types = @{ '.html'='text/html'; '.js'='application/javascript'; '.json'='application/json'; '.png'='image/png'; '.jpg'='image/jpeg';\r\n"
+        "  '.jpeg'='image/jpeg'; '.glb'='model/gltf-binary'; '.gltf'='model/gltf+json'; '.wasm'='application/wasm'; '.mp3'='audio/mpeg'; '.ogg'='audio/ogg'; '.wav'='audio/wav' }\r\n"
+        "while ($true) {\r\n"
+        "  $c = $l.AcceptTcpClient(); $s = $c.GetStream(); $r = [System.IO.StreamReader]::new($s)\r\n"
+        "  $line = $r.ReadLine(); while (($h = $r.ReadLine()) -ne '' -and $h -ne $null) {}\r\n"
+        "  $path = if ($line) { [Uri]::UnescapeDataString(($line -split ' ')[1].Split('?')[0]) } else { '/' }\r\n"
+        "  if ($path.EndsWith('/')) { $path += 'index.html' }\r\n"
+        "  $file = [System.IO.Path]::GetFullPath((Join-Path $root $path.TrimStart('/')))\r\n"
+        "  if ($file.StartsWith($root) -and (Test-Path $file -PathType Leaf)) {\r\n"
+        "    $body = [System.IO.File]::ReadAllBytes($file); $t = $types[[System.IO.Path]::GetExtension($file).ToLower()]; if (-not $t) { $t = 'application/octet-stream' }\r\n"
+        "    $head = \"HTTP/1.0 200 OK`r`nContent-Type: $t`r`nContent-Length: $($body.Length)`r`nCache-Control: no-store`r`n`r`n\"\r\n"
+        "  } else { $body = [Text.Encoding]::ASCII.GetBytes('Not found'); $head = \"HTTP/1.0 404 Not Found`r`nContent-Length: 9`r`n`r`n\" }\r\n"
+        "  $hb = [Text.Encoding]::ASCII.GetBytes($head); try { $s.Write($hb, 0, $hb.Length); $s.Write($body, 0, $body.Length) } catch {}\r\n"
+        "  $c.Close()\r\n"
+        "}\r\n";
+    std::ofstream(o / "Play.bat", std::ios::binary) <<
+        "@echo off\r\nrem Plays this game on this PC: a little local server, then the browser (allow the webcam).\r\n"
+        "powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0play.ps1\"\r\n";
+    std::ofstream(o / "play.sh", std::ios::binary) <<
+        "#!/usr/bin/env bash\n# Plays this game on this PC: a little local server, then the browser (allow the webcam).\n"
+        "cd \"$(dirname \"$0\")\"\n(sleep 1; xdg-open http://localhost:8765/ 2>/dev/null || open http://localhost:8765/) &\n"
+        "python3 -m http.server 8765 --bind 127.0.0.1\n";
     // the page
     std::string title;
     for (char c : proj.title) { if (c == '<') title += "&lt;"; else if (c == '&') title += "&amp;"; else title += c; }
@@ -350,13 +391,14 @@ static bool buildGame(const std::string& out, std::string& err) {
          "    #hint a { color: #34a9e3; }\n  </style>\n</head>\n<body>\n"
          "  <div id=\"hint\">Point the camera at the marker. <a href=\"markers.png\" target=\"_blank\">Print the markers</a></div>\n"
          "  <script src=\"lib/three.min.js\"></script>\n  <script src=\"lib/GLTFLoader.js\"></script>\n"
-         "  <script src=\"lib/diorama.js\"></script>\n"
+         "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"scene.js\"></script>\n"
          "  <script>Diorama.start('scene.json');</script>\n"
          "  <script async src=\"lib/artoolkit.min.js\"></script>\n  <script async src=\"lib/artoolkit.three.js\"></script>\n"
          "  <!-- Made with Diorama (Cursed Entertainment). jsartoolkit5: LGPL-3.0; three.js: MIT (see lib/). -->\n"
          "</body>\n</html>\n";
     std::ofstream(o / "README.txt", std::ios::binary) <<
         proj.title << ", made with Diorama.\n\n"
+        "To play it on this PC: double-click Play.bat (opening index.html straight from the disk can't load the game).\n\n"
         "A static website: put this folder on any web host with https (GitHub Pages, Netlify, itch.io) and open it on a phone;\n"
         "phones only let a page use the camera over https. Print markers.png at 100% and point the camera at a marker.\n"
         "On this PC: Diorama's File > Build And Run serves it on http://localhost (the browser allows the webcam there).\n";

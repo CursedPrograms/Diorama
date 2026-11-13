@@ -1,0 +1,19 @@
+Diorama
+Copyright (c) 2026 Cursed Entertainment. MIT license: see LICENSE.
+
+Shipped inside every game Diorama builds (assets/web/lib):
+- jsartoolkit5, https://github.com/artoolkitx/jsartoolkit5, LGPL-3.0 (lib/LICENSE-jsartoolkit5.txt).
+  Copyright (c) the ARToolKit and artoolkitX authors.
+- three.js r103 and its GLTFLoader, https://threejs.org, MIT (lib/LICENSE-three.txt).
+  Copyright (c) the three.js authors.
+- camera_para.dat, ARToolKit's default camera calibration (from jsartoolkit5's examples).
+- patt.hiro and patt.kanji, ARToolKit's sample markers, and the Hiro and Kanji pictures (from AR.js's markers).
+
+Built into Diorama:
+- Dear ImGui (MIT), https://github.com/ocornut/imgui
+- SDL2 (zlib), https://www.libsdl.org
+- cgltf (MIT), https://github.com/jkuhlmann/cgltf
+- stb_image, stb_image_write, stb_truetype (MIT / public domain), https://github.com/nothings/stb
+
+The art gallery template (templates/gallery): the pictures and the frame model are from
+https://github.com/CursedPrograms/ARToolkit-ArtGallery-Template (Cursed Entertainment).
