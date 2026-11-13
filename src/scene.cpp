@@ -103,6 +103,7 @@ std::string toJson(const Project& p) {
         w.i("id", k.id).s("name", k.name).s("type", k.type == MK_BARCODE ? "barcode" : "pattern").s("preset", k.preset).s("picture", k.picture)
          .s("letter", k.letter).i("barcode", k.barcode).f("sunStrength", k.sunStrength).f("sunYaw", k.sunYaw).f("sunPitch", k.sunPitch)
          .b("portal", k.portal).b("expanded", k.expanded);
+        if (!k.patt.empty()) w.s("patt", k.patt);
         w.key("ambient"); w.out += arr(k.ambient, 3);
         w.key("sun"); w.out += arr(k.sun, 3);
         w.key("portalSize"); w.out += arr(k.portalSize, 2);

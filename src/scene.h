@@ -1,7 +1,7 @@
 // Diorama - the project, laid out like Unity: AR markers at the top of the hierarchy, objects under them (and under
 // each other), each with a Transform (position, rotation in degrees, scale; Y up) and what it is: an empty, a plane,
 // cube, sphere, capsule, cylinder or quad, a picture, a 3D model, a flock of sprites, light rays or words.
-// On a marker: it lies in the XZ plane, Y comes up out of the paper, +Z is towards the marker's top; it's 1 across.
+// On a marker: it lies in the XZ plane, Y comes up out of the paper, -Z is towards the marker's top; it's 1 across.
 // Saved as <folder>/project.diorama (JSON); the files it uses go in <folder>/assets.
 #pragma once
 #include <string>
@@ -67,6 +67,7 @@ struct Marker {
     bool portal = false;
     float portalSize[2] = {0.9f, 0.9f};
     std::vector<Object> objects;       // parents before their children
+    std::string patt;                  // in a build only: its pattern file there
 };
 
 struct Project {

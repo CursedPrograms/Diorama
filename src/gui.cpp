@@ -6,6 +6,7 @@
 #include "marker.h"
 #include "scene.h"
 #include "splash.h"
+#include "serve.h"
 #include "viewer.h"
 
 #include <SDL.h>
@@ -22,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -266,6 +268,110 @@ static void addMarker() {
     selMarker = (int)proj.markers.size() - 1; selObject = -1;
 }
 
+
+// ---------- Build: the game as a static website (jsartoolkit5 + three.js), for phones and any web host ----------
+static std::string lastBuild;
+static bool copyTree(const fs::path& from, const fs::path& to) {
+    std::error_code ec;
+    fs::create_directories(to, ec);
+    fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    return !ec;
+}
+static std::string slugOf(const std::string& s) {
+    std::string o;
+    for (unsigned char c : s) o += (char)(isalnum(c) ? tolower(c) : '-');
+    while (o.find("--") != std::string::npos) o.erase(o.find("--"), 1);
+    while (!o.empty() && o.back() == '-') o.pop_back();
+    while (!o.empty() && o.front() == '-') o.erase(0, 1);
+    return o.empty() ? "game" : o;
+}
+static bool buildGame(const std::string& out, std::string& err) {
+    std::error_code ec;
+    const fs::path o = fs::u8path(out), web = fs::u8path(exeDir) / "assets" / "web";
+    fs::create_directories(o / "assets", ec); fs::create_directories(o / "markers", ec);
+    if (!copyTree(web / "lib", o / "lib") || !copyTree(web / "data", o / "data")) { err = "Couldn't copy the player into " + out; return false; }
+    fs::copy_file(web / "diorama.js", o / "lib" / "diorama.js", fs::copy_options::overwrite_existing, ec);
+    // the files the scene uses, each once, under assets/
+    Project b = proj;
+    std::map<std::string, std::string> done;
+    auto take = [&](std::string& f) {
+        if (f.empty()) return;
+        auto it = done.find(f);
+        if (it != done.end()) { f = it->second; return; }
+        const fs::path src = fs::u8path(f);
+        std::string name = src.filename().u8string();
+        for (int k = 2; fs::exists(o / "assets" / fs::u8path(name), ec) && std::none_of(done.begin(), done.end(), [&](const auto& d) { return d.second == "assets/" + name; }) == false; ++k)
+            name = src.stem().u8string() + "-" + std::to_string(k) + src.extension().u8string();
+        fs::copy_file(src, o / "assets" / fs::u8path(name), fs::copy_options::overwrite_existing, ec);
+        const std::string key = f; f = "assets/" + name; done[key] = f;
+    };
+    // the markers: their pattern files (made from their pictures), their printable pictures, a sheet of them all
+    std::vector<std::pair<Markers::Image, std::string>> sheet;
+    for (size_t i = 0; i < b.markers.size(); ++i) {
+        Scene::Marker& m = b.markers[i];
+        const std::string slug = slugOf(m.name) + "-" + std::to_string(i + 1);
+        for (auto& ob : m.objects) take(ob.file);
+        if (m.type == MK_PATTERN) {
+            if (!m.preset.empty()) fs::copy_file(fs::u8path(markerAssets()) / ("patt." + m.preset), o / "markers" / (slug + ".patt"), fs::copy_options::overwrite_existing, ec);
+            else { std::ofstream(o / "markers" / (slug + ".patt"), std::ios::binary) << Markers::pattFrom(insidePicture(m)); }
+            m.patt = "markers/" + slug + ".patt";
+        }
+        m.picture.clear();
+        const Markers::Image im = printable(proj.markers[i], 1024);
+        Markers::savePng((o / "markers" / (slug + ".png")).u8string(), im);
+        sheet.push_back({im, m.name + (m.type == MK_BARCODE ? "  (barcode " + std::to_string(m.barcode) + ")" : "")});
+    }
+    if (!sheet.empty()) Markers::savePng((o / "markers.png").u8string(), Markers::sheet(sheet, fontFile));
+    fs::copy_file(fs::u8path(exeDir) / "assets" / "logo.png", o / "icon.png", fs::copy_options::overwrite_existing, ec);
+    { std::ofstream f(o / "scene.json", std::ios::binary); f << Scene::toJson(b); if (!f) { err = "Couldn't write scene.json"; return false; } }
+    // the page
+    std::string title;
+    for (char c : proj.title) { if (c == '<') title += "&lt;"; else if (c == '&') title += "&amp;"; else title += c; }
+    std::ofstream h(o / "index.html", std::ios::binary);
+    h << "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n"
+         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n"
+         "  <title>" << title << "</title>\n"
+         "  <style>\n    html, body { margin: 0; background: #111; color: #e6e6e6; font-family: 'Segoe UI', Arial, sans-serif; overflow: hidden; }\n"
+         "    canvas { display: block; margin: 0 auto; }\n"
+         "    #hint { position: fixed; left: 0; right: 0; bottom: 14px; text-align: center; font-size: 14px; opacity: 0.8; }\n"
+         "    #hint a { color: #34a9e3; }\n  </style>\n</head>\n<body>\n"
+         "  <div id=\"hint\">Point the camera at the marker. <a href=\"markers.png\" target=\"_blank\">Print the markers</a></div>\n"
+         "  <script src=\"lib/three.min.js\"></script>\n  <script src=\"lib/GLTFLoader.js\"></script>\n"
+         "  <script src=\"lib/diorama.js\"></script>\n"
+         "  <script>Diorama.start('scene.json');</script>\n"
+         "  <script async src=\"lib/artoolkit.min.js\"></script>\n  <script async src=\"lib/artoolkit.three.js\"></script>\n"
+         "  <!-- Made with Diorama (Cursed Entertainment). jsartoolkit5: LGPL-3.0; three.js: MIT (see lib/). -->\n"
+         "</body>\n</html>\n";
+    std::ofstream(o / "README.txt", std::ios::binary) <<
+        proj.title << ", made with Diorama.\n\n"
+        "A static website: put this folder on any web host with https (GitHub Pages, Netlify, itch.io) and open it on a phone;\n"
+        "phones only let a page use the camera over https. Print markers.png at 100% and point the camera at a marker.\n"
+        "On this PC: Diorama's File > Build And Run serves it on http://localhost (the browser allows the webcam there).\n";
+    lastBuild = out;
+    return true;
+}
+static void buildDialog(bool run) {
+    std::string out = lastBuild;
+    if (out.empty() || !run) {
+        const std::string base = folder.empty() ? (fs::u8path(documents()) / "Diorama" / "Builds").u8string() : (fs::u8path(folder) / "Build").u8string();
+        std::error_code ec; fs::create_directories(fs::u8path(base), ec);
+        if (!run || lastBuild.empty()) {
+            const std::string pick = pickFolder();
+            if (pick.empty()) return;
+            out = (fs::u8path(pick) / fs::u8path(slugOf(proj.title))).u8string();
+        }
+    }
+    std::string err;
+    if (!buildGame(out, err)) { say(err); return; }
+    if (!run) { say("Built: " + out + " (a static website: upload the folder to any https host)"); openInExplorer(out); return; }
+    const int port = 8765;
+    if (!Serve::start(out, port)) { say("Couldn't start the test server on port 8765"); return; }
+#ifdef _WIN32
+    ShellExecuteW(nullptr, L"open", (L"http://localhost:" + std::to_wstring(port) + L"/").c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+    say("Running on http://localhost:" + std::to_string(port) + "/ : allow the webcam, hold up the printed marker");
+}
+
 // ---------- the menus ----------
 static void gameObjectItems() {
     if (ImGui::MenuItem("Create Empty", "Ctrl+Shift+N")) create(EMPTY);
@@ -298,6 +404,9 @@ static void menuBar() {
         if (ImGui::MenuItem("Save", "Ctrl+S")) saveProject(false);
         if (ImGui::MenuItem("Save As...")) saveProject(true);
         if (!folder.empty() && ImGui::MenuItem("Show the project folder")) openInExplorer(folder);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Build Game...", "Ctrl+B")) buildDialog(false);
+        if (ImGui::MenuItem("Build And Run", "Ctrl+Shift+B")) buildDialog(true);
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Ctrl+Q")) quit = true;
         ImGui::EndMenu();
@@ -595,6 +704,7 @@ static void keys() {
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Q)) quit = true;
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) { const std::string f = openDialog(L"Diorama project\0*.diorama\0\0"); if (!f.empty()) openProject(f); }
     if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_N)) create(EMPTY);
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_B)) buildDialog(io.KeyShift);
     if (m && selObject >= 0 && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) selObject = duplicate(proj, *m, selObject);
     if (m && selObject >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) { remove(*m, selObject); selObject = -1; }
 }
@@ -626,7 +736,7 @@ static void frame() {
 }
 
 int main(int argc, char** argv) {
-    std::string capture, tmpl = "gallery", openArg; int selectArg = -1;
+    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1;
     std::vector<std::string> args;
 #ifdef _WIN32
     { int n; LPWSTR* wa = CommandLineToArgvW(GetCommandLineW(), &n); if (wa) { for (int i = 1; i < n; ++i) args.push_back(fs::path(wa[i]).u8string()); LocalFree(wa); } }
@@ -639,6 +749,7 @@ int main(int argc, char** argv) {
         if (args[i] == "--capture" && i + 1 < args.size()) capture = args[++i];
         else if (args[i] == "--template" && i + 1 < args.size()) tmpl = args[++i];
         else if (args[i] == "--select" && i + 1 < args.size()) selectArg = atoi(args[++i].c_str());
+        else if (args[i] == "--build" && i + 1 < args.size()) buildArg = args[++i];
         else openArg = args[i];
     }
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) return 1;
@@ -695,6 +806,7 @@ int main(int argc, char** argv) {
     }
     Viewer::init(exeDir);
     if (!openArg.empty()) openProject(openArg); else newFromTemplate(tmpl == "basic" ? 0 : 1);
+    if (!buildArg.empty()) { std::string err; const bool ok = buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
     if (capture.empty()) { SDL_ShowWindow(window); SDL_MaximizeWindow(window); SDL_RaiseWindow(window); }
 
