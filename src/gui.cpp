@@ -632,9 +632,9 @@ static int componentHeader(const char* name, bool* on, bool removable) {
     ImGui::GetWindowDrawList()->AddText(ImVec2(x, a.y + (b.y - a.y - ImGui::GetFontSize()) / 2), on && !*on ? C_DIM : C_TEXT, name);
     ImGui::PopFont();
     int act = C_KEEP;
-    ImGui::SetCursorScreenPos(ImVec2(b.x - 24, a.y + 1));
+    ImGui::SetCursorScreenPos(ImVec2(b.x - 30, a.y + 1));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 2));
-    if (ImGui::SmallButton("\xe2\x8b\xae")) ImGui::OpenPopup("menu");   // a vertical ellipsis
+    if (ImGui::SmallButton("...")) ImGui::OpenPopup("menu");
     ImGui::PopStyleVar();
     if (ImGui::BeginPopup("menu")) {
         if (ImGui::MenuItem("Reset")) act = C_RESET;
