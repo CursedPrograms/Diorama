@@ -8,6 +8,8 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <vector>
+#include "json.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -34,6 +36,8 @@ static std::string root;
 static std::atomic<bool> running{false};
 static Sock listener = INVALID_SOCKET;
 static int thePort = 0;
+static std::vector<Log> logs;
+std::vector<Log> takeLogs() { std::lock_guard<std::mutex> g(mtx); std::vector<Log> v; v.swap(logs); return v; }
 int port() { return thePort; }
 
 static const char* typeOf(const std::string& ext) {
@@ -51,11 +55,28 @@ static const char* typeOf(const std::string& ext) {
 }
 
 static void answer(Sock c) {
-    char buf[4096];
-    const int n = recv(c, buf, sizeof buf - 1, 0);
+    std::string req;
+    char buf[8192];
+    int n = recv(c, buf, sizeof buf, 0);
     if (n <= 0) { closeSock(c); return; }
-    buf[n] = 0;
-    std::string req(buf), path = "/";
+    req.assign(buf, n);
+    // a POST's body may come after the headers in another read
+    const size_t he = req.find("\r\n\r\n");
+    if (req.rfind("POST ", 0) == 0 && he != std::string::npos) {
+        size_t len = 0; const size_t cl = req.find("Content-Length:");
+        if (cl != std::string::npos) len = (size_t)atol(req.c_str() + cl + 15);
+        while (req.size() < he + 4 + len && (n = recv(c, buf, sizeof buf, 0)) > 0) req.append(buf, n);
+        if (req.rfind("POST /__log", 0) == 0) {
+            Json::Value v;
+            if (Json::parse(req.substr(he + 4), v)) {
+                Log l; l.level = v.str("level", "log"); l.file = v.str("file"); l.text = v.str("text"); l.line = (int)v.num("line", 0);
+                std::lock_guard<std::mutex> g(mtx); logs.push_back(l); if (logs.size() > 2000) logs.erase(logs.begin());
+            }
+        }
+        const std::string ok = "HTTP/1.0 204 No Content\r\nConnection: close\r\n\r\n";
+        send(c, ok.data(), (int)ok.size(), 0); closeSock(c); return;
+    }
+    std::string path = "/";
     if (req.rfind("GET ", 0) == 0) { const size_t e = req.find(' ', 4); path = req.substr(4, e - 4); }
     const size_t q = path.find('?'); if (q != std::string::npos) path.resize(q);
     // %20 and friends

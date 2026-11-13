@@ -8,6 +8,8 @@
 #include "splash.h"
 #include "serve.h"
 #include "viewer.h"
+#include "TextEditor.h"
+#include "json.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -79,6 +81,7 @@ static void applyStyle() {
 
 static bool fileExists(const char* f) { if (FILE* t = fopen(f, "rb")) { fclose(t); return true; } return false; }
 static ImFont* boldFont = nullptr;
+static ImFont* monoFont = nullptr;   // the Script Editor's
 static void loadFont() {
     ImGuiIO& io = ImGui::GetIO();
     const char* f = "C:/Windows/Fonts/segoeui.ttf";
@@ -94,6 +97,7 @@ static void loadFont() {
         return font;
     };
     add(f, 16.0f);
+    if (fileExists("C:/Windows/Fonts/consola.ttf")) monoFont = io.Fonts->AddFontFromFileTTF("C:/Windows/Fonts/consola.ttf", 16.0f);
     boldFont = add(fileExists("C:/Windows/Fonts/seguisb.ttf") ? "C:/Windows/Fonts/seguisb.ttf" : f, 16.0f);
     const char* light = fileExists("C:/Windows/Fonts/segoeuil.ttf") ? "C:/Windows/Fonts/segoeuil.ttf" : f;
     Splash::setFonts(add(light, 50.0f), add(f, 13.0f));
@@ -147,6 +151,7 @@ static std::string toast; static double toastUntil = 0;
 static double now() { return SDL_GetTicks() / 1000.0; }
 static void say(const std::string& s) { toast = s; toastUntil = now() + 6; }
 static bool showAbout = false, showSettings = false;
+static void rememberProject();
 
 static Marker* curMarker() { return selMarker >= 0 && selMarker < (int)proj.markers.size() ? &proj.markers[selMarker] : nullptr; }
 static Object* curObject() {
@@ -230,7 +235,8 @@ static std::string bring(const std::string& file) {   // a file into the project
     if (folder.empty() || file.empty()) return file;
     std::error_code ec;
     const fs::path src = fs::u8path(file), assets = fs::u8path(folder) / "assets";
-    if (src.parent_path() == assets) return file;
+    { const std::string a = assets.lexically_normal().u8string(), f = src.lexically_normal().u8string();
+      if (f.size() > a.size() && f.compare(0, a.size(), a) == 0) return file; }
     fs::create_directories(assets, ec);
     fs::path dst = assets / src.filename();
     if (!fs::exists(dst, ec)) fs::copy_file(src, dst, ec);
@@ -256,6 +262,7 @@ static bool saveProject(bool askFolder) {
     forEachFile(rel, [&](std::string& s) { if (!s.empty()) { std::error_code ec; const fs::path r = fs::relative(fs::u8path(s), base, ec); if (!ec && !r.empty() && r.u8string().rfind("..", 0) != 0) s = r.generic_u8string(); } });
     std::string err;
     if (!Scene::save(rel, folder, err)) { say(err); return false; }
+    rememberProject();
     say("Saved " + (fs::u8path(folder) / "project.diorama").u8string());
     return true;
 }
@@ -266,13 +273,32 @@ static void openProject(const std::string& path) {
     if (!Scene::load(np, p.u8string(), err)) { say(err); return; }
     forEachFile(np, [&](std::string& s) { if (!s.empty() && fs::u8path(s).is_relative()) s = (p / fs::u8path(s)).u8string(); });
     proj = np; folder = p.u8string(); selMarker = 0; selObject = -1; shownMarker = -1;
+    rememberProject();
     say("Opened " + proj.title);
 }
+static std::string lastFile() {   // remembers the project that was open last
+    const char* ad = getenv("APPDATA");
+    const fs::path d = fs::u8path(ad ? ad : ".") / "Diorama";
+    std::error_code ec; fs::create_directories(d, ec);
+    return (d / "last.txt").u8string();
+}
+static void rememberProject() { if (!folder.empty()) std::ofstream(fs::u8path(lastFile())) << folder; }
+static bool autosaveFolders = true;   // off for --capture / --build runs
 static void newFromTemplate(int which) {
     const std::string dir = (fs::u8path(exeDir) / "templates" / "gallery").u8string() + "/";
     proj = which == 1 ? galleryTemplate(dir) : basicTemplate();
     folder.clear(); selMarker = 0; selObject = -1; shownMarker = -1;
     Viewer::frameMarker();
+    if (!autosaveFolders) return;
+    // its own folder at once (Documents/Diorama/<title>), like a Unity project: the Project window needs one
+    std::error_code ec;
+    const fs::path base = fs::u8path(documents()) / "Diorama";
+    fs::path f = base / fs::u8path(proj.title);
+    for (int k = 2; fs::exists(f, ec); ++k) f = base / fs::u8path(proj.title + " " + std::to_string(k));
+    fs::create_directories(f / "assets" / "scripts", ec);
+    folder = f.u8string();
+    saveProject(false);
+    rememberProject();
 }
 
 // ---------- creating ----------
@@ -312,6 +338,285 @@ static void addMarker() {
 }
 
 
+
+static void playInBrowser();
+// ---------- the Console: what Play's scripts said (log, errors) ----------
+struct ConsoleLine { std::string level, file, text; int line = 0; };
+static std::vector<ConsoleLine> consoleLines;
+static bool clearOnPlay = true;
+
+// ---------- the Script Editor: the project's JavaScript, coloured, with errors on their lines ----------
+struct OpenScript { std::string file; TextEditor ed; bool dirty = false; };
+static std::vector<std::unique_ptr<OpenScript>> scripts;
+static int scriptTab = -1, gotoLine = -1;
+static bool showScripts = false, scriptFocused = false;
+static const TextEditor::LanguageDefinition& jsLanguage() {
+    static TextEditor::LanguageDefinition L;
+    static bool made = false;
+    if (made) return L;
+    made = true;
+    L = TextEditor::LanguageDefinition::CPlusPlus();   // the C-like tokenising, with JavaScript's words
+    L.mName = "JavaScript";
+    L.mKeywords.clear();
+    for (const char* k : {"break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete", "do", "else", "export", "extends",
+                          "finally", "for", "function", "if", "import", "in", "instanceof", "let", "new", "of", "return", "super", "switch", "this",
+                          "throw", "try", "typeof", "var", "void", "while", "with", "yield", "async", "await", "true", "false", "null", "undefined"})
+        L.mKeywords.insert(k);
+    L.mIdentifiers.clear();
+    const char* api[][2] = {{"gameObject", "This object"}, {"find", "find(\"Name\" or \"Parent/Child\"): an object"}, {"spawn", "spawn(\"Name\" or a prefab, { position }): a copy, made now"},
+                            {"destroy", "destroy(obj): gone"}, {"log", "log(...): to the Console"}, {"time", "time(): seconds since the game started"},
+                            {"camera", "camera.position: the phone"}, {"input", "input.tapped, input.x, input.y"}, {"start", "Once, before the first update"},
+                            {"update", "update(dt): every frame"}, {"onTap", "The player tapped this object"}, {"onFound", "Its anchor was found"},
+                            {"onLost", "Its anchor was lost"}, {"Math", "JavaScript's maths"}};
+    for (auto& a : api) { TextEditor::Identifier id; id.mDeclaration = a[1]; L.mIdentifiers.insert({a[0], id}); }
+    return L;
+}
+static TextEditor::Palette atelierPalette() {
+    TextEditor::Palette pal = TextEditor::GetDarkPalette();
+    pal[(int)TextEditor::PaletteIndex::Background] = IM_COL32(0x14, 0x14, 0x14, 255);
+    pal[(int)TextEditor::PaletteIndex::Keyword] = IM_COL32(0x34, 0xa9, 0xe3, 255);
+    pal[(int)TextEditor::PaletteIndex::KnownIdentifier] = IM_COL32(0x6c, 0xc8, 0x9c, 255);
+    pal[(int)TextEditor::PaletteIndex::String] = IM_COL32(0xd6, 0xa8, 0x6a, 255);
+    pal[(int)TextEditor::PaletteIndex::Comment] = IM_COL32(0x80, 0x80, 0x80, 255);
+    pal[(int)TextEditor::PaletteIndex::MultiLineComment] = IM_COL32(0x80, 0x80, 0x80, 255);
+    pal[(int)TextEditor::PaletteIndex::Number] = IM_COL32(0xb5, 0xce, 0xa8, 255);
+    pal[(int)TextEditor::PaletteIndex::LineNumber] = IM_COL32(0x60, 0x60, 0x60, 255);
+    pal[(int)TextEditor::PaletteIndex::Cursor] = IM_COL32(0xe6, 0xe6, 0xe6, 255);
+    pal[(int)TextEditor::PaletteIndex::Selection] = IM_COL32(0x00, 0x51, 0x84, 200);
+    pal[(int)TextEditor::PaletteIndex::CurrentLineFill] = IM_COL32(0x22, 0x22, 0x22, 255);
+    pal[(int)TextEditor::PaletteIndex::CurrentLineFillInactive] = IM_COL32(0x1c, 0x1c, 0x1c, 255);
+    pal[(int)TextEditor::PaletteIndex::CurrentLineEdge] = IM_COL32(0x2a, 0x2a, 0x2a, 255);
+    return pal;
+}
+static void openScript(const std::string& file, int line) {
+    showScripts = true;
+    for (size_t i = 0; i < scripts.size(); ++i) if (scripts[i]->file == file) { scriptTab = (int)i; gotoLine = line; return; }
+    auto s = std::make_unique<OpenScript>();
+    s->file = file;
+    std::ifstream in(fs::u8path(file), std::ios::binary); std::stringstream ss; ss << in.rdbuf();
+    s->ed.SetLanguageDefinition(jsLanguage());
+    s->ed.SetPalette(atelierPalette());
+    s->ed.SetTabSize(2);
+    s->ed.SetShowWhitespaces(false);
+    s->ed.SetText(ss.str());
+    scripts.push_back(std::move(s));
+    scriptTab = (int)scripts.size() - 1; gotoLine = line;
+}
+static void openScript(const std::string& file) { openScript(file, -1); }
+static void saveScript(OpenScript& s) {
+    std::string t = s.ed.GetText();
+    if (!t.empty() && t.back() == '\n') t.pop_back();   // (the editor adds one)
+    std::ofstream(fs::u8path(s.file), std::ios::binary) << t << "\n";
+    s.dirty = false;
+    say("Saved " + fs::u8path(s.file).filename().u8string());
+}
+static void scriptEditor() {
+    scriptFocused = false;
+    if (!showScripts || scripts.empty()) return;
+    ImGui::SetNextWindowSize(ImVec2(820, 600), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(360, 120), ImGuiCond_FirstUseEver);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6, 6));
+    if (!ImGui::Begin("Script Editor", &showScripts)) { ImGui::End(); ImGui::PopStyleVar(); return; }
+    scriptFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+    if (ImGui::BeginTabBar("##scripts", ImGuiTabBarFlags_AutoSelectNewTabs | ImGuiTabBarFlags_FittingPolicyScroll)) {
+        int close = -1;
+        for (int i = 0; i < (int)scripts.size(); ++i) {
+            OpenScript& sc = *scripts[i];
+            bool open = true;
+            const std::string label = fs::u8path(sc.file).filename().u8string() + (sc.dirty ? " *" : "") + "###" + sc.file;
+            ImGuiTabItemFlags fl = (i == scriptTab && gotoLine != -2) ? ImGuiTabItemFlags_SetSelected : 0;
+            if (ImGui::BeginTabItem(label.c_str(), &open, fl)) {
+                if (fl) { scriptTab = i; if (gotoLine > 0) sc.ed.SetCursorPosition(TextEditor::Coordinates(gotoLine - 1, 0)); gotoLine = -2; }
+                if (ImGui::SmallButton("Save (Ctrl+S)")) saveScript(sc);
+                ImGui::SameLine(); if (ImGui::SmallButton("Play (Ctrl+P)")) { saveScript(sc); playInBrowser(); }
+                ImGui::SameLine(); ImGui::TextDisabled("%d lines   %s", sc.ed.GetTotalLines(), sc.file.c_str());
+                ImGui::PushFont(monoFont ? monoFont : ImGui::GetFont());
+                sc.ed.Render("##code");
+                ImGui::PopFont();
+                if (sc.ed.IsTextChanged()) sc.dirty = true;
+                if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) saveScript(sc);
+                ImGui::EndTabItem();
+            }
+            if (!open) close = i;
+        }
+        if (close >= 0) { if (scripts[close]->dirty) saveScript(*scripts[close]); scripts.erase(scripts.begin() + close); if (scriptTab >= (int)scripts.size()) scriptTab = (int)scripts.size() - 1; }
+        ImGui::EndTabBar();
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+// the errors Play reported, on their lines in the open scripts
+static void markErrors() {
+    for (auto& sc : scripts) {
+        TextEditor::ErrorMarkers mk;
+        for (const auto& l : consoleLines)
+            if (l.level == "error" && l.line > 0 && (fs::u8path(l.file).filename() == fs::u8path(sc->file).filename())) mk[l.line] = l.text;
+        sc->ed.SetErrorMarkers(mk);
+    }
+}
+static void consolePanel() {
+    for (const auto& l : Serve::takeLogs()) { consoleLines.push_back({l.level, l.file, l.text, l.line}); markErrors(); }
+    if (ImGui::SmallButton("Clear")) { consoleLines.clear(); markErrors(); }
+    ImGui::SameLine(); ImGui::Checkbox("Clear on Play", &clearOnPlay);
+    int errors = 0; for (const auto& l : consoleLines) if (l.level == "error") ++errors;
+    ImGui::SameLine(); ImGui::TextDisabled("%d messages, %d problems   (log() and errors from Play show here)", (int)consoleLines.size(), errors);
+    ImGui::BeginChild("##log", ImVec2(0, 0), true);
+    for (size_t i = 0; i < consoleLines.size(); ++i) {
+        const auto& l = consoleLines[i];
+        ImGui::PushID((int)i);
+        const bool err = l.level == "error";
+        if (err) ImGui::PushStyleColor(ImGuiCol_Text, col4(IM_COL32(0xf0, 0x70, 0x70, 255)));
+        const std::string where = l.file.empty() ? "" : fs::u8path(l.file).filename().u8string() + (l.line ? ":" + std::to_string(l.line) : "") + "  ";
+        if (ImGui::Selectable((std::string(err ? "! " : "  ") + where + l.text).c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) && ImGui::IsMouseDoubleClicked(0) && !l.file.empty()) {
+            // the script it came from (by its name in the project)
+            std::error_code ec;
+            for (const auto& e : fs::recursive_directory_iterator(fs::u8path(folder) / "assets", ec))
+                if (e.path().filename() == fs::u8path(l.file).filename()) { openScript(e.path().u8string(), l.line); break; }
+        }
+        if (err) ImGui::PopStyleColor();
+        ImGui::PopID();
+    }
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+}
+
+// ---------- the Project window: the project's assets folder ----------
+static std::string projectDir;   // the folder shown (inside assets)
+static std::string renaming; static char renameBuf[128];
+static const char* assetKind(const fs::path& p) {
+    std::string e = p.extension().u8string(); for (auto& c : e) c = (char)tolower((unsigned char)c);
+    if (e == ".js") return "Script";
+    if (e == ".png" || e == ".jpg" || e == ".jpeg") return "Picture";
+    if (e == ".glb" || e == ".gltf") return "Model";
+    if (e == ".prefab") return "Prefab";
+    if (e == ".mp3" || e == ".ogg" || e == ".wav") return "Audio";
+    if (e == ".patt") return "Marker";
+    return "File";
+}
+static const char* assetIcon(const char* kind) {
+    return !strcmp(kind, "Script") ? "{ }" : !strcmp(kind, "Picture") ? "\xe2\x96\xa8" : !strcmp(kind, "Model") ? "\xe2\x97\x86" : !strcmp(kind, "Prefab") ? "\xe2\x97\x87"
+         : !strcmp(kind, "Audio") ? "\xe2\x99\xab" : !strcmp(kind, "Marker") ? "\xe2\x96\xa3" : "\xe2\x96\xa1";
+}
+static void importFiles(const std::vector<std::string>& files) {
+    if (folder.empty()) return;
+    const fs::path into = fs::u8path(projectDir.empty() ? (fs::u8path(folder) / "assets").u8string() : projectDir);
+    std::error_code ec; fs::create_directories(into, ec);
+    int n = 0;
+    for (const auto& f : files) { fs::copy(fs::u8path(f), into / fs::u8path(f).filename(), fs::copy_options::recursive | fs::copy_options::skip_existing, ec); if (!ec) ++n; }
+    say("Imported " + std::to_string(n) + " into " + into.filename().u8string());
+}
+static void projectPanel() {
+    if (folder.empty()) { ImGui::TextDisabled("Save the project (File > Save) to give it a folder for its assets."); return; }
+    const fs::path assets = fs::u8path(folder) / "assets";
+    std::error_code ec; fs::create_directories(assets, ec);
+    if (projectDir.empty() || projectDir.find(assets.u8string()) != 0) projectDir = assets.u8string();
+    // the path, as buttons back up
+    const fs::path cur = fs::u8path(projectDir);
+    std::vector<fs::path> crumbs;
+    for (fs::path q = cur; ; q = q.parent_path()) { crumbs.insert(crumbs.begin(), q); if (q == assets || q.parent_path() == q) break; }
+    for (size_t i = 0; i < crumbs.size(); ++i) {
+        if (i) { ImGui::SameLine(0, 2); ImGui::TextDisabled(">"); ImGui::SameLine(0, 2); }
+        ImGui::PushID((int)i);
+        if (ImGui::SmallButton(i == 0 ? "Assets" : crumbs[i].filename().u8string().c_str())) projectDir = crumbs[i].u8string();
+        ImGui::PopID();
+    }
+    ImGui::SameLine(0, 20); if (ImGui::SmallButton("Import...")) { const std::string f = openDialog(L"Assets\0*.png;*.jpg;*.jpeg;*.glb;*.gltf;*.js;*.mp3;*.ogg;*.wav\0All files\0*.*\0\0"); if (!f.empty()) importFiles({f}); }
+    ImGui::SameLine(); if (ImGui::SmallButton("Show in Explorer")) openInExplorer(projectDir);
+    ImGui::SameLine(); ImGui::TextDisabled("drag a file onto the Hierarchy or an object; drop files here from Explorer to import");
+    ImGui::BeginChild("##files", ImVec2(0, 0), true);
+    std::vector<fs::directory_entry> items;
+    for (const auto& e : fs::directory_iterator(cur, ec)) items.push_back(e);
+    std::sort(items.begin(), items.end(), [](const fs::directory_entry& a, const fs::directory_entry& b) {
+        if (a.is_directory() != b.is_directory()) return a.is_directory();
+        return a.path().filename().u8string() < b.path().filename().u8string();
+    });
+    const float cell = 92, avail = ImGui::GetContentRegionAvail().x;
+    const int cols = std::max(1, (int)(avail / cell));
+    int col = 0;
+    for (const auto& e : items) {
+        const fs::path pth = e.path();
+        const bool dir = e.is_directory();
+        const char* kind = dir ? "Folder" : assetKind(pth);
+        ImGui::PushID(pth.u8string().c_str());
+        if (col) ImGui::SameLine();
+        ImGui::BeginGroup();
+        const ImVec2 a = ImGui::GetCursorScreenPos();
+        ImGui::InvisibleButton("##it", ImVec2(cell - 8, 70));
+        const bool hov = ImGui::IsItemHovered();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (hov) dl->AddRectFilled(a, ImVec2(a.x + cell - 8, a.y + 70), IM_COL32(0x2e, 0x2e, 0x2e, 255), 4);
+        const char* icon = dir ? "\xe2\x96\xb0" : assetIcon(kind);
+        ImGui::PushFont(boldFont);
+        const ImVec2 is = ImGui::CalcTextSize(icon);
+        dl->AddText(boldFont, 30, ImVec2(a.x + (cell - 8 - is.x * 1.8f) / 2, a.y + 6), dir ? IM_COL32(0xd6, 0xb0, 0x5a, 255) : C_BLUE, icon);
+        ImGui::PopFont();
+        std::string nm = pth.filename().u8string(); if (nm.size() > 13) nm = nm.substr(0, 12) + "\xe2\x80\xa6";
+        const ImVec2 ts = ImGui::CalcTextSize(nm.c_str());
+        dl->AddText(ImVec2(a.x + (cell - 8 - ts.x) / 2, a.y + 48), C_TEXT, nm.c_str());
+        if (hov) ImGui::SetTooltip("%s\n%s", pth.filename().u8string().c_str(), kind);
+        if (hov && ImGui::IsMouseDoubleClicked(0)) {
+            if (dir) projectDir = pth.u8string();
+            else if (!strcmp(kind, "Script")) openScript(pth.u8string());
+            else openInExplorer(pth.u8string());
+        }
+        if (!dir && ImGui::BeginDragDropSource()) {
+            const std::string f = pth.u8string();
+            ImGui::SetDragDropPayload("ASSET", f.c_str(), f.size() + 1);
+            ImGui::Text("%s %s", assetIcon(kind), pth.filename().u8string().c_str());
+            ImGui::EndDragDropSource();
+        }
+        if (ImGui::BeginPopupContextItem()) {
+            if (!dir && !strcmp(kind, "Script") && ImGui::MenuItem("Edit")) openScript(pth.u8string());
+            if (ImGui::MenuItem("Show in Explorer")) openInExplorer(pth.parent_path().u8string());
+            if (ImGui::MenuItem("Rename")) { renaming = pth.u8string(); snprintf(renameBuf, sizeof renameBuf, "%s", pth.filename().u8string().c_str()); }
+            if (ImGui::MenuItem("Delete")) { std::error_code e2; fs::remove_all(pth, e2); say(e2 ? "Couldn't delete it" : "Deleted " + pth.filename().u8string()); }
+            ImGui::EndPopup();
+        }
+        ImGui::EndGroup();
+        ImGui::PopID();
+        if (++col >= cols) col = 0;
+    }
+    if (items.empty()) ImGui::TextDisabled("Empty. Import files, drop them here, or right-click to make a script or folder.");
+    if (ImGui::BeginPopupContextWindow("##empty", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+        if (ImGui::MenuItem("New Folder")) { fs::path f = cur / "New Folder"; for (int k = 2; fs::exists(f, ec); ++k) f = cur / ("New Folder " + std::to_string(k)); fs::create_directory(f, ec); }
+        if (ImGui::MenuItem("New Script")) {
+            fs::path f = cur / "NewScript.js"; for (int k = 2; fs::exists(f, ec); ++k) f = cur / ("NewScript" + std::to_string(k) + ".js");
+            std::ofstream(f, std::ios::binary) << "// A behaviour: drag it onto an object.\n\nfunction start() {\n}\n\nfunction update(dt) {\n}\n";
+            openScript(f.u8string());
+        }
+        if (ImGui::MenuItem("Import...")) { const std::string f = openDialog(L"All files\0*.*\0\0"); if (!f.empty()) importFiles({f}); }
+        if (ImGui::MenuItem("Show in Explorer")) openInExplorer(cur.u8string());
+        ImGui::EndPopup();
+    }
+    ImGui::EndChild();
+    if (!renaming.empty()) { ImGui::OpenPopup("Rename"); }
+    if (ImGui::BeginPopupModal("Rename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::SetNextItemWidth(320);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool enter = ImGui::InputText("##rn", renameBuf, sizeof renameBuf, ImGuiInputTextFlags_EnterReturnsTrue);
+        if (enter || ImGui::Button("Rename", ImVec2(150, 0))) {
+            std::error_code e2; const fs::path from = fs::u8path(renaming), to = from.parent_path() / fs::u8path(renameBuf);
+            fs::rename(from, to, e2);
+            // the objects using it follow it
+            if (!e2) forEachFile(proj, [&](std::string& f) { if (f == from.u8string()) f = to.u8string(); });
+            renaming.clear(); ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine(); if (ImGui::Button("Cancel", ImVec2(150, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) { renaming.clear(); ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
+}
+static int bottomTab = 0;
+static void bottomPanel() {
+    if (ImGui::BeginTabBar("##bottom")) {
+        if (ImGui::BeginTabItem("Project")) { projectPanel(); ImGui::EndTabItem(); }
+        int errors = 0; for (const auto& l : consoleLines) if (l.level == "error") ++errors;
+        const std::string cl = errors ? "Console (" + std::to_string(errors) + ")###console" : "Console###console";
+        if (ImGui::BeginTabItem(cl.c_str(), nullptr, bottomTab == 1 ? ImGuiTabItemFlags_SetSelected : 0)) { consolePanel(); ImGui::EndTabItem(); }
+        bottomTab = 0;
+        ImGui::EndTabBar();
+    }
+}
+
 // ---------- Build: the game as a static website (jsartoolkit5 + three.js), for phones and any web host ----------
 static std::string lastBuild;
 static bool copyTree(const fs::path& from, const fs::path& to) {
@@ -328,7 +633,7 @@ static std::string slugOf(const std::string& s) {
     while (!o.empty() && o.front() == '-') o.erase(0, 1);
     return o.empty() ? "game" : o;
 }
-static bool buildGame(const std::string& out, std::string& err) {
+static bool buildGame(const std::string& out, std::string& err, bool play = false) {
     std::error_code ec;
     const fs::path o = fs::u8path(out), web = fs::u8path(exeDir) / "assets" / "web";
     fs::create_directories(o / "assets", ec); fs::create_directories(o / "markers", ec);
@@ -343,7 +648,7 @@ static bool buildGame(const std::string& out, std::string& err) {
     fs::copy_file(web / "diorama.js", o / "lib" / "diorama.js", fs::copy_options::overwrite_existing, ec);
     // the files the scene uses, each once, under assets/
     Project b = proj;
-    std::map<std::string, std::string> done;
+    std::map<std::string, std::string> done, scriptSrc;
     auto take = [&](std::string& f) {
         if (f.empty()) return;
         auto it = done.find(f);
@@ -360,7 +665,7 @@ static bool buildGame(const std::string& out, std::string& err) {
     for (size_t i = 0; i < b.markers.size(); ++i) {
         Scene::Marker& m = b.markers[i];
         const std::string slug = slugOf(m.name) + "-" + std::to_string(i + 1);
-        for (auto& ob : m.objects) take(ob.file);
+        for (auto& ob : m.objects) { take(ob.file); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
         if (proj.tracking == TRACK_IMAGES) {   // the picture to look for: in the build, and on the sheet to print
             if (m.target.empty()) { err = m.name + " has no picture to look for (its Inspector)"; return false; }
             Markers::Image im;
@@ -383,7 +688,21 @@ static bool buildGame(const std::string& out, std::string& err) {
     if (!sheet.empty()) Markers::savePng((o / "markers.png").u8string(), Markers::sheet(sheet, fontFile));
     fs::copy_file(fs::u8path(exeDir) / "assets" / "logo.png", o / "icon.png", fs::copy_options::overwrite_existing, ec);
     { std::ofstream f(o / "scene.json", std::ios::binary); f << Scene::toJson(b); if (!f) { err = "Couldn't write scene.json"; return false; } }
-    { std::ofstream f(o / "scene.js", std::ios::binary); f << "// the scene, inside the page (so it needs no loading)\nwindow.DIORAMA_SCENE = " << Scene::toJson(b) << ";\n"; }
+    {   // the scene and its scripts, inside the page (so they need no loading)
+        std::ofstream f(o / "scene.js", std::ios::binary);
+        f << "// the scene and its scripts, inside the page (so they need no loading)\n";
+        if (play) f << "window.DIORAMA_PLAY = true;   // played from the editor: logs go to its Console\n";
+        f << "window.DIORAMA_SCENE = " << Scene::toJson(b) << ";\nwindow.DIORAMA_SCRIPTS = {";
+        bool first = true;
+        for (const auto& d : done) {
+            if (fs::u8path(d.first).extension() != ".js") continue;
+            std::ifstream in(fs::u8path(d.first), std::ios::binary); std::stringstream ss; ss << in.rdbuf();
+            f << (first ? "\n  " : ",\n  ") << Json::quote(d.second) << ": " << Json::quote(ss.str());
+            first = false;
+        }
+        f << "\n};\n";
+        if (!f) { err = "Couldn't write scene.js"; return false; }
+    }
     // Play.bat: play it on this PC without a web host (a tiny local server: browsers only let a page load its pictures
     // and use the webcam when it comes from a server)
     std::ofstream(o / "play.ps1", std::ios::binary) <<
@@ -463,7 +782,10 @@ static void playInBrowser() {
     std::error_code ec;
     const fs::path tmp = fs::temp_directory_path(ec) / "Diorama Play";
     std::string err;
-    if (!buildGame(tmp.u8string(), err)) { say(err); return; }
+    if (folder.empty() == false) saveProject(false);
+    if (!buildGame(tmp.u8string(), err, true)) { say(err); return; }
+    if (clearOnPlay) consoleLines.clear();
+    bottomTab = 1;
     if (!Serve::start(tmp.u8string(), 8765)) { say("Couldn't start the test server on port 8765"); return; }
 #ifdef _WIN32
     ShellExecuteW(nullptr, L"open", L"http://localhost:8765/", nullptr, nullptr, SW_SHOWNORMAL);
@@ -548,6 +870,35 @@ static void menuBar() {
     ImGui::EndMainMenuBar();
 }
 
+// ---------- assets dropped from the Project window ----------
+static void dropAsset(Scene::Marker& m, int mi, int onto, const std::string& file) {
+    beginEdit();
+    std::string e = fs::u8path(file).extension().u8string(); for (auto& c : e) c = (char)tolower((unsigned char)c);
+    const int i = onto >= 0 ? indexOfId(m, onto) : -1;
+    if (e == ".js") {
+        if (i < 0) { say("Drop a script onto an object"); return; }
+        m.objects[i].scripts.push_back({file, true});
+        selMarker = mi; selObject = onto;
+        return;
+    }
+    int kind = -1;
+    if (e == ".png" || e == ".jpg" || e == ".jpeg") kind = PICTURE;
+    if (e == ".glb" || e == ".gltf") kind = MODEL;
+    if (kind < 0) { say("Diorama can't place that kind of file yet"); return; }
+    Object o = make(proj, kind, onto);
+    o.file = file; o.name = fs::u8path(file).stem().u8string();
+    if (kind == MODEL) { const auto c = Viewer::clipsOf(file); o.clip = c.empty() ? "" : c[0]; }
+    m.objects.push_back(o);
+    reparent(m, o.id, onto);
+    selMarker = mi; selObject = o.id;
+}
+static void acceptAsset(Scene::Marker& m, int mi, int onto) {
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) dropAsset(m, mi, onto, std::string((const char*)pl->Data));
+        ImGui::EndDragDropTarget();
+    }
+}
+
 // ---------- the Hierarchy ----------
 static void objectNode(Scene::Marker& m, int mi, int index, int& moveId, int& moveTo) {
     Object& o = m.objects[index];
@@ -564,6 +915,7 @@ static void objectNode(Scene::Marker& m, int mi, int index, int& moveId, int& mo
     if (ImGui::BeginDragDropSource()) { const int payload[2] = {mi, o.id}; ImGui::SetDragDropPayload("OBJ", payload, sizeof payload); ImGui::Text("%s", o.name.c_str()); ImGui::EndDragDropSource(); }
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("OBJ")) { const int* d = (const int*)pl->Data; if (d[0] == mi && d[1] != o.id) { moveId = d[1]; moveTo = o.id; } }
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) dropAsset(m, mi, o.id, std::string((const char*)pl->Data));
         ImGui::EndDragDropTarget();
     }
     if (ImGui::BeginPopupContextItem()) {
@@ -600,6 +952,7 @@ static void hierarchy() {
         int moveId = -1, moveTo = -1;
         if (ImGui::BeginDragDropTarget()) {   // dropped on the marker: back to the top level
             if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("OBJ")) { const int* d = (const int*)pl->Data; if (d[0] == mi) { moveId = d[1]; moveTo = -1; } }
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) dropAsset(m, mi, -1, std::string((const char*)pl->Data));
             ImGui::EndDragDropTarget();
         }
         if (ImGui::BeginPopupContextItem()) { selMarker = mi; selObject = -1; gameObjectItems(); ImGui::EndPopup(); }
@@ -780,11 +1133,20 @@ static void newScript(Object& o) {
     fs::path f = fs::u8path(scriptsDir()) / (base + ".js");
     for (int k = 2; fs::exists(f); ++k) f = fs::u8path(scriptsDir()) / (base + std::to_string(k) + ".js");
     std::ofstream(f, std::ios::binary) <<
-        "// " << o.name << ": runs on this object, in Diorama and on the phone.\n"
-        "// this.position, this.rotation, this.scale: its Transform (arrays of 3). time(): seconds since it started.\n\n"
-        "function start() {\n  // once, when the marker is first seen\n}\n\n"
+        "// " << o.name << ": a behaviour on this object. It runs in Play (Ctrl+P) and in the built game.\n"
+        "//\n"
+        "// this (or gameObject): the object. this.position / this.rotation / this.scale have .x .y .z (rotation in degrees),\n"
+        "//   this.active, this.velocity (moves it each frame), this.name, this.getComponent(\"Animate\" | \"Material\" |\n"
+        "//   \"Words\" | \"Model\" | another script's name), this.toCamera() (direction to the phone, and .distance),\n"
+        "//   this.lookAtCamera().\n"
+        "// find(\"Name\" or \"Parent/Child\"), spawn(\"Name\" or a prefab, { position }), destroy(obj), time(), log(...),\n"
+        "// camera.position, input.tapped.\n\n"
+        "function start() {\n  // once, before its first update\n}\n\n"
         "function update(dt) {\n  // every frame; dt: seconds since the last one\n}\n\n"
-        "function onTap() {\n  // when it's tapped\n}\n";
+        "function onTap() {\n  // the player tapped it\n}\n\n"
+        "function onFound() {\n  // its anchor (marker, picture or face) was found\n}\n\n"
+        "function onLost() {\n  // its anchor was lost\n}\n";
+    openScript(f.u8string());
     o.scripts.push_back({f.u8string(), true});
 }
 static void addComponentMenu(Object& o) {
@@ -887,7 +1249,8 @@ static void objectInspector(Scene::Marker& m, Object& o) {
         if ((h & 0xff) == C_REMOVE) { o.scripts.erase(o.scripts.begin() + si); ImGui::PopID(); break; }
         if (h & 0x100) {
             fileRow("File", sc.file, L"JavaScript\0*.js\0\0");
-            ImGui::TextDisabled("The script editor and running scripts come next.");
+            if (ImGui::Button("Edit Script", ImVec2(-1, 0))) openScript(sc.file);
+            ImGui::TextDisabled("It runs in Play (Ctrl+P) and in the built game.");
         }
         ImGui::PopID();
     }
@@ -896,6 +1259,10 @@ static void objectInspector(Scene::Marker& m, Object& o) {
     const float bw = 200;
     ImGui::SetCursorPosX((ImGui::GetContentRegionAvail().x - bw) / 2 + ImGui::GetCursorPosX());
     if (ImGui::Button("Add Component", ImVec2(bw, 28))) ImGui::OpenPopup("addcomp");
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) dropAsset(m, selMarker, o.id, std::string((const char*)pl->Data));
+        ImGui::EndDragDropTarget();
+    }
     if (ImGui::BeginPopup("addcomp")) { addComponentMenu(o); ImGui::EndPopup(); }
     (void)m;
 }
@@ -1128,7 +1495,7 @@ static void about() {
 
 static void keys() {
     ImGuiIO& io = ImGui::GetIO();
-    if (io.WantTextInput) return;
+    if (io.WantTextInput || scriptFocused) { if (scriptFocused && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) playInBrowser(); return; }
     if (!io.KeyCtrl && !io.KeyAlt) {
         if (ImGui::IsKeyPressed(ImGuiKey_Q)) tool = 0;
         if (ImGui::IsKeyPressed(ImGuiKey_W)) tool = 1;
@@ -1165,10 +1532,14 @@ static void frame() {
     ImGui::Begin("##hier", nullptr, fixed); hierarchy(); ImGui::End();
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x - rightW, vp->Pos.y + top)); ImGui::SetNextWindowSize(ImVec2(rightW, H));
     ImGui::Begin("##insp", nullptr, fixed); inspector(); ImGui::End();
-    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + leftW, vp->Pos.y + top)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x - leftW - rightW, H));
+    const float bottomH = std::min(260.0f, H * 0.36f);
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + leftW, vp->Pos.y + top)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x - leftW - rightW, H - bottomH));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, col4(C_BG));
     ImGui::Begin("##scene", nullptr, fixed); sceneView(); ImGui::End();
     ImGui::PopStyleColor();
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + leftW, vp->Pos.y + top + H - bottomH)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x - leftW - rightW, bottomH));
+    ImGui::Begin("##bottom", nullptr, fixed); bottomPanel(); ImGui::End();
+    scriptEditor();
     // the status line
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - status)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x, status));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 4));
@@ -1258,7 +1629,12 @@ int main(int argc, char** argv) {
         ImGui_ImplSDL2_InitForOpenGL(window, gl);
     }
     Viewer::init(exeDir);
-    if (!openArg.empty()) openProject(openArg); else newFromTemplate(tmpl == "basic" ? 0 : 1);
+    autosaveFolders = capture.empty() && buildArg.empty();
+    std::string last;
+    if (autosaveFolders && openArg.empty()) { std::ifstream lf(fs::u8path(lastFile())); std::getline(lf, last); }
+    if (!openArg.empty()) openProject(openArg);
+    else if (!last.empty() && fs::exists(fs::u8path(last) / "project.diorama")) openProject(last);
+    else newFromTemplate(tmpl == "basic" ? 0 : 1);
     if (!buildArg.empty()) { std::string err; const bool ok = buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
     if (capture.empty()) { SDL_ShowWindow(window); SDL_MaximizeWindow(window); SDL_RaiseWindow(window); }
@@ -1269,7 +1645,7 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&e)) {
             ImGui_ImplSDL2_ProcessEvent(&e);
             if (e.type == SDL_QUIT) quit = true;
-            if (e.type == SDL_DROPFILE) { const std::string f = e.drop.file; SDL_free(e.drop.file); if (fs::u8path(f).extension() == ".diorama") openProject(f); }
+            if (e.type == SDL_DROPFILE) { const std::string f = e.drop.file; SDL_free(e.drop.file); if (fs::u8path(f).extension() == ".diorama") openProject(f); else importFiles({f}); }
         }
         ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame();
         frame();

@@ -195,6 +195,189 @@
       return group;
     }
 
+
+    // ---------- scripts: JavaScript behaviours on objects (start, update, onTap, onFound, onLost) ----------
+    var R = { nodes: null, players: null, roots: {}, objects: [], camera: null, dom: null, t: 0, tapped: null, nextId: 1e6 };
+    function report(level, file, line, text) {
+      var where = file ? file.split('/').pop() + (line ? ':' + line : '') + ': ' : '';
+      (level === 'error' ? console.error : console.log)(where + text);
+      if (level === 'error') say('Problem: ' + where + text);
+      if (window.DIORAMA_PLAY) {   // Play from the editor: its Console shows it too
+        try { fetch('/__log', { method: 'POST', body: JSON.stringify({ level: level, file: file || '', line: line || 0, text: String(text) }) }); } catch (e) {}
+      }
+    }
+    function lineOf(err, file) {   // the script's own line, from the error's stack (the wrapper adds 3 lines)
+      var m = String(err && err.stack || '').match(new RegExp(file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':(\\d+)'));
+      return m ? Math.max(1, parseInt(m[1], 10) - 3) : 0;
+    }
+    function vec(arr, after) {   // x, y, z bound to the object's own numbers
+      var v = {};
+      ['x', 'y', 'z'].forEach(function (k, i) { Object.defineProperty(v, k, { get: function () { return arr[i]; }, set: function (n) { arr[i] = +n; if (after) after(); }, enumerable: true }); });
+      v.set = function (x, y, z) { arr[0] = +x; arr[1] = +y; arr[2] = +z; if (after) after(); return v; };
+      v.toArray = function () { return arr.slice(); };
+      return v;
+    }
+    function worldPos(node) { var p = new THREE.Vector3(); node.getWorldPosition(p); return p; }
+
+    // the object a script sees as this / gameObject
+    function GameObject(node) {
+      var o = node.userData.o, self = this;
+      this.node = node; this.id = o.id; this.name = o.name; this.data = o;
+      this.transform = { position: vec(o.position), rotation: vec(o.rotation), scale: vec(o.scale) };
+      this.position = this.transform.position; this.rotation = this.transform.rotation; this.scale = this.transform.scale;
+      this.velocity = vec([0, 0, 0]);
+      Object.defineProperty(this, 'active', { get: function () { return node.visible; }, set: function (v) { node.visible = !!v; } });
+      this.scripts = [];
+    }
+    GameObject.prototype.getComponent = function (type) {
+      var o = this.data, node = this.node;
+      switch (String(type).toLowerCase()) {
+      case 'transform': return this.transform;
+      case 'animate': return o.hasAnim ? { get on() { return o.animOn; }, set on(v) { o.animOn = !!v; }, get does() { return o.anim; }, set does(v) { o.anim = v; },
+                                            get speed() { return o.animSpeed; }, set speed(v) { o.animSpeed = +v; }, get amount() { return o.animAmount; }, set amount(v) { o.animAmount = +v; } } : null;
+      case 'material': return { colour: vec(o.colour), get opacity() { return o.colour[3]; }, set opacity(v) { o.colour[3] = +v; node.traverse(function (c) { if (c.material) { c.material.userData.base = +v; } }); } };
+      case 'words': return o.kind === 'Words' ? { get text() { return o.text; }, set text(v) { o.text = String(v); rebuild(this.go); }, go: this } : null;
+      case 'model': return o.kind === 'Model' ? { get clip() { return o.clip; }, play: function (name) { o.clip = name; rebuild(this.go); }, go: this } : null;
+      }
+      for (var i = 0; i < this.scripts.length; ++i) if (this.scripts[i].name.toLowerCase() === String(type).toLowerCase()) return this.scripts[i].self;
+      return null;
+    };
+    // where the phone is, from this object: a direction (x, y, z, in its parent's space) and how far
+    GameObject.prototype.toCamera = function () {
+      if (!R.camera) return { x: 0, y: 0, z: 1, distance: 1 };
+      var cam = new THREE.Vector3(); R.camera.getWorldPosition(cam);
+      var me = worldPos(this.node), d = cam.sub(me);
+      var parent = this.node.parent, q = new THREE.Quaternion();
+      if (parent) { parent.getWorldQuaternion(q); d.applyQuaternion(q.invert ? q.invert() : q.inverse()); var s = new THREE.Vector3(); parent.getWorldScale(s); d.divide(s); }
+      var len = d.length() || 1;
+      return { x: d.x / len, y: d.y / len, z: d.z / len, distance: len };
+    };
+    GameObject.prototype.lookAtCamera = function () {
+      var d = this.toCamera();
+      this.data.rotation[1] = Math.atan2(d.x, d.z) / D2R;
+      this.data.rotation[0] = -Math.asin(Math.max(-1, Math.min(1, d.y))) / D2R;
+    };
+    GameObject.prototype.find = function (path) { return find(path, this.node); };
+    GameObject.prototype.toString = function () { return '[' + this.name + ']'; };
+
+    function wrap(node) { if (!node.userData.go) node.userData.go = new GameObject(node); return node.userData.go; }
+    function rebuild(go) {   // a look that changed (words, a clip): built again in place
+      var node = go.node, o = go.data, fresh = build(o, R.players);
+      while (node.children.length) { var c = node.children[0]; if (c.userData && c.userData.o) break; node.remove(c); }
+      fresh.children.slice().forEach(function (c) { node.add(c); });
+      ['sprites', 'rays'].forEach(function (k) { node.userData[k] = fresh.userData[k]; });
+    }
+    function find(path, from) {
+      var parts = String(path).split('/'), hit = null;
+      var search = function (n, i) {
+        if (hit) return;
+        n.children.forEach(function (c) {
+          if (hit || !c.userData.o) return;
+          if (c.userData.o.name === parts[i]) { if (i === parts.length - 1) hit = c; else search(c, i + 1); }
+          else if (i === 0) search(c, 0);
+        });
+      };
+      var roots = from ? [from] : Object.keys(R.roots).map(function (k) { return R.roots[k]; });
+      roots.forEach(function (r) { search(r, 0); });
+      return hit ? wrap(hit) : null;
+    }
+    function attachScripts(node) {
+      var o = node.userData.o, go = wrap(node);
+      (o.scripts || []).forEach(function (sc) {
+        if (sc.on === false) return;
+        var code = (window.DIORAMA_SCRIPTS || {})[sc.file];
+        if (code === undefined) { report('error', sc.file, 0, 'not found'); return; }
+        var name = sc.file.split('/').pop().replace(/\.js$/, '');
+        try {
+          var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input',
+            '"use strict";\n' + code + '\n;return { start: typeof start === "function" ? start : null, update: typeof update === "function" ? update : null,' +
+            ' onTap: typeof onTap === "function" ? onTap : null, onFound: typeof onFound === "function" ? onFound : null, onLost: typeof onLost === "function" ? onLost : null };\n//# sourceURL=' + sc.file);
+          var log = function () { report('log', sc.file, 0, Array.prototype.map.call(arguments, function (a) { return typeof a === 'object' ? JSON.stringify(a) : String(a); }).join(' ')); };
+          var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, R.cameraApi, R.input);
+          go.scripts.push({ name: name, file: sc.file, fns: api, self: go, started: false });
+        } catch (e) { report('error', sc.file, lineOf(e, sc.file), e.message); }
+      });
+      R.objects.push(go);
+    }
+    function call(go, s, fn, arg) {
+      if (!s.fns[fn]) return;
+      try { s.fns[fn].call(go, arg); } catch (e) { report('error', s.file, lineOf(e, s.file), e.message); s.fns[fn] = null; }
+    }
+    // a copy of an object (by name in the scene, or a prefab) and everything under it, made now
+    function spawn(what, at) {
+      var src = null, data = null;
+      if (what && what.data) src = what.data;
+      else {
+        var hit = find(what);
+        if (hit) src = hit.data;
+        else if (window.DIORAMA_PREFABS && window.DIORAMA_PREFABS[what]) data = window.DIORAMA_PREFABS[what];
+      }
+      if (!src && !data) { report('error', '', 0, 'spawn: nothing called ' + what); return null; }
+      var list = data ? JSON.parse(JSON.stringify(data)) : null;
+      if (!list) {   // the object and its children, out of its anchor
+        list = []; var ids = {};
+        Object.keys(R.roots).forEach(function (k) {
+          (R.roots[k].userData.objects || []).forEach(function (o) { if (o.id === src.id || ids[o.parent]) { ids[o.id] = true; list.push(JSON.parse(JSON.stringify(o))); } });
+        });
+      }
+      var remap = {}; list.forEach(function (o) { remap[o.id] = ++R.nextId; });
+      var parentNode = at && at.node ? at.node.parent : (src ? find(src.name).node.parent : R.roots[Object.keys(R.roots)[0]]);
+      var first = null, made = {};
+      list.forEach(function (o, i) {
+        var oldParent = o.parent;
+        o.id = remap[o.id]; o.parent = remap[oldParent] || -1;
+        var n = build(o, R.players);
+        (i === 0 ? parentNode : made[o.parent]).add(n); made[o.id] = n;
+        R.nodes.push(n); attachScripts(n);
+        if (i === 0) first = wrap(n);
+      });
+      if (first && at && at.position) first.position.set(at.position.x, at.position.y, at.position.z);
+      return first;
+    }
+    function destroy(go) {
+      if (!go || !go.node) return;
+      go.node.traverse(function (c) { if (c.userData.go) c.userData.go.dead = true; });
+      if (go.node.parent) go.node.parent.remove(go.node);
+      R.nodes = R.nodes.filter(function (n) { return !n.userData.go || !n.userData.go.dead; });
+    }
+    R.input = { tapped: false, x: 0, y: 0 };
+    R.cameraApi = { get position() { var p = new THREE.Vector3(); if (R.camera) R.camera.getWorldPosition(p); return { x: p.x, y: p.y, z: p.z }; } };
+    var runtime = {
+      begin: function (nodes, players) { R.nodes = nodes; R.players = players; },
+      setCamera: function (camera, dom) {
+        R.camera = camera; R.dom = dom;
+        var ray = new THREE.Raycaster();
+        var tap = function (ev) {
+          var r = dom.getBoundingClientRect(), pt = ev.touches ? ev.touches[0] : ev;
+          var x = ((pt.clientX - r.left) / r.width) * 2 - 1, y = -((pt.clientY - r.top) / r.height) * 2 + 1;
+          R.input.tapped = true; R.input.x = x; R.input.y = y;
+          ray.setFromCamera({ x: x, y: y }, camera);
+          var targets = []; Object.keys(R.roots).forEach(function (k) { if (R.roots[k].visible !== false) targets.push(R.roots[k]); });
+          var hits = ray.intersectObjects(targets, true);
+          for (var i = 0; i < hits.length; ++i) {
+            var n = hits[i].object; while (n && !(n.userData && n.userData.go)) n = n.parent;
+            if (n && n.userData.go && n.userData.go.scripts.some(function (s) { return s.fns.onTap; })) { var g = n.userData.go; g.scripts.forEach(function (s) { call(g, s, 'onTap'); }); break; }
+          }
+        };
+        dom.addEventListener('mousedown', tap); dom.addEventListener('touchstart', tap, { passive: true });
+      },
+      anchor: function (name, root, objects) { R.roots[name] = root; root.userData.objects = objects; },
+      seen: function (name, on) {   // an anchor found or lost: its objects' onFound / onLost
+        var root = R.roots[name]; if (!root) return;
+        root.traverse(function (c) { var g = c.userData.go; if (g && !g.dead) g.scripts.forEach(function (s) { call(g, s, on ? 'onFound' : 'onLost'); }); });
+      },
+      update: function (dt, t) {
+        R.t = t;
+        R.objects.forEach(function (g) {
+          if (g.dead) return;
+          g.scripts.forEach(function (s) { if (!s.started) { s.started = true; call(g, s, 'start'); } call(g, s, 'update', dt); });
+          var v = g.velocity; if (v.x || v.y || v.z) { var p = g.data.position; p[0] += v.x * dt; p[1] += v.y * dt; p[2] += v.z * dt; }
+        });
+        R.objects = R.objects.filter(function (g) { return !g.dead; });
+        R.input.tapped = false;
+      }
+    };
+
     // an anchor's world: its lights, its window, its objects (nodes and animation players collected for the frame loop)
     function anchorWorld(m, nodes, players) {
       var root = new THREE.Group();
@@ -211,10 +394,13 @@
         if (!parent) return;
         var n = build(o, players);
         byId[o.id] = n; parent.add(n); nodes.push(n);
+        attachScripts(n);
       });
+      runtime.begin(nodes, players);
+      runtime.anchor(m.name, root, m.objects);
       return root;
     }
-    return { anchorWorld: anchorWorld, animate: animate };
+    return { anchorWorld: anchorWorld, animate: animate, runtime: runtime };
   }
 
   function fromDisk() {
@@ -253,6 +439,7 @@
             };
             fit(); window.addEventListener('resize', fit);
             document.body.insertBefore(renderer.domElement, document.body.firstChild);
+            C.runtime.setCamera(arScene.camera, renderer.domElement);
             var nodes = [], players = [], roots = [];
             proj.markers.forEach(function (m) {
               var root = C.anchorWorld(m, nodes, players);
@@ -270,10 +457,12 @@
                 if (r.visible) { r.userData.seen = t; r.userData.last = r.matrix.clone(); }
                 else if (r.userData.last && t - r.userData.seen < 0.35) { r.visible = true; r.matrix.copy(r.userData.last); }
               });
+              roots.forEach(function (r) { if (!!r.userData.was !== r.visible) { r.userData.was = r.visible; C.runtime.seen(r.userData.name, r.visible); } });
               var found = roots.filter(function (r) { return r.visible; }).map(function (r) { return r.userData.name; });
               var line = found.length ? 'Found: ' + found.join(', ') : 'Point the camera at the marker.';
               if (line !== lastLine) { say(line); lastLine = line; }
-              nodes.forEach(function (n) { C.animate(n, t); });
+              C.runtime.update(dt, t);
+              nodes.forEach(function (n) { if (!n.userData.go || !n.userData.go.dead) C.animate(n, t); });
               players.forEach(function (p) { p.update(dt); });
               arScene.renderOn(renderer);
               requestAnimationFrame(tick);
@@ -302,6 +491,7 @@
         if (!faces) opts.imageTargetSrc = imageTargetSrc;
         var mind = new lib.MindARThree(opts);
         var renderer = mind.renderer, scene = mind.scene, camera = mind.camera;
+        C.runtime.setCamera(camera, renderer.domElement);
         var nodes = [], players = [], found = {}, faceAnchors = [];
         // MindAR's face units: about 0.6 of them make a face's width; the editor's face is 1 wide
         var FACE = 0.6;
@@ -319,19 +509,24 @@
           if (!faces) root.rotation.x = Math.PI / 2;   // the picture lies in XY, Z out of it: the editor's Y-up on it
           else { root.scale.setScalar(FACE); faceAnchors.push({ a: a, name: m.name }); }
           a.group.add(root);
-          a.onTargetFound = function () { found[m.name] = true; };
-          a.onTargetLost = function () { delete found[m.name]; };
+          a.onTargetFound = function () { found[m.name] = true; C.runtime.seen(m.name, true); };
+          a.onTargetLost = function () { delete found[m.name]; C.runtime.seen(m.name, false); };
         });
         var clock = new THREE.Clock(), t = 0, lastLine = '';
         mind.start().then(function () {
           renderer.setAnimationLoop(function () {
             var dt = clock.getDelta(); t += dt;
             // a face anchor shows while the face is seen
-            faceAnchors.forEach(function (f) { if (f.a.group.visible) found[f.name] = true; else delete found[f.name]; });
+            faceAnchors.forEach(function (f) {
+              var on = f.a.group.visible;
+              if (on !== !!found[f.name]) C.runtime.seen(f.name, on);
+              if (on) found[f.name] = true; else delete found[f.name];
+            });
             var names = Object.keys(found);
             var line = names.length ? 'Found: ' + names.join(', ') : (faces ? 'Look at the camera.' : 'Point the camera at the picture.');
             if (line !== lastLine) { say(line); lastLine = line; }
-            nodes.forEach(function (n) { C.animate(n, t); });
+            C.runtime.update(dt, t);
+            nodes.forEach(function (n) { if (!n.userData.go || !n.userData.go.dead) C.animate(n, t); });
             players.forEach(function (p) { p.update(dt); });
             renderer.render(scene, camera);
           });
