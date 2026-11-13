@@ -15,6 +15,12 @@ bool isPrimitive(int kind);
 enum Anim { A_STILL, A_FLOAT, A_SPIN, A_SWAY, A_PULSE, ANIM_COUNT };
 extern const char* ANIM_NAMES[ANIM_COUNT];
 enum MarkerType { MK_PATTERN, MK_BARCODE, MARKER_TYPE_COUNT };
+// what a game tracks (one per game: Project Settings); the anchors at the top of the Hierarchy are of that kind
+enum Tracking { TRACK_MARKERS, TRACK_IMAGES, TRACK_FACES, TRACK_HANDS, TRACKING_COUNT };
+extern const char* TRACKING_NAMES[TRACKING_COUNT];
+// a face anchor's point: MindAR's face landmarks (of 468) people want things on
+struct FacePoint { const char* name; int landmark; float head[3]; };   // head: where the head's middle is from it (face widths)
+extern const FacePoint FACE_POINTS[]; extern const int FACE_POINT_COUNT;
 
 struct Script { std::string file; bool on = true; };   // a JavaScript behaviour (assets/...js), muted when off
 
@@ -65,6 +71,8 @@ struct Marker {
     std::string picture;               // pattern: its inside picture
     std::string letter;                // pattern: a letter or short word instead
     int barcode = 0;                   // barcode: 0..63
+    std::string target;                // images: the picture to look for
+    int facePoint = 1;                 // faces: the landmark it's on (FACE_POINTS)
     bool expanded = true;
     // the light
     float ambient[3] = {0.55f, 0.55f, 0.6f};
@@ -79,6 +87,8 @@ struct Marker {
 
 struct Project {
     std::string title = "My diorama";
+    int tracking = TRACK_MARKERS;      // Project Settings > Tracking
+    bool gps = false;                  // Project Settings > Location (GPS): the player's place for scripts and place anchors
     std::vector<Marker> markers;
     int nextId = 1;
 };

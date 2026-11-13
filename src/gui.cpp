@@ -146,7 +146,7 @@ static int selMarker = 0, selObject = -1;         // selObject: an object id, or
 static std::string toast; static double toastUntil = 0;
 static double now() { return SDL_GetTicks() / 1000.0; }
 static void say(const std::string& s) { toast = s; toastUntil = now() + 6; }
-static bool showAbout = false;
+static bool showAbout = false, showSettings = false;
 
 static Marker* curMarker() { return selMarker >= 0 && selMarker < (int)proj.markers.size() ? &proj.markers[selMarker] : nullptr; }
 static Object* curObject() {
@@ -199,12 +199,28 @@ static Markers::Image printable(const Scene::Marker& m, int size) {
     return Markers::printablePattern(insidePicture(m), size);
 }
 static int shownMarker = -1; static std::string shownKey;
+static const Scene::FacePoint& facePointOf(const Scene::Marker& m) {
+    for (int i = 0; i < FACE_POINT_COUNT; ++i) if (FACE_POINTS[i].landmark == m.facePoint) return FACE_POINTS[i];
+    return FACE_POINTS[0];
+}
 static void refreshMarkerPicture() {
     const Scene::Marker* m = curMarker();
-    const std::string key = m ? (std::to_string(m->type) + m->preset + "|" + m->picture + "|" + m->letter + "|" + std::to_string(m->barcode)) : "";
+    const std::string key = m ? (std::to_string(proj.tracking) + "|" + std::to_string(m->type) + m->preset + "|" + m->picture + "|" + m->letter + "|" +
+                                 std::to_string(m->barcode) + "|" + m->target + "|" + std::to_string(m->facePoint)) : "";
     if (selMarker == shownMarker && key == shownKey) return;
     shownMarker = selMarker; shownKey = key;
-    if (!m) { Viewer::setMarkerPicture({}, 0, 0); return; }
+    if (!m) { Viewer::setMarkerPicture({}, 0, 0); Viewer::setAnchorMode(0, nullptr); return; }
+    if (proj.tracking == TRACK_FACES) { Viewer::setAnchorMode(2, facePointOf(*m).head); return; }
+    if (proj.tracking == TRACK_IMAGES) {
+        Markers::Image im;
+        if (m->target.empty() || !Markers::load(m->target, im)) {   // no picture yet: a grey card
+            im.w = 512; im.h = 384; im.px.assign((size_t)im.w * im.h * 4, 150);
+        }
+        Viewer::setAnchorMode(1, nullptr);
+        Viewer::setMarkerPicture(im.px, im.w, im.h);
+        return;
+    }
+    Viewer::setAnchorMode(0, nullptr);
     const Markers::Image im = printable(*m, 512);
     Viewer::setMarkerPicture(im.px, im.w, im.h);
 }
@@ -221,7 +237,7 @@ static std::string bring(const std::string& file) {   // a file into the project
     return dst.u8string();
 }
 static void forEachFile(Project& p, const std::function<void(std::string&)>& f) {
-    for (auto& m : p.markers) { f(m.picture); for (auto& o : m.objects) f(o.file); }
+    for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); for (auto& sc : o.scripts) f(sc.file); } }
 }
 static bool saveProject(bool askFolder) {
     if (folder.empty() || askFolder) {
@@ -281,11 +297,16 @@ static void create(int kind) {
     reparent(*m, o.id, parent);
     selObject = o.id;
 }
+static const char* anchorWord() { return proj.tracking == TRACK_IMAGES ? "Picture" : proj.tracking == TRACK_FACES ? "Face" : proj.tracking == TRACK_HANDS ? "Hand" : "Marker"; }
+static const char* anchorIcon() {   // what the Hierarchy shows before an anchor's name
+    return proj.tracking == TRACK_IMAGES ? "\xe2\x96\xa8" : proj.tracking == TRACK_FACES ? "\xe2\x98\xba" : proj.tracking == TRACK_HANDS ? "\xe2\x9c\x8b" : "\xe2\x96\xa3";
+}
 static void addMarker() {
     Scene::Marker k; k.id = newId(proj);
     int n = (int)proj.markers.size();
-    k.name = "AR Marker " + std::to_string(n + 1);
+    k.name = std::string(anchorWord()) + " " + std::to_string(n + 1);
     k.type = n == 0 ? MK_PATTERN : MK_BARCODE; k.preset = n == 0 ? "hiro" : ""; k.barcode = n;
+    if (proj.tracking == TRACK_FACES) { k.facePoint = FACE_POINTS[std::min(n, FACE_POINT_COUNT - 1)].landmark; k.name = FACE_POINTS[std::min(n, FACE_POINT_COUNT - 1)].name; }
     proj.markers.push_back(k);
     selMarker = (int)proj.markers.size() - 1; selObject = -1;
 }
@@ -311,7 +332,14 @@ static bool buildGame(const std::string& out, std::string& err) {
     std::error_code ec;
     const fs::path o = fs::u8path(out), web = fs::u8path(exeDir) / "assets" / "web";
     fs::create_directories(o / "assets", ec); fs::create_directories(o / "markers", ec);
-    if (!copyTree(web / "lib", o / "lib") || !copyTree(web / "data", o / "data")) { err = "Couldn't copy the player into " + out; return false; }
+    const bool mind = proj.tracking == TRACK_IMAGES || proj.tracking == TRACK_FACES;
+    if (proj.tracking == TRACK_HANDS) { err = "Hand tracking isn't in yet: pick Markers, Images or Faces in Project Settings"; return false; }
+    // only what this game's tracking needs: jsartoolkit5 (markers) or MindAR (pictures, faces)
+    std::error_code rm; fs::remove_all(o / "lib", rm);
+    if (mind ? !copyTree(web / "mindar", o / "lib" / "mindar") : (!copyTree(web / "lib", o / "lib") || !copyTree(web / "data", o / "data"))) {
+        err = "Couldn't copy the player into " + out; return false;
+    }
+    fs::create_directories(o / "lib", ec);
     fs::copy_file(web / "diorama.js", o / "lib" / "diorama.js", fs::copy_options::overwrite_existing, ec);
     // the files the scene uses, each once, under assets/
     Project b = proj;
@@ -333,6 +361,15 @@ static bool buildGame(const std::string& out, std::string& err) {
         Scene::Marker& m = b.markers[i];
         const std::string slug = slugOf(m.name) + "-" + std::to_string(i + 1);
         for (auto& ob : m.objects) take(ob.file);
+        if (proj.tracking == TRACK_IMAGES) {   // the picture to look for: in the build, and on the sheet to print
+            if (m.target.empty()) { err = m.name + " has no picture to look for (its Inspector)"; return false; }
+            Markers::Image im;
+            if (Markers::load(m.target, im)) sheet.push_back({im, m.name});
+            take(m.target);
+            m.picture.clear();
+            continue;
+        }
+        if (proj.tracking == TRACK_FACES) { m.picture.clear(); continue; }
         if (m.type == MK_PATTERN) {
             // every pattern file is written from the very picture that's printed, so the two always agree
             std::ofstream(o / "markers" / (slug + ".patt"), std::ios::binary) << Markers::pattFrom(insidePicture(m));
@@ -385,17 +422,34 @@ static bool buildGame(const std::string& out, std::string& err) {
     h << "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n"
          "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n"
          "  <title>" << title << "</title>\n"
-         "  <style>\n    html, body { margin: 0; background: #111; color: #e6e6e6; font-family: 'Segoe UI', Arial, sans-serif; overflow: hidden; }\n"
+         "  <style>\n    html { background: #111; }\n    body { margin: 0; width: 100vw; height: 100vh; color: #e6e6e6; font-family: 'Segoe UI', Arial, sans-serif; overflow: hidden; position: relative; }\n"
          "    canvas { display: block; margin: 0 auto; }\n"
          "    #hint { position: fixed; left: 0; right: 0; bottom: 14px; text-align: center; font-size: 14px; opacity: 0.8; }\n"
          "    #hint a { color: #34a9e3; }\n  </style>\n</head>\n<body>\n"
-         "  <div id=\"hint\">Point the camera at the marker. <a href=\"markers.png\" target=\"_blank\">Print the markers</a></div>\n"
-         "  <script src=\"lib/three.min.js\"></script>\n  <script src=\"lib/GLTFLoader.js\"></script>\n"
-         "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"scene.js\"></script>\n"
-         "  <script>Diorama.start('scene.json');</script>\n"
-         "  <script async src=\"lib/artoolkit.min.js\"></script>\n  <script async src=\"lib/artoolkit.three.js\"></script>\n"
-         "  <!-- Made with Diorama (Cursed Entertainment). jsartoolkit5: LGPL-3.0; three.js: MIT (see lib/). -->\n"
-         "</body>\n</html>\n";
+         "  <div id=\"hint\">" << (proj.tracking == TRACK_FACES ? "Look at the camera." : proj.tracking == TRACK_IMAGES ? "Point the camera at the picture." : "Point the camera at the marker.")
+      << (proj.tracking == TRACK_FACES ? "" : proj.tracking == TRACK_IMAGES ? " <a href=\"markers.png\" target=\"_blank\">The pictures</a>" : " <a href=\"markers.png\" target=\"_blank\">Print the markers</a>")
+      << "</div>\n";
+    if (!mind)
+        h << "  <script src=\"lib/three.min.js\"></script>\n  <script src=\"lib/GLTFLoader.js\"></script>\n"
+             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"scene.js\"></script>\n"
+             "  <script>Diorama.startMarkers();</script>\n"
+             "  <script async src=\"lib/artoolkit.min.js\"></script>\n  <script async src=\"lib/artoolkit.three.js\"></script>\n"
+             "  <!-- Made with Diorama (Cursed Entertainment). jsartoolkit5: LGPL-3.0; three.js: MIT (see lib/). -->\n";
+    else {
+        const bool faces = proj.tracking == TRACK_FACES;
+        h << "  <script type=\"importmap\">{ \"imports\": { \"three\": \"./lib/mindar/three/three.module.min.js\", \"three/addons/\": \"./lib/mindar/three/addons/\" } }</script>\n"
+             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"scene.js\"></script>\n"
+             "  <script type=\"module\">\n"
+             "    import * as THREE from 'three';\n"
+             "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
+          << (faces ? "    import { MindARThree } from './lib/mindar/mindar-face-three.prod.js';\n"
+                      "    Diorama.startMind({ THREE: THREE, GLTFLoader: GLTFLoader, MindARThree: MindARThree, mode: 'face' });\n"
+                    : "    import { MindARThree } from './lib/mindar/mindar-image-three.prod.js';\n"
+                      "    import { Compiler } from './lib/mindar/mindar-image.prod.js';\n"
+                      "    Diorama.startMind({ THREE: THREE, GLTFLoader: GLTFLoader, MindARThree: MindARThree, Compiler: Compiler, mode: 'image' });\n")
+          << "  </script>\n  <!-- Made with Diorama (Cursed Entertainment). MindAR: MIT; three.js: MIT (see lib/mindar/). -->\n";
+    }
+    h << "</body>\n</html>\n";
     std::ofstream(o / "README.txt", std::ios::binary) <<
         proj.title << ", made with Diorama.\n\n"
         "To play it on this PC: double-click Play.bat (opening index.html straight from the disk can't load the game).\n\n"
@@ -452,7 +506,7 @@ static void gameObjectItems() {
         if (ImGui::MenuItem("Light rays")) create(RAYS);
         if (ImGui::MenuItem("Words")) create(WORDS);
         ImGui::Separator();
-        if (ImGui::MenuItem("AR Marker")) addMarker();
+        if (ImGui::MenuItem((std::string("Anchor: ") + anchorWord()).c_str())) addMarker();
         ImGui::EndMenu();
     }
 }
@@ -479,6 +533,8 @@ static void menuBar() {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit")) {
+        if (ImGui::MenuItem("Project Settings...")) showSettings = true;
+        ImGui::Separator();
         Marker* m = curMarker();
         if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, m && selObject >= 0)) selObject = duplicate(proj, *m, selObject);
         if (ImGui::MenuItem("Delete", "Del", false, m != nullptr)) {
@@ -537,7 +593,7 @@ static void hierarchy() {
         if (selMarker == mi && selObject < 0) fl |= ImGuiTreeNodeFlags_Selected;
         ImGui::SetNextItemOpen(m.expanded);
         ImGui::PushStyleColor(ImGuiCol_Text, col4(IM_COL32(0x34, 0xa9, 0xe3, 255)));
-        const bool open = ImGui::TreeNodeEx("##m", fl, "\xe2\x96\xa3 %s", m.name.c_str());   // a square: the marker
+        const bool open = ImGui::TreeNodeEx("##m", fl, "%s %s  (%s)", anchorIcon(), m.name.c_str(), anchorWord());   // what kind of anchor, at a glance
         ImGui::PopStyleColor();
         m.expanded = open;
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) { selMarker = mi; selObject = -1; }
@@ -608,7 +664,21 @@ static void labelled(const char* l) { ImGui::AlignTextToFramePadding(); ImGui::T
 static void markerInspector(Scene::Marker& m) {
     char name[96]; snprintf(name, sizeof name, "%s", m.name.c_str());
     ImGui::SetNextItemWidth(-1); if (ImGui::InputText("##name", name, sizeof name)) m.name = name;
-    if (section("AR Marker")) {
+    ImGui::TextDisabled("%s anchor (Edit > Project Settings: what the game tracks)", anchorWord());
+    if (proj.tracking == TRACK_IMAGES && section("Picture to look for")) {
+        fileRow("Picture", m.target, L"Pictures\0*.png;*.jpg;*.jpeg\0\0");
+        ImGui::TextDisabled("Any photo, poster or page; it's 1 across in the scene.\nDetailed pictures with corners and texture track best;\nplain or repeating ones don't.");
+    }
+    if (proj.tracking == TRACK_FACES && section("Face")) {
+        labelled("On the");
+        const auto& cur = facePointOf(m);
+        if (ImGui::BeginCombo("##fp", cur.name)) {
+            for (int i = 0; i < FACE_POINT_COUNT; ++i) if (ImGui::Selectable(FACE_POINTS[i].name, m.facePoint == FACE_POINTS[i].landmark)) m.facePoint = FACE_POINTS[i].landmark;
+            ImGui::EndCombo();
+        }
+        ImGui::TextDisabled("1 unit is the face's width; +Z comes out of the face.\nThe head hides what's behind it (a hat's back, glasses' arms).");
+    }
+    if (proj.tracking == TRACK_MARKERS && section("AR Marker")) {
         labelled("Type");
         const char* types[] = {"Pattern (like Hiro)", "Barcode (3x3)"};
         ImGui::Combo("##type", &m.type, types, 2);
@@ -1011,6 +1081,39 @@ static void sceneView() {
     handleHasMouse = handles(a, avail);
 }
 
+// ---------- Project Settings: what the game tracks, and the player's location ----------
+static void projectSettings() {
+    if (showSettings) { ImGui::OpenPopup("Project Settings"); showSettings = false; }
+    ImGui::SetNextWindowSize(ImVec2(620, 0));
+    if (!ImGui::BeginPopupModal("Project Settings", nullptr, ImGuiWindowFlags_NoResize)) return;
+    ImGui::PushFont(boldFont); ImGui::TextUnformatted("What the game tracks"); ImGui::PopFont();
+    ImGui::TextDisabled("One for the whole game: its anchors (the top of the Hierarchy) are of this kind.");
+    struct Opt { int v; const char* name; const char* what; const char* how; bool ready; };
+    const Opt opts[] = {
+        {TRACK_MARKERS, "Markers", "Printed markers: Hiro, Kanji, your own picture or letter, barcodes 0..63. Steady and fast; needs printing.", "jsartoolkit5", true},
+        {TRACK_IMAGES, "Images", "Any photo, poster, painting or book cover, as it is. Detailed pictures with corners track best.", "MindAR", true},
+        {TRACK_FACES, "Faces", "The player's face: masks, glasses, hats, face filters; scripts can read expressions.", "MindAR face", true},
+        {TRACK_HANDS, "Hands", "The player's hand: things on the palm or the fingertips.", "coming", false},
+    };
+    for (const Opt& o : opts) {
+        ImGui::BeginDisabled(!o.ready);
+        if (ImGui::RadioButton(o.name, proj.tracking == o.v) && proj.tracking != o.v) {
+            beginEdit(); proj.tracking = o.v; shownMarker = -1;
+            for (auto& m : proj.markers) if (m.name.rfind("Marker", 0) == 0 || m.name.rfind("Picture", 0) == 0 || m.name.rfind("AR Marker", 0) == 0) {}
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine(110); ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x);
+        ImGui::TextDisabled("%s  (%s)", o.what, o.how); ImGui::PopTextWrapPos();
+    }
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    ImGui::PushFont(boldFont); ImGui::TextUnformatted("Location"); ImGui::PopFont();
+    if (ImGui::Checkbox("Use the player's location (GPS)", &proj.gps)) beginEdit();
+    ImGui::TextDisabled("Off: the game never asks for it. On: scripts can read where the player is, and place anchors at\nreal places (coming). Phones ask the player first.");
+    ImGui::Spacing();
+    if (ImGui::Button("Done", ImVec2(-1, 28)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 static void about() {
     if (showAbout) { ImGui::OpenPopup("About Diorama"); showAbout = false; }
     ImGui::SetNextWindowSize(ImVec2(Splash::W + 16, 0));
@@ -1075,6 +1178,7 @@ static void frame() {
     ImGui::End();
     ImGui::PopStyleVar();
     about();
+    projectSettings();
     // a field, checkbox or menu item that just began an edit: undoable (the handles call beginEdit themselves)
     const ImGuiID active = ImGui::GetActiveID();
     static ImGuiID lastActive = 0;

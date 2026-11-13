@@ -14,6 +14,12 @@ namespace Scene {
 
 const char* KIND_NAMES[KIND_COUNT] = {"Empty", "Plane", "Cube", "Sphere", "Capsule", "Cylinder", "Quad", "Picture", "Model", "Sprites", "Light rays", "Words"};
 const char* ANIM_NAMES[ANIM_COUNT] = {"Still", "Float", "Spin", "Sway", "Pulse"};
+const char* TRACKING_NAMES[TRACKING_COUNT] = {"markers", "images", "faces", "hands"};
+const FacePoint FACE_POINTS[] = {
+    {"Nose tip", 1, {0, 0.05f, -0.62f}}, {"Between the eyes", 168, {0, -0.12f, -0.5f}}, {"Forehead", 10, {0, -0.42f, -0.45f}},
+    {"Chin", 152, {0, 0.62f, -0.42f}}, {"Mouth", 13, {0, 0.3f, -0.55f}}, {"Left eye", 159, {0.17f, -0.12f, -0.48f}},
+    {"Right eye", 386, {-0.17f, -0.12f, -0.48f}}, {"Left cheek", 234, {0.48f, 0.05f, -0.1f}}, {"Right cheek", 454, {-0.48f, 0.05f, -0.1f}}};
+const int FACE_POINT_COUNT = (int)(sizeof FACE_POINTS / sizeof FACE_POINTS[0]);
 bool isPrimitive(int k) { return k >= PLANE && k <= QUAD; }
 
 int newId(Project& p) { return p.nextId++; }
@@ -96,7 +102,8 @@ static bool readBool(const Json::Value& o, const char* k, bool def) { const Json
 static int indexOf(const char* const* names, int n, const std::string& s, int def) { for (int i = 0; i < n; ++i) if (s == names[i]) return i; return def; }
 
 std::string toJson(const Project& p) {
-    std::string out = "{\n  \"diorama\": 1,\n  \"title\": " + Json::quote(p.title) + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"markers\": [";
+    std::string out = "{\n  \"diorama\": 1,\n  \"title\": " + Json::quote(p.title) + ",\n  \"tracking\": \"" + TRACKING_NAMES[p.tracking] +
+                      "\",\n  \"gps\": " + (p.gps ? "true" : "false") + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"markers\": [";
     for (size_t m = 0; m < p.markers.size(); ++m) {
         const Marker& k = p.markers[m];
         Json::Writer w;
@@ -104,6 +111,7 @@ std::string toJson(const Project& p) {
          .s("letter", k.letter).i("barcode", k.barcode).f("sunStrength", k.sunStrength).f("sunYaw", k.sunYaw).f("sunPitch", k.sunPitch)
          .b("portal", k.portal).b("expanded", k.expanded);
         if (!k.patt.empty()) w.s("patt", k.patt);
+        w.s("target", k.target).i("facePoint", k.facePoint);
         w.key("ambient"); w.out += arr(k.ambient, 3);
         w.key("sun"); w.out += arr(k.sun, 3);
         w.key("portalSize"); w.out += arr(k.portalSize, 2);
@@ -137,12 +145,15 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
     p = Project();
     p.title = v.str("title", p.title);
     p.nextId = (int)v.num("nextId", 1);
+    p.tracking = indexOf(TRACKING_NAMES, TRACKING_COUNT, v.str("tracking", "markers"), TRACK_MARKERS);
+    { const Json::Value* g = v.get("gps"); p.gps = g && g->type == Json::Value::BOOL && g->b; }
     const Json::Value* ms = v.get("markers");
     if (!ms || ms->type != Json::Value::ARR) return true;
     for (const Json::Value& mv : ms->a) {
         Marker k;
         k.id = (int)mv.num("id", 0); k.name = mv.str("name", k.name); k.type = mv.str("type") == "barcode" ? MK_BARCODE : MK_PATTERN; k.preset = mv.str("preset", "");
         k.picture = mv.str("picture"); k.letter = mv.str("letter"); k.barcode = (int)mv.num("barcode", 0);
+        k.target = mv.str("target"); k.facePoint = (int)mv.num("facePoint", 1);
         k.sunStrength = (float)mv.num("sunStrength", k.sunStrength); k.sunYaw = (float)mv.num("sunYaw", k.sunYaw); k.sunPitch = (float)mv.num("sunPitch", k.sunPitch);
         k.portal = readBool(mv, "portal", k.portal); k.expanded = readBool(mv, "expanded", true);
         readArr(mv, "ambient", k.ambient, 3); readArr(mv, "sun", k.sun, 3); readArr(mv, "portalSize", k.portalSize, 2);

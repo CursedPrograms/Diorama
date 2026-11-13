@@ -357,6 +357,8 @@ static const Tex& words(const std::string& text) {
 
 static GLuint rayTex = 0, markerTex = 0, deskTex = 0, whiteTex = 0;
 static int markerW = 1, markerH = 1;
+static int anchorMode = 0; static float headAt[3] = {0, 0, -0.6f};
+void setAnchorMode(int mode, const float head[3]) { anchorMode = mode; if (head) memcpy(headAt, head, sizeof headAt); }
 void setMarkerPicture(const std::vector<unsigned char>& rgba, int w, int h) {
     if (markerTex) glDeleteTextures(1, &markerTex);
     markerTex = rgba.empty() ? 0 : texUpload(rgba.data(), w, h);
@@ -602,7 +604,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     else { glUniform3f_(uSun, 0.9f, 0.9f, 0.9f); glUniform3f_(uAmbient, 0.5f, 0.5f, 0.5f); }
 
     // the window into the paper: its opening marked in the stencil first, so the desk leaves it open
-    const bool portal = m && m->portal;
+    const bool portal = m && m->portal && anchorMode != 2;
     const M4 portalM = portal ? scale(m->portalSize[0], 1, m->portalSize[1]) : ident();
     if (portal) {
         glEnable(GL_STENCIL_TEST);
@@ -614,11 +616,21 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
         glStencilFunc(GL_NOTEQUAL, 1, 0xff); glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
     }
     // the desk and the printed marker (the marker's black square is 1 across; the print has a white margin)
-    if (lk.desk) {
+    if (lk.desk && anchorMode != 2) {
         const float c[4] = {1, 1, 1, 1};
         setCommon(mul(translate(0, -0.002f, 0), scale(1.2f, 1, 1.2f)), c, deskTex, true); draw(mPlane);
     }
-    if (markerTex) { const float c[4] = {1, 1, 1, 1}; setCommon(scale(1.25f, 1, 1.25f), c, markerTex, true); draw(mPicture); }
+    if (anchorMode == 2) {   // a face: a plain head, the anchor point on it (the face looks along +Z, at the viewer)
+        const float c[4] = {0.62f, 0.6f, 0.6f, 1};
+        setCommon(mul(translate(headAt[0], headAt[1], headAt[2]), scale(1.0f, 1.3f, 1.15f)), c, 0, true); draw(mSphere);
+        const float n[4] = {0.55f, 0.53f, 0.53f, 1};   // a nose, so it's clear which way it faces
+        setCommon(mul(translate(headAt[0], headAt[1] + 0.02f, headAt[2] + 0.6f), scale(0.14f, 0.22f, 0.18f)), n, 0, true); draw(mSphere);
+    } else if (markerTex) {
+        const float c[4] = {1, 1, 1, 1};
+        // a printed marker has its white margin round the black square (1 across); a picture is just itself, 1 wide
+        const float sx = anchorMode == 1 ? 1.0f : 1.25f, sz = anchorMode == 1 ? (float)markerH / std::max(1, markerW) : 1.25f;
+        setCommon(scale(sx, 1, sz), c, markerTex, true); draw(mPicture);
+    }
     if (portal) {   // inside the window: dark walls going down, only seen through the opening
         glStencilFunc(GL_EQUAL, 1, 0xff);
         const float c[4] = {0.12f, 0.12f, 0.13f, 1};
