@@ -261,7 +261,7 @@ static std::string bring(const std::string& file) {   // a file into the project
     return fs::exists(dst, ec) ? dst.u8string() : file;   // couldn't copy it: keep using it where it is
 }
 static void forEachFile(Project& p, const std::function<void(std::string&)>& f) {
-    for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); for (auto& sc : o.scripts) f(sc.file); } }
+    for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); f(o.uiFile); f(o.canvasCss); for (auto& sc : o.scripts) f(sc.file); } }
 }
 static bool saveProject(bool askFolder) {
     if (folder.empty() || askFolder) {
@@ -694,7 +694,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     for (size_t i = 0; i < b.markers.size(); ++i) {
         Scene::Marker& m = b.markers[i];
         const std::string slug = slugOf(m.name) + "-" + std::to_string(i + 1);
-        for (auto& ob : m.objects) { take(ob.file); take(ob.audioFile); take(ob.particleFile); take(ob.videoFile); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
+        for (auto& ob : m.objects) { take(ob.file); take(ob.audioFile); take(ob.particleFile); take(ob.videoFile); take(ob.uiFile); take(ob.canvasCss); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
         if (proj.tracking == TRACK_IMAGES) {   // the picture to look for: in the build, and on the sheet to print
             if (m.target.empty()) { err = m.name + " has no picture to look for (its Inspector)"; return false; }
             Markers::Image im;
@@ -738,7 +738,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
                 if (e.path().extension() != ".prefab") continue;
                 std::vector<Object> objs;
                 if (!loadPrefab(e.path().u8string(), objs)) continue;
-                for (auto& o : objs) { take(o.file); take(o.audioFile); take(o.particleFile); take(o.videoFile); for (auto& sc : o.scripts) take(sc.file); }
+                for (auto& o : objs) { take(o.file); take(o.audioFile); take(o.particleFile); take(o.videoFile); take(o.uiFile); take(o.canvasCss); for (auto& sc : o.scripts) take(sc.file); }
                 Project tmp; Scene::Marker k; k.objects = objs; tmp.markers.push_back(k);
                 f << (firstP ? "\n  " : ",\n  ") << Json::quote(e.path().stem().u8string()) << ": (" << Scene::toJson(tmp) << ").markers[0].objects";
                 firstP = false;
@@ -1063,6 +1063,138 @@ static void markerMaker() {
     ImGui::End();
 }
 
+
+// ---------- the game's UI: Canvases and their elements, drawn over the Scene view on a phone-shaped frame ----------
+static bool showUI = true;
+static const float UI_W = 400, UI_H = 711;   // the phone the UI is laid out on (points); the game scales it to the screen
+static int canvasOf(const Scene::Marker& m, int id) {   // the Canvas an object is in (-1 none)
+    for (int i = indexOfId(m, id); i >= 0; i = indexOfId(m, m.objects[i].parent)) if (m.objects[i].hasCanvas) return m.objects[i].id;
+    return -1;
+}
+// an element's rectangle (screen) inside its parent's
+static ImVec4 uiRectIn(const Object& o, const ImVec4& p, float s) {
+    const int ax = o.uiAnchor % 3, ay = o.uiAnchor / 3;
+    const float w = o.uiRect[2] * s, h = o.uiRect[3] * s;
+    const float px = p.x + (p.z - p.x) * ax * 0.5f + o.uiRect[0] * s, py = p.y + (p.w - p.y) * ay * 0.5f + o.uiRect[1] * s;
+    const float x0 = px - w * ax * 0.5f, y0 = py - h * ay * 0.5f;
+    return ImVec4(x0, y0, x0 + w, y0 + h);
+}
+static ImU32 u32(const float* c) { return IM_COL32((int)(c[0] * 255), (int)(c[1] * 255), (int)(c[2] * 255), (int)(c[3] * 255)); }
+struct UiHit { int marker, id; ImVec4 r; };
+static void drawUiTree(ImDrawList* dl, const Scene::Marker& m, int mi, int parentId, const ImVec4& pr, float s, std::vector<UiHit>& hits) {
+    for (const Object& o : m.objects) {
+        if (o.parent != parentId || !o.active) continue;
+        ImVec4 r = pr;
+        if (o.ui != UI_NONE && o.uiOn) {
+            r = uiRectIn(o, pr, s);
+            const ImVec2 a(r.x, r.y), b(r.z, r.w);
+            const float fs = std::max(6.0f, o.uiFont * s);
+            ImFont* f = ImGui::GetFont();
+            auto text = [&](const std::string& t, ImVec2 lo, ImVec2 hi, int align) {
+                const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, t.c_str());
+                const float x = align == 0 ? lo.x + 4 * s : align == 2 ? hi.x - ts.x - 4 * s : (lo.x + hi.x - ts.x) / 2;
+                dl->AddText(f, fs, ImVec2(x, (lo.y + hi.y - ts.y) / 2), u32(o.uiColour), t.c_str());
+            };
+            const float rad = 6 * s;
+            switch (o.ui) {
+            case UI_PANEL: dl->AddRectFilled(a, b, u32(o.uiBg), rad); break;
+            case UI_TEXT: text(o.uiText, a, b, o.uiAlign); break;
+            case UI_BUTTON: dl->AddRectFilled(a, b, u32(o.uiBg), rad); text(o.uiText, a, b, 1); break;
+            case UI_SLIDER: {
+                const float cy = (a.y + b.y) / 2, t = std::clamp((o.uiValue - o.uiMin) / std::max(1e-6f, o.uiMax - o.uiMin), 0.0f, 1.0f);
+                dl->AddRectFilled(ImVec2(a.x, cy - 3 * s), ImVec2(b.x, cy + 3 * s), IM_COL32(255, 255, 255, 90), 3 * s);
+                dl->AddRectFilled(ImVec2(a.x, cy - 3 * s), ImVec2(a.x + (b.x - a.x) * t, cy + 3 * s), u32(o.uiBg), 3 * s);
+                dl->AddCircleFilled(ImVec2(a.x + (b.x - a.x) * t, cy), std::min(10 * s, (b.y - a.y) / 2), IM_COL32(255, 255, 255, 255));
+                break;
+            }
+            case UI_TOGGLE: {
+                const float bx = std::min(b.y - a.y, 24 * s), by = (a.y + b.y - bx) / 2;
+                dl->AddRectFilled(ImVec2(a.x, by), ImVec2(a.x + bx, by + bx), o.uiChecked ? u32(o.uiBg) : IM_COL32(255, 255, 255, 60), 4 * s);
+                if (o.uiChecked) dl->AddPolyline(std::vector<ImVec2>{ImVec2(a.x + bx * 0.22f, by + bx * 0.52f), ImVec2(a.x + bx * 0.42f, by + bx * 0.72f), ImVec2(a.x + bx * 0.8f, by + bx * 0.3f)}.data(), 3, IM_COL32(255, 255, 255, 255), 0, 2.5f * s);
+                text(o.uiText, ImVec2(a.x + bx + 4 * s, a.y), b, 0);
+                break;
+            }
+            case UI_IMAGE: {
+                const unsigned t = Viewer::pictureTexture(o.uiFile, nullptr, nullptr);
+                if (t) dl->AddImage((ImTextureID)(intptr_t)t, a, b, ImVec2(0, 0), ImVec2(1, 1), u32(o.uiColour));
+                else dl->AddRect(a, b, IM_COL32(255, 255, 255, 120), 0, 0, 1);
+                break;
+            }
+            }
+            hits.push_back({mi, o.id, r});
+        }
+        if (o.ui != UI_NONE || o.hasCanvas) drawUiTree(dl, m, mi, o.id, r, s, hits);
+    }
+}
+// the overlay; true when the mouse is on the UI (it picks and drags UI elements, not the 3D view)
+static bool uiOverlay(ImVec2 a, ImVec2 avail) {
+    bool any = false;
+    for (const auto& m : proj.markers) for (const auto& o : m.objects) if (o.hasCanvas) any = true;
+    if (!showUI || !any) return false;
+    const float h = avail.y - 16, w = h * UI_W / UI_H;
+    const ImVec4 frame(a.x + (avail.x - w) / 2, a.y + 8, a.x + (avail.x + w) / 2, a.y + 8 + h);
+    const float s = w / UI_W;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRect(ImVec2(frame.x - 1, frame.y - 1), ImVec2(frame.z + 1, frame.w + 1), IM_COL32(255, 255, 255, 70), 10, 0, 1.5f);
+    std::vector<UiHit> hits;
+    for (int mi = 0; mi < (int)proj.markers.size(); ++mi) {
+        const auto& m = proj.markers[mi];
+        for (const Object& o : m.objects) if (o.hasCanvas && o.active && (!o.canvasWithAnchor || mi == selMarker)) drawUiTree(dl, m, mi, o.id, frame, s, hits);
+    }
+    // the selected one, outlined
+    for (const auto& hh : hits) if (hh.marker == selMarker && hh.id == selObject)
+        dl->AddRect(ImVec2(hh.r.x - 1, hh.r.y - 1), ImVec2(hh.r.z + 1, hh.r.w + 1), C_BLUE, 0, 0, 2);
+    // pick (the topmost: drawn last) and drag
+    static int dragId = -1, dragMarker = -1;
+    const ImVec2 mp = ImGui::GetMousePos();
+    int over = -1;
+    for (int i = (int)hits.size() - 1; i >= 0; --i) if (mp.x >= hits[i].r.x && mp.x <= hits[i].r.z && mp.y >= hits[i].r.y && mp.y <= hits[i].r.w) { over = i; break; }
+    const bool inView = mp.x >= a.x && mp.y >= a.y && mp.x < a.x + avail.x && mp.y < a.y + avail.y && ImGui::IsWindowHovered();
+    if (inView && over >= 0 && ImGui::IsMouseClicked(0)) { beginEdit(); selMarker = hits[over].marker; selObject = hits[over].id; dragId = selObject; dragMarker = selMarker; }
+    if (dragId >= 0) {
+        if (!ImGui::IsMouseDown(0)) dragId = -1;
+        else if (Scene::Marker* m = dragMarker < (int)proj.markers.size() ? &proj.markers[dragMarker] : nullptr) {
+            const int i = indexOfId(*m, dragId);
+            const ImVec2 d = ImGui::GetIO().MouseDelta;
+            if (i >= 0) { m->objects[i].uiRect[0] += d.x / s; m->objects[i].uiRect[1] += d.y / s; }
+        }
+        return true;
+    }
+    return inView && over >= 0;
+}
+// a UI element: under the selected Canvas (or its elements), else in a new Canvas, like Unity
+static void createUI(int type) {
+    Marker* m = curMarker();
+    if (!m) { Scene::Marker k; k.id = newId(proj); k.name = std::string(anchorWord()) + " 1"; proj.markers.push_back(k); selMarker = 0; m = curMarker(); }
+    beginEdit();
+    int canvas = selObject >= 0 ? canvasOf(*m, selObject) : -1;
+    if (type == 0 || canvas < 0) {
+        Object c = make(proj, EMPTY, -1); c.name = "Canvas"; c.hasCanvas = true;
+        m->objects.push_back(c); canvas = c.id;
+        if (type == 0) { selObject = c.id; return; }
+    }
+    int parent = canvas;
+    if (selObject >= 0) { const int i = indexOfId(*m, selObject); if (i >= 0 && (m->objects[i].ui == UI_PANEL || m->objects[i].hasCanvas)) parent = selObject; }
+    Object o = make(proj, EMPTY, parent);
+    o.ui = type; o.name = UI_NAMES[type];
+    switch (type) {
+    case UI_TEXT: o.uiText = "New Text"; o.uiRect[2] = 240; o.uiRect[3] = 40; break;
+    case UI_BUTTON: o.uiText = "Button"; break;
+    case UI_SLIDER: o.uiRect[2] = 240; o.uiRect[3] = 32; break;
+    case UI_TOGGLE: o.uiText = "Toggle"; o.uiRect[2] = 200; o.uiRect[3] = 32; break;
+    case UI_IMAGE: { const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); o.uiFile = f.empty() ? "" : bring(f); o.uiRect[2] = o.uiRect[3] = 120; break; }
+    case UI_PANEL: o.uiRect[2] = 320; o.uiRect[3] = 200; o.uiBg[0] = 0.1f; o.uiBg[1] = 0.1f; o.uiBg[2] = 0.11f; o.uiBg[3] = 0.85f; break;
+    }
+    m->objects.push_back(o);
+    reparent(*m, o.id, parent);
+    selObject = o.id;
+}
+static void uiMenuItems() {
+    if (ImGui::MenuItem("Canvas")) createUI(0);
+    ImGui::Separator();
+    for (int k = 1; k < UI_COUNT; ++k) if (ImGui::MenuItem((std::string(UI_NAMES[k]) + (k == UI_IMAGE ? "..." : "")).c_str())) createUI(k);
+}
+
 // ---------- the menus ----------
 static void gameObjectItems() {
     if (ImGui::MenuItem("Create Empty", "Ctrl+Shift+N")) create(EMPTY);
@@ -1070,6 +1202,7 @@ static void gameObjectItems() {
         for (int k : {PLANE, CUBE, SPHERE, CAPSULE, CYLINDER, QUAD}) if (ImGui::MenuItem(KIND_NAMES[k])) create(k);
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("UI")) { uiMenuItems(); ImGui::EndMenu(); }
     if (ImGui::BeginMenu("AR")) {
         if (ImGui::MenuItem("Picture...")) create(PICTURE);
         if (ImGui::MenuItem("Model...")) create(MODEL);
@@ -1134,7 +1267,7 @@ static bool savePrefab(const Scene::Marker& m, int rootId, const std::string& di
     const fs::path base = fs::u8path(folder);
     for (auto& o : k.objects) {
         auto rel = [&](std::string& f) { if (f.empty()) return; std::error_code ec; const fs::path r = fs::relative(fs::u8path(f), base, ec); if (!ec && r.u8string().rfind("..", 0) != 0) f = r.generic_u8string(); };
-        rel(o.file); rel(o.audioFile); rel(o.particleFile); rel(o.videoFile); for (auto& sc : o.scripts) rel(sc.file);
+        rel(o.file); rel(o.audioFile); rel(o.particleFile); rel(o.videoFile); rel(o.uiFile); rel(o.canvasCss); for (auto& sc : o.scripts) rel(sc.file);
     }
     tmp.markers.push_back(k);
     std::string name = k.objects[0].name; for (auto& c : name) if (strchr("<>:\"/\\|?*", c)) c = '_';
@@ -1151,7 +1284,7 @@ static bool loadPrefab(const std::string& file, std::vector<Object>& out) {
     const fs::path base = fs::u8path(folder);
     for (auto& o : out) {
         auto abs = [&](std::string& f) { if (!f.empty() && fs::u8path(f).is_relative()) f = (base / fs::u8path(f)).u8string(); };
-        abs(o.file); abs(o.audioFile); abs(o.particleFile); abs(o.videoFile); for (auto& sc : o.scripts) abs(sc.file);
+        abs(o.file); abs(o.audioFile); abs(o.particleFile); abs(o.videoFile); abs(o.uiFile); abs(o.canvasCss); for (auto& sc : o.scripts) abs(sc.file);
     }
     return !out.empty();
 }
@@ -1523,6 +1656,14 @@ static void addComponentMenu(Object& o) {
         }
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("UI")) {
+        if (ImGui::MenuItem("Canvas", nullptr, false, !o.hasCanvas && o.ui == UI_NONE)) o.hasCanvas = true;
+        for (int k = 1; k < UI_COUNT; ++k) if (ImGui::MenuItem(UI_NAMES[k], nullptr, false, o.ui == UI_NONE && !o.hasCanvas)) {
+            o.ui = k; o.uiText = k == UI_TEXT ? "New Text" : UI_NAMES[k];
+            if (k == UI_IMAGE) { const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); if (!f.empty()) o.uiFile = bring(f); }
+        }
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Script")) {
         if (ImGui::MenuItem("New Script")) newScript(o);
         if (ImGui::MenuItem("Existing Script...")) { const std::string f = openDialog(L"JavaScript\0*.js\0\0"); if (!f.empty()) o.scripts.push_back({bring(f), true}); }
@@ -1599,6 +1740,73 @@ static void objectInspector(Scene::Marker& m, Object& o) {
                     if (o.anim != A_SPIN) { labelled("Amount"); ImGui::SliderFloat("##aam", &o.animAmount, 0, 1, "%.3f"); }
                 }
             }
+        }
+    }
+    // Canvas
+    if (o.hasCanvas) {
+        h = componentHeader("Canvas", nullptr, true);
+        if ((h & 0xff) == C_REMOVE) o.hasCanvas = false;
+        else if (h & 0x100) {
+            ImGui::Checkbox("Only while its anchor is found", &o.canvasWithAnchor);
+            tip("Off: always on the screen (menus, scores). On: shown while its marker, picture or face is seen");
+            fileRow("Style sheet", o.canvasCss, L"CSS style sheet\0*.css\0\0");
+            tip("Your own CSS for the game's UI: elements have classes dio-ui, dio-text, dio-button, dio-slider,\ndio-toggle, dio-image, dio-panel, and the classes you give them");
+            ImGui::TextDisabled("The game's UI, laid over the camera as HTML.\nIts elements (GameObject > UI) go under it.");
+        }
+    }
+    // a UI element
+    if (o.ui != UI_NONE) {
+        h = componentHeader((std::string("UI ") + UI_NAMES[o.ui]).c_str(), &o.uiOn, true);
+        if ((h & 0xff) == C_REMOVE) o.ui = UI_NONE;
+        else if (h & 0x100) {
+            // the anchor: a 3 x 3 of buttons, like Unity's anchor presets
+            labelled("Anchor");
+            ImGui::BeginGroup();
+            for (int k = 0; k < 9; ++k) {
+                if (k % 3) ImGui::SameLine(0, 2);
+                ImGui::PushID(500 + k);
+                const bool on = o.uiAnchor == k;
+                if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_BLUE));
+                if (ImGui::Button(on ? "\xe2\x97\x8f" : "", ImVec2(22, 16))) {   // keep it where it is on the screen
+                    const ImVec4 pr(0, 0, UI_W, UI_H);
+                    const ImVec4 r = uiRectIn(o, pr, 1);
+                    const int ax = k % 3, ay = k / 3;
+                    o.uiAnchor = k;
+                    o.uiRect[0] = r.x + o.uiRect[2] * ax * 0.5f - UI_W * ax * 0.5f; o.uiRect[1] = r.y + o.uiRect[3] * ay * 0.5f - UI_H * ay * 0.5f;
+                }
+                if (on) ImGui::PopStyleColor();
+                ImGui::PopID();
+            }
+            ImGui::EndGroup();
+            labelled("X, Y"); ImGui::DragFloat2("##uixy", o.uiRect, 0.5f, -2000, 2000, "%.0f");
+            labelled("Width, Height"); ImGui::DragFloat2("##uiwh", o.uiRect + 2, 0.5f, 0, 4000, "%.0f");
+            if (o.ui == UI_TEXT || o.ui == UI_BUTTON || o.ui == UI_TOGGLE) {
+                char t[512]; snprintf(t, sizeof t, "%s", o.uiText.c_str());
+                labelled("Text"); if (ImGui::InputText("##uit", t, sizeof t)) o.uiText = t;
+                labelled("Size"); ImGui::SliderFloat("##uif", &o.uiFont, 6, 96, "%.0f");
+                if (o.ui == UI_TEXT) { const char* al[] = {"Left", "Centre", "Right"}; labelled("Align"); ImGui::Combo("##uia", &o.uiAlign, al, 3); }
+                labelled("Text colour"); ImGui::ColorEdit4("##uic", o.uiColour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+            }
+            if (o.ui == UI_IMAGE) {
+                fileRow("Picture", o.uiFile, PICS);
+                labelled("Tint"); ImGui::ColorEdit4("##uic", o.uiColour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+            }
+            if (o.ui == UI_BUTTON || o.ui == UI_PANEL || o.ui == UI_SLIDER || o.ui == UI_TOGGLE) {
+                labelled(o.ui == UI_SLIDER ? "Fill" : o.ui == UI_TOGGLE ? "Tick box" : "Background"); ImGui::ColorEdit4("##uib", o.uiBg, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+            }
+            if (o.ui == UI_SLIDER) {
+                labelled("Min, Max"); ImGui::DragFloat2("##uimm", &o.uiMin, 0.01f);
+                labelled("Value"); ImGui::SliderFloat("##uiv", &o.uiValue, o.uiMin, o.uiMax);
+            }
+            if (o.ui == UI_TOGGLE) ImGui::Checkbox("On", &o.uiChecked);
+            char cls[128]; snprintf(cls, sizeof cls, "%s", o.uiClass.c_str());
+            labelled("CSS class"); if (ImGui::InputText("##uicl", cls, sizeof cls)) o.uiClass = cls;
+            const char* hint = o.ui == UI_BUTTON ? "Scripts on it get onClick(); others: getComponent(\"Button\").onClick(fn)"
+                             : o.ui == UI_SLIDER ? "Scripts on it get onChange(value); getComponent(\"Slider\").value"
+                             : o.ui == UI_TOGGLE ? "Scripts on it get onChange(on); getComponent(\"Toggle\").isOn"
+                             : o.ui == UI_TEXT ? "getComponent(\"Text\").text = \"Score: \" + score" : "";
+            if (*hint) ImGui::TextDisabled("%s", hint);
+            if (canvasOf(m, o.id) < 0) ImGui::TextColored(col4(IM_COL32(0xf0, 0xb0, 0x60, 255)), "Put it under a Canvas to show it.");
         }
     }
     const Object D;   // defaults, for Reset
@@ -1908,6 +2116,7 @@ static void sceneView() {
     }
     ImGui::SameLine(0, 14); ImGui::Checkbox("Desk", &lk.desk);
     ImGui::SameLine(); ImGui::Checkbox("Axes", &lk.gizmo);
+    ImGui::SameLine(); ImGui::Checkbox("UI", &showUI); if (ImGui::IsItemHovered()) ImGui::SetTooltip("The game's UI (Canvases) over the view, on a phone");
     ImGui::SameLine(); if (ImGui::Button("Front")) Viewer::frameMarker();
     ImGui::SameLine();
     if (proj.markers.size() > 1) {
@@ -1926,10 +2135,13 @@ static void sceneView() {
     // the handles first take the mouse when it's on them; else the view turns, and a click picks
     static bool handleHasMouse = false;
     int picked = -1;
-    const unsigned tex = Viewer::render(proj, selMarker, selObject, (int)avail.x, (int)avail.y, hov && !handleHasMouse, picked);
-    if (picked >= 0) selObject = picked; else if (picked == -2 && !handleHasMouse) selObject = -1;
+    static bool uiHasMouse = false;
+    const unsigned tex = Viewer::render(proj, selMarker, selObject, (int)avail.x, (int)avail.y, hov && !handleHasMouse && !uiHasMouse, picked);
+    if (!uiHasMouse) { if (picked >= 0) selObject = picked; else if (picked == -2 && !handleHasMouse) selObject = -1; }
     ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)tex, a, ImVec2(a.x + avail.x, a.y + avail.y), ImVec2(0, 1), ImVec2(1, 0));
-    handleHasMouse = handles(a, avail);
+    const Object* so = curObject();
+    handleHasMouse = (so && so->ui != UI_NONE) ? false : handles(a, avail);   // UI elements move on the phone, not in 3D
+    uiHasMouse = !handleHasMouse && uiOverlay(a, avail);
 }
 
 // ---------- Project Settings: what the game tracks, and the player's location ----------

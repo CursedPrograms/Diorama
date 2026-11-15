@@ -64,6 +64,22 @@ struct Object {
     std::string videoFile;
     bool videoLoop = true, videoPlayOnStart = true, videoMuted = false;
     float videoVolume = 1, videoSpeed = 1;
+    // Canvas (the game's UI, laid over the camera as HTML) and its UI elements (children of a Canvas)
+    bool hasCanvas = false, canvasWithAnchor = false;   // withAnchor: shown only while its anchor is found
+    std::string canvasCss;             // the game's own style sheet for its UI ("" none)
+    int ui = 0;                        // UI_NONE, UI_TEXT, ...
+    bool uiOn = true;
+    int uiAnchor = 4;                  // 0 top left .. 8 bottom right (3 x 3), on its parent's rectangle
+    float uiRect[4] = {0, 0, 160, 48}; // x, y (from the anchor, y down), width, height: in points on a 400 x 711 phone
+    std::string uiText = "Text";
+    float uiFont = 20;
+    int uiAlign = 1;                   // 0 left, 1 centre, 2 right
+    float uiColour[4] = {1, 1, 1, 1};  // text
+    float uiBg[4] = {0, 0.482f, 0.718f, 1};   // background (buttons, panels, slider fill, ticks)
+    float uiMin = 0, uiMax = 1, uiValue = 0.5f;
+    bool uiChecked = false;
+    std::string uiFile;                // Image's picture
+    std::string uiClass;               // extra CSS classes
     // Trail Renderer: where it's been
     bool hasTrail = false, trailOn = true;
     float trailTime = 0.5f, trailWidth = 0.03f;
@@ -127,6 +143,8 @@ struct Project {
 };
 
 int newId(Project& p);
+enum { UI_NONE, UI_TEXT, UI_BUTTON, UI_SLIDER, UI_TOGGLE, UI_IMAGE, UI_PANEL, UI_COUNT };
+extern const char* UI_NAMES[UI_COUNT];
 Object make(Project& p, int kind, int parent);   // a new object of a kind, with Unity's default size for it
 std::string toJson(const Project& p);
 bool fromJson(const std::string& text, Project& p, std::string& err);

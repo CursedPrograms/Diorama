@@ -308,6 +308,10 @@ static void poseModel(ModelGL& g, int clip, float t, bool loop) {
         glBufferData_(GL_ARRAY_BUFFER, v.size() * 4, v.data(), GL_DYNAMIC_DRAW);
     }
 }
+unsigned pictureTexture(const std::string& file, int* w, int* h) {
+    if (file.empty()) return 0;
+    const Tex& t = texture(file); if (w) *w = t.w; if (h) *h = t.h; return t.id;
+}
 std::vector<std::string> clipsOf(const std::string& file) {
     std::vector<std::string> v;
     if (ModelGL* g = model(file)) for (const auto& c : g->m.clips) v.push_back(c.name);

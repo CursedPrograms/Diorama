@@ -24,6 +24,7 @@ bool isPrimitive(int k) { return k >= PLANE && k <= QUAD; }
 
 int newId(Project& p) { return p.nextId++; }
 
+const char* UI_NAMES[UI_COUNT] = {"", "Text", "Button", "Slider", "Toggle", "Image", "Panel"};
 Object make(Project& p, int kind, int parent) {
     Object o;
     o.id = newId(p); o.parent = parent; o.kind = kind;
@@ -130,6 +131,9 @@ std::string toJson(const Project& p) {
               .b("spatial", o.spatial).f("audioNear", o.audioNear).f("audioFar", o.audioFar)
               .b("hasVideo", o.hasVideo).b("videoOn", o.videoOn).s("videoFile", o.videoFile).b("videoLoop", o.videoLoop).b("videoPlayOnStart", o.videoPlayOnStart)
               .b("videoMuted", o.videoMuted).f("videoVolume", o.videoVolume).f("videoSpeed", o.videoSpeed)
+              .b("hasCanvas", o.hasCanvas).b("canvasWithAnchor", o.canvasWithAnchor).s("canvasCss", o.canvasCss)
+              .s("ui", UI_NAMES[std::clamp(o.ui, 0, UI_COUNT - 1)]).b("uiOn", o.uiOn).i("uiAnchor", o.uiAnchor).s("uiText", o.uiText).f("uiFont", o.uiFont).i("uiAlign", o.uiAlign)
+              .f("uiMin", o.uiMin).f("uiMax", o.uiMax).f("uiValue", o.uiValue).b("uiChecked", o.uiChecked).s("uiFile", o.uiFile).s("uiClass", o.uiClass)
               .b("hasParticles", o.hasParticles).b("particlesOn", o.particlesOn).s("particleFile", o.particleFile).f("pRate", o.pRate).f("pLife", o.pLife).f("pSpeed", o.pSpeed)
               .f("pSpread", o.pSpread).f("pSizeStart", o.pSizeStart).f("pSizeEnd", o.pSizeEnd).f("pGravity", o.pGravity).b("pGlow", o.pGlow)
               .b("hasLine", o.hasLine).b("lineOn", o.lineOn).b("lineLoop", o.lineLoop).f("lineWidth", o.lineWidth)
@@ -139,6 +143,9 @@ std::string toJson(const Project& p) {
             ow.key("pColourEnd"); ow.out += arr(o.pColourEnd, 4);
             ow.key("lineColour"); ow.out += arr(o.lineColour, 4);
             ow.key("trailColour"); ow.out += arr(o.trailColour, 4);
+            ow.key("uiRect"); ow.out += arr(o.uiRect, 4);
+            ow.key("uiColour"); ow.out += arr(o.uiColour, 4);
+            ow.key("uiBg"); ow.out += arr(o.uiBg, 4);
             ow.key("linePoints"); ow.out += arr(o.linePoints.data(), (int)o.linePoints.size());
             ow.key("scripts"); ow.out += "[";
             for (size_t si = 0; si < o.scripts.size(); ++si) ow.out += std::string(si ? "," : "") + "{\"file\":" + Json::quote(o.scripts[si].file) + ",\"on\":" + (o.scripts[si].on ? "true" : "false") + "}";
@@ -194,6 +201,12 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
                 o.hasVideo = readBool(ov, "hasVideo", false); o.videoOn = readBool(ov, "videoOn", true); o.videoFile = ov.str("videoFile");
                 o.videoLoop = readBool(ov, "videoLoop", true); o.videoPlayOnStart = readBool(ov, "videoPlayOnStart", true); o.videoMuted = readBool(ov, "videoMuted", false);
                 o.videoVolume = (float)ov.num("videoVolume", 1); o.videoSpeed = (float)ov.num("videoSpeed", 1);
+                o.hasCanvas = readBool(ov, "hasCanvas", false); o.canvasWithAnchor = readBool(ov, "canvasWithAnchor", false); o.canvasCss = ov.str("canvasCss");
+                { const std::string u = ov.str("ui"); o.ui = UI_NONE; for (int k = 1; k < UI_COUNT; ++k) if (u == UI_NAMES[k]) o.ui = k; }
+                o.uiOn = readBool(ov, "uiOn", true); o.uiAnchor = (int)ov.num("uiAnchor", 4); o.uiText = ov.str("uiText", o.uiText); o.uiFont = (float)ov.num("uiFont", 20);
+                o.uiAlign = (int)ov.num("uiAlign", 1); o.uiMin = (float)ov.num("uiMin", 0); o.uiMax = (float)ov.num("uiMax", 1); o.uiValue = (float)ov.num("uiValue", 0.5);
+                o.uiChecked = readBool(ov, "uiChecked", false); o.uiFile = ov.str("uiFile"); o.uiClass = ov.str("uiClass");
+                readArr(ov, "uiRect", o.uiRect, 4); readArr(ov, "uiColour", o.uiColour, 4); readArr(ov, "uiBg", o.uiBg, 4);
                 o.hasParticles = readBool(ov, "hasParticles", false); o.particlesOn = readBool(ov, "particlesOn", true); o.particleFile = ov.str("particleFile");
                 o.pRate = (float)ov.num("pRate", o.pRate); o.pLife = (float)ov.num("pLife", o.pLife); o.pSpeed = (float)ov.num("pSpeed", o.pSpeed); o.pSpread = (float)ov.num("pSpread", o.pSpread);
                 o.pSizeStart = (float)ov.num("pSizeStart", o.pSizeStart); o.pSizeEnd = (float)ov.num("pSizeEnd", o.pSizeEnd); o.pGravity = (float)ov.num("pGravity", o.pGravity); o.pGlow = readBool(ov, "pGlow", true);

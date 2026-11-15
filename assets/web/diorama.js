@@ -166,7 +166,93 @@
       mesh.quaternion.setFromUnitVectors(UP, d.divideScalar(len));
       mesh.scale.set(width, len, width);
     }
+    // ---------- the game's UI: Canvases and their elements as HTML over the camera ----------
+    // laid out on a 400 x 711 phone (as in the editor), scaled to the screen by one CSS variable (--s)
+    var uiRoot = null;
+    function uiLayer() {
+      if (uiRoot) return uiRoot;
+      var st = document.createElement('style');
+      st.textContent = '#dio-ui{position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:none;z-index:20;font-family:"Segoe UI",Roboto,Arial,sans-serif;--s:1}' +
+        '.dio-canvas{position:absolute;left:0;top:0;right:0;bottom:0}' +
+        '.dio-ui{position:absolute;box-sizing:border-box;margin:0;padding:0}' +
+        '.dio-text{display:flex;align-items:center;white-space:pre-wrap;pointer-events:none;line-height:1.15}' +
+        '.dio-button{border:0;cursor:pointer;pointer-events:auto;font:inherit;border-radius:calc(var(--s)*6px)}' +
+        '.dio-button:active{filter:brightness(0.85)}' +
+        '.dio-slider{pointer-events:auto;cursor:pointer}' +
+        '.dio-toggle{display:flex;align-items:center;gap:calc(var(--s)*8px);pointer-events:auto;cursor:pointer}' +
+        '.dio-toggle input{width:1.2em;height:1.2em;margin:0;cursor:pointer}' +
+        '.dio-panel{pointer-events:auto;border-radius:calc(var(--s)*6px)}' +
+        '.dio-image{object-fit:contain;pointer-events:none}';
+      document.head.appendChild(st);
+      uiRoot = document.createElement('div'); uiRoot.id = 'dio-ui';
+      document.body.appendChild(uiRoot);
+      var fit = function () { uiRoot.style.setProperty('--s', Math.min(window.innerWidth / 400, window.innerHeight / 711)); };
+      window.addEventListener('resize', fit); fit();
+      return uiRoot;
+    }
+    function css(c) { return 'rgba(' + Math.round(c[0] * 255) + ',' + Math.round(c[1] * 255) + ',' + Math.round(c[2] * 255) + ',' + c[3] + ')'; }
+    function uiPlace(el, o) {   // where it sits on its parent: anchor + offset, its size
+      var ax = o.uiAnchor % 3, ay = Math.floor(o.uiAnchor / 3), r = o.uiRect;
+      var key = o.uiAnchor + ',' + r.join(',') + ',' + o.uiFont;
+      if (el.userData === key) return; el.userData = key;
+      el.style.left = 'calc(' + (ax * 50) + '% + var(--s) * ' + r[0] + 'px)';
+      el.style.top = 'calc(' + (ay * 50) + '% + var(--s) * ' + r[1] + 'px)';
+      el.style.width = 'calc(var(--s) * ' + r[2] + 'px)'; el.style.height = 'calc(var(--s) * ' + r[3] + 'px)';
+      el.style.transform = 'translate(' + (-ax * 50) + '%,' + (-ay * 50) + '%)';
+      el.style.fontSize = 'calc(var(--s) * ' + o.uiFont + 'px)';
+    }
+    var cssLinked = {};
+    function uiElement(o, node) {
+      var el;
+      if (o.hasCanvas) {
+        el = document.createElement('div'); el.className = 'dio-canvas ' + (o.uiClass || '');
+        if (o.canvasCss && !cssLinked[o.canvasCss]) { cssLinked[o.canvasCss] = 1; var l = document.createElement('link'); l.rel = 'stylesheet'; l.href = o.canvasCss; document.head.appendChild(l); }
+        return el;
+      }
+      var fire = function (fn, arg) { var g = node.userData.go; if (!g) return; g.scripts.forEach(function (sc) { call(g, sc, fn, arg); }); (g.uiListeners && g.uiListeners[fn] || []).forEach(function (f) { try { f(arg); } catch (e) { report('error', '', 0, e.message); } }); };
+      switch (o.ui) {
+      case 'Text': el = document.createElement('div'); el.textContent = o.uiText; el.style.justifyContent = ['flex-start', 'center', 'flex-end'][o.uiAlign] || 'center'; el.style.color = css(o.uiColour); break;
+      case 'Button': el = document.createElement('button'); el.textContent = o.uiText; el.style.background = css(o.uiBg); el.style.color = css(o.uiColour);
+        el.addEventListener('click', function (ev) { ev.stopPropagation(); unlockMedia(); fire('onClick'); }); break;
+      case 'Slider': el = document.createElement('input'); el.type = 'range'; el.min = o.uiMin; el.max = o.uiMax; el.step = 'any'; el.value = o.uiValue; el.style.accentColor = css(o.uiBg);
+        el.addEventListener('input', function () { o.uiValue = +el.value; fire('onChange', o.uiValue); }); break;
+      case 'Toggle': el = document.createElement('label'); var box = document.createElement('input'); box.type = 'checkbox'; box.checked = !!o.uiChecked; box.style.accentColor = css(o.uiBg);
+        var sp = document.createElement('span'); sp.textContent = o.uiText; el.appendChild(box); el.appendChild(sp); el.style.color = css(o.uiColour);
+        box.addEventListener('change', function () { o.uiChecked = box.checked; fire('onChange', box.checked); }); el.box = box; el.label = sp; break;
+      case 'Image': el = document.createElement('img'); if (o.uiFile) el.src = o.uiFile; el.style.opacity = o.uiColour[3]; break;
+      case 'Panel': el = document.createElement('div'); el.style.background = css(o.uiBg); break;
+      default: return null;
+      }
+      el.className = 'dio-ui dio-' + o.ui.toLowerCase() + ' ' + (o.uiClass || '');
+      el.dataset.name = o.name;
+      ['mousedown', 'touchstart'].forEach(function (k) { el.addEventListener(k, function (ev) { ev.stopPropagation(); }, { passive: true }); });   // not a tap on the 3D
+      uiPlace(el, o);
+      return el;
+    }
+    function uiVisible(node) {   // on, active, and (for a Canvas tied to its anchor) the anchor seen
+      var n = node;
+      for (; n && n.userData && n.userData.o; n = n.parent) {
+        if (n.visible === false) return false;
+        var uo = n.userData.o; if (uo.ui && uo.uiOn === false) return false;
+      }
+      if (!withAnchorUnder(node)) return true;   // screen UI: whatever the tracking does
+      for (; n; n = n.parent) if (n.visible === false) return false;
+      return true;
+    }
+    function withAnchorUnder(node) { for (var n = node; n && n.userData && n.userData.o; n = n.parent) if (n.userData.o.hasCanvas) return n.userData.o.canvasWithAnchor; return false; }
+    function animateUI(node) {
+      var el = node.userData.el, o = node.userData.o; if (!el) return;
+      if (!el.parentNode) {   // its place: in its parent element, or on the screen
+        var pe = node.parent && node.parent.userData && node.parent.userData.el;
+        (pe || uiLayer()).appendChild(el);
+      }
+      if (!o.hasCanvas) uiPlace(el, o);
+      var vis = uiVisible(node);
+      if (el.shown !== vis) { el.shown = vis; el.style.display = vis ? '' : 'none'; }
+    }
+
     function components(o, node) {
+      if (o.hasCanvas || o.ui) { var ue = uiElement(o, node); if (ue) node.userData.el = ue; }
       if (o.occluder) occlude(node);
       if (o.hasLight) {
         var col = new THREE.Color(o.lightColour[0], o.lightColour[1], o.lightColour[2]), li;
@@ -239,6 +325,7 @@
     var tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
     function animateComponents(node, t) {
       var o = node.userData.o;
+      if (node.userData.el) animateUI(node);
       if (node.userData.light) node.userData.light.visible = o.lightOn !== false;
       var ps = node.userData.particles;
       if (ps) {   // each slot k is born at k / rate and lives pLife, then again: the editor's maths
@@ -395,6 +482,19 @@
       case 'material': return { colour: vec(o.colour), get opacity() { return o.colour[3]; }, set opacity(v) { o.colour[3] = +v; node.traverse(function (c) { if (c.material) { c.material.userData.base = +v; } }); } };
       case 'words': return o.kind === 'Words' ? { get text() { return o.text; }, set text(v) { o.text = String(v); rebuild(this.go); }, go: this } : null;
       case 'model': return o.kind === 'Model' ? { get clip() { return o.clip; }, play: function (name) { o.clip = name; rebuild(this.go); }, go: this } : null;
+      case 'canvas': return o.hasCanvas ? { get visible() { return node.visible; }, set visible(v) { node.visible = !!v; }, element: node.userData.el } : null;
+      case 'text': case 'button': case 'slider': case 'toggle': case 'image': case 'panel':
+        if (!o.ui || o.ui.toLowerCase() !== String(type).toLowerCase()) return null;
+        var el = node.userData.el, go = this;
+        var on = function (fn) { return function (f) { go.uiListeners = go.uiListeners || {}; (go.uiListeners[fn] = go.uiListeners[fn] || []).push(f); }; };
+        var c = { element: el, get on() { return o.uiOn !== false; }, set on(v) { o.uiOn = !!v; } };
+        Object.defineProperty(c, 'text', { get: function () { return o.uiText; }, set: function (v) { o.uiText = String(v); if (el.label) el.label.textContent = o.uiText; else el.textContent = o.uiText; } });
+        Object.defineProperty(c, 'value', { get: function () { return o.uiValue; }, set: function (v) { o.uiValue = +v; el.value = +v; } });
+        Object.defineProperty(c, 'isOn', { get: function () { return !!o.uiChecked; }, set: function (v) { o.uiChecked = !!v; if (el.box) el.box.checked = !!v; } });
+        Object.defineProperty(c, 'picture', { get: function () { return o.uiFile; }, set: function (v) { o.uiFile = String(v); el.src = o.uiFile; } });
+        c.onClick = on('onClick'); c.onChange = on('onChange');
+        c.position = vec(o.uiRect); c.colour = vec(o.uiColour, function () { el.style.color = css(o.uiColour); });
+        return c;
       case 'light': var li = node.userData.light; return li ? { get on() { return o.lightOn !== false; }, set on(v) { o.lightOn = !!v; },
           colour: vec(o.lightColour, function () { li.color.setRGB(o.lightColour[0], o.lightColour[1], o.lightColour[2]); }),
           get intensity() { return o.lightIntensity; }, set intensity(v) { o.lightIntensity = +v; li.intensity = +v * K; },
@@ -446,7 +546,7 @@
       var node = go.node, o = go.data, fresh = build(o, R.players);
       while (node.children.length) { var c = node.children[0]; if (c.userData && c.userData.o) break; node.remove(c); }
       fresh.children.slice().forEach(function (c) { node.add(c); });
-      ['sprites', 'rays', 'light', 'audio', 'video', 'particles', 'line', 'trail'].forEach(function (k) { node.userData[k] = fresh.userData[k]; });
+      ['sprites', 'rays', 'light', 'audio', 'video', 'particles', 'line', 'trail', 'el'].forEach(function (k) { node.userData[k] = fresh.userData[k]; });
     }
     function find(path, from) {
       var parts = String(path).split('/'), hit = null;
@@ -472,7 +572,7 @@
         try {
           var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input',
             '"use strict";\n' + code + '\n;return { start: typeof start === "function" ? start : null, update: typeof update === "function" ? update : null,' +
-            ' onTap: typeof onTap === "function" ? onTap : null, onFound: typeof onFound === "function" ? onFound : null, onLost: typeof onLost === "function" ? onLost : null };\n//# sourceURL=' + sc.file);
+            ' onTap: typeof onTap === "function" ? onTap : null, onFound: typeof onFound === "function" ? onFound : null, onLost: typeof onLost === "function" ? onLost : null, onClick: typeof onClick === "function" ? onClick : null, onChange: typeof onChange === "function" ? onChange : null };\n//# sourceURL=' + sc.file);
           var log = function () { report('log', sc.file, 0, Array.prototype.map.call(arguments, function (a) { return typeof a === 'object' ? JSON.stringify(a) : String(a); }).join(' ')); };
           var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, R.cameraApi, R.input);
           go.scripts.push({ name: name, file: sc.file, fns: api, self: go, started: false });
@@ -511,7 +611,7 @@
     }
     function destroy(go) {
       if (!go || !go.node) return;
-      go.node.traverse(function (c) { if (c.userData.go) c.userData.go.dead = true; });
+      go.node.traverse(function (c) { if (c.userData.go) c.userData.go.dead = true; if (c.userData.el && c.userData.el.parentNode) c.userData.el.parentNode.removeChild(c.userData.el); });
       if (go.node.parent) go.node.parent.remove(go.node);
       R.nodes = R.nodes.filter(function (n) { return !n.userData.go || !n.userData.go.dead; });
     }
