@@ -512,7 +512,7 @@ static const char* assetKind(const fs::path& p) {
     if (e == ".prefab") return "Prefab";
     if (e == ".mp3" || e == ".ogg" || e == ".wav") return "Audio";
     if (e == ".mp4" || e == ".webm" || e == ".mov" || e == ".m4v") return "Video";
-    if (e == ".patt") return "Marker";
+    if (e == ".patt" || e == ".marker") return "Marker";
     return "File";
 }
 static const char* assetIcon(const char* kind) {
@@ -865,6 +865,204 @@ static void buildDialog(bool run) {
     say("Running on http://localhost:" + std::to_string(port) + "/ : allow the webcam, hold up the printed marker");
 }
 
+
+// ---------- the Marker Maker: markers made here, saved into the project (assets/markers), Hiro and Kanji stay stock ----------
+// a saved marker is <name>.marker (what it is), <name>.png (to print) and, for patterns, <name>.patt (what the game looks for)
+static bool showMaker = false;
+static void tip(const char* s); static void labelled(const char* l); static void giveVideo(Object& o, const std::string& file);
+struct MakerState {
+    int type = MK_PATTERN;        // MK_PATTERN / MK_BARCODE
+    int source = 2;               // 0 Hiro, 1 Kanji, 2 letters, 3 a picture, 4 random blocks
+    char letters[16] = "A";
+    std::string picture;          // source 3
+    Markers::Image blocks;        // source 4
+    int barcode = 0;
+    char name[64] = "My marker";
+    GLuint tex = 0; std::string shownKey;
+} mk;
+static fs::path markersDir() { return fs::u8path(folder) / "assets" / "markers"; }
+// what a marker in the maker is, as a scene marker (to print, to use)
+static Scene::Marker makerMarker() {
+    Scene::Marker m; m.type = mk.type;
+    if (mk.type == MK_BARCODE) { m.barcode = mk.barcode; return m; }
+    m.preset.clear(); m.letter.clear(); m.picture.clear();
+    if (mk.source == 0) m.preset = "hiro";
+    else if (mk.source == 1) m.preset = "kanji";
+    else if (mk.source == 2) m.letter = mk.letters[0] ? mk.letters : "A";
+    else if (mk.source == 3) m.picture = mk.picture;
+    return m;
+}
+static Markers::Image makerInside() {
+    if (mk.type == MK_PATTERN && mk.source == 4) return mk.blocks;
+    return insidePicture(makerMarker());
+}
+static Markers::Image makerPrintable(int size) {
+    if (mk.type == MK_PATTERN && mk.source == 4) return Markers::printablePattern(mk.blocks, size);
+    return printable(makerMarker(), size);
+}
+// random blocks, 5 x 5, that look different each way round (so the game knows which way up it is)
+static Markers::Image randomBlocks() {
+    static unsigned seed = (unsigned)SDL_GetTicks() * 2654435761u + 12345u;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    const int N = 5, S = 512, c = S / N;
+    bool g[N][N];
+    for (int tries = 0; tries < 100; ++tries) {
+        int black = 0;
+        for (int y = 0; y < N; ++y) for (int x = 0; x < N; ++x) { g[y][x] = rnd() % 100 < 45; black += g[y][x]; }
+        bool same = false;   // the same as itself turned a quarter or half: try again
+        for (int r = 1; r < 4 && !same; ++r) {
+            bool eq = true;
+            for (int y = 0; y < N && eq; ++y) for (int x = 0; x < N && eq; ++x) {
+                int sx = x, sy = y; for (int k = 0; k < r; ++k) { const int t = sx; sx = N - 1 - sy; sy = t; }
+                eq = g[y][x] == g[sy][sx];
+            }
+            same = eq;
+        }
+        if (!same && black > 6 && black < 19) break;
+    }
+    Markers::Image im; im.w = im.h = S; im.px.assign((size_t)S * S * 4, 255);
+    for (int y = 0; y < S; ++y) for (int x = 0; x < S; ++x) if (g[std::min(N - 1, y / c)][std::min(N - 1, x / c)]) {
+        unsigned char* q = &im.px[((size_t)y * S + x) * 4]; q[0] = q[1] = q[2] = 0;
+    }
+    return im;
+}
+// the barcode numbers in use (this project's markers and the saved ones)
+static std::vector<bool> barcodesInUse() {
+    std::vector<bool> used(64, false);
+    for (const auto& m : proj.markers) if (m.type == MK_BARCODE && m.barcode >= 0 && m.barcode < 64) used[m.barcode] = true;
+    std::error_code ec;
+    if (!folder.empty()) for (const auto& e : fs::directory_iterator(markersDir(), ec)) if (e.path().extension() == ".marker") {
+        std::ifstream f(e.path(), std::ios::binary); std::stringstream ss; ss << f.rdbuf();
+        Json::Value v; if (Json::parse(ss.str(), v) && v.str("type") == "barcode") { const int b = (int)v.num("barcode", -1); if (b >= 0 && b < 64) used[b] = true; }
+    }
+    return used;
+}
+static std::string jsonEsc(const std::string& t) { std::string o; for (char c : t) { if (c == '"' || c == '\\') o += '\\'; o += c; } return o; }
+static bool saveMakerMarker(std::string& savedName) {
+    if (folder.empty()) { say("Save the project first: markers go into its assets"); return false; }
+    std::string name = mk.name; for (auto& c : name) if (strchr("\\/:*?\"<>|", c)) c = '_';
+    if (name.empty()) name = "Marker";
+    std::error_code ec; fs::create_directories(markersDir(), ec);
+    const fs::path base = markersDir() / fs::u8path(name);
+    // the picture it was made from goes with it
+    std::string picRel;
+    if (mk.type == MK_PATTERN && (mk.source == 3 || mk.source == 4)) {
+        const fs::path pic = markersDir() / fs::u8path(name + ".inside.png");
+        if (!Markers::savePng(pic.u8string(), makerInside())) { say("Couldn't save the marker's picture"); return false; }
+        picRel = pic.filename().u8string();
+    }
+    if (!Markers::savePng((base.u8string() + ".png"), makerPrintable(1024))) { say("Couldn't save " + name + ".png"); return false; }
+    if (mk.type == MK_PATTERN) std::ofstream(fs::u8path(base.u8string() + ".patt"), std::ios::binary) << Markers::pattFrom(makerInside());
+    std::ofstream f(fs::u8path(base.u8string() + ".marker"), std::ios::binary);
+    f << "{\"diorama-marker\":1,\"name\":\"" << jsonEsc(mk.name) << "\",\"type\":\"" << (mk.type == MK_BARCODE ? "barcode" : "pattern") << "\""
+      << ",\"barcode\":" << mk.barcode
+      << ",\"preset\":\"" << (mk.type == MK_PATTERN && mk.source == 0 ? "hiro" : mk.type == MK_PATTERN && mk.source == 1 ? "kanji" : "") << "\""
+      << ",\"letter\":\"" << (mk.type == MK_PATTERN && mk.source == 2 ? jsonEsc(mk.letters) : "") << "\""
+      << ",\"picture\":\"" << jsonEsc(picRel) << "\"}\n";
+    savedName = name;
+    return true;
+}
+// a saved marker onto an anchor
+static bool applyMarkerFile(Scene::Marker& m, const std::string& file) {
+    std::ifstream f(fs::u8path(file), std::ios::binary); std::stringstream ss; ss << f.rdbuf();
+    Json::Value v; if (!Json::parse(ss.str(), v) || !v.get("diorama-marker")) { say("That isn't a Diorama marker"); return false; }
+    m.type = v.str("type") == "barcode" ? MK_BARCODE : MK_PATTERN;
+    m.barcode = (int)v.num("barcode", 0);
+    m.preset = v.str("preset"); m.letter = v.str("letter");
+    const std::string pic = v.str("picture");
+    m.picture = pic.empty() ? "" : (fs::u8path(file).parent_path() / fs::u8path(pic)).u8string();
+    if (m.preset.empty() && m.letter.empty() && m.picture.empty() && m.type == MK_PATTERN) m.preset = "hiro";
+    const std::string nm = v.str("name"); if (!nm.empty()) m.name = nm;
+    shownMarker = -1;
+    return true;
+}
+static void showImage(GLuint& tex, const Markers::Image& im) {
+    if (!tex) glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, im.w, im.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, im.px.data());
+}
+static void markerMaker() {
+    if (!showMaker) return;
+    ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(420, 140), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Marker Maker", &showMaker)) { ImGui::End(); return; }
+    if (mk.blocks.px.empty()) mk.blocks = randomBlocks();
+    // left: what it is
+    ImGui::BeginChild("##mkl", ImVec2(270, 0));
+    ImGui::PushItemWidth(-1);
+    labelled("Name"); ImGui::InputText("##mkn", mk.name, sizeof mk.name);
+    labelled("Type");
+    const char* types[] = {"Pattern (like Hiro)", "Barcode (3x3)"};
+    ImGui::Combo("##mkt", &mk.type, types, 2);
+    if (mk.type == MK_PATTERN) {
+        const char* srcs[] = {"Hiro", "Kanji", "A letter or word", "A picture", "Random blocks"};
+        labelled("Made from"); ImGui::Combo("##mks", &mk.source, srcs, 5);
+        if (mk.source == 2) { labelled("Letters"); ImGui::InputText("##mkl2", mk.letters, sizeof mk.letters); tip("One to three letters print best"); }
+        if (mk.source == 3) {
+            if (ImGui::Button(mk.picture.empty() ? "Choose a picture..." : fs::u8path(mk.picture).filename().u8string().c_str(), ImVec2(-1, 0))) {
+                const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); if (!f.empty()) mk.picture = f;
+            }
+            ImGui::TextDisabled("Bold, high-contrast pictures track best;\nthe middle half of the square is used.");
+        }
+        if (mk.source == 4 && ImGui::Button("New random blocks", ImVec2(-1, 0))) mk.blocks = randomBlocks();
+        if (mk.source <= 1) ImGui::TextDisabled("The stock marker, as printed everywhere.");
+    } else {
+        labelled("Number"); ImGui::SliderInt("##mkb", &mk.barcode, 0, 63);
+        const auto used = barcodesInUse();
+        if (ImGui::Button("Random (an unused one)", ImVec2(-1, 0))) {
+            std::vector<int> free; for (int i = 0; i < 64; ++i) if (!used[i]) free.push_back(i);
+            if (free.empty()) say("All 64 barcodes are in use");
+            else { static unsigned r = (unsigned)SDL_GetTicks(); r = r * 1664525u + 1013904223u; mk.barcode = free[(r >> 8) % free.size()]; }
+        }
+        if (used[mk.barcode]) ImGui::TextColored(col4(IM_COL32(0xf0, 0xb0, 0x60, 255)), "This project uses %d already.", mk.barcode);
+        ImGui::TextDisabled("Up to 64 barcodes can be on the table\nat once; each is its own anchor.");
+    }
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    if (ImGui::Button("Save to the Project", ImVec2(-1, 30))) {
+        std::string n; if (saveMakerMarker(n)) { projectDir = markersDir().u8string(); say("Saved " + n + " into assets/markers (.marker, .png to print" + std::string(mk.type == MK_PATTERN ? ", .patt)" : ")")); }
+    }
+    Scene::Marker* cm = curMarker();
+    const bool canUse = cm && proj.tracking == TRACK_MARKERS;
+    if (ImGui::Button("Use on the selected marker", ImVec2(-1, 0)) && canUse) {
+        beginEdit();
+        if (mk.type == MK_PATTERN && mk.source == 4) {   // random blocks need their picture somewhere: the project
+            std::string n; if (saveMakerMarker(n)) applyMarkerFile(*cm, (markersDir() / fs::u8path(n + ".marker")).u8string());
+        } else { const Scene::Marker mm = makerMarker(); cm->type = mm.type; cm->barcode = mm.barcode; cm->preset = mm.preset; cm->letter = mm.letter; cm->picture = bring(mm.picture); cm->name = mk.name; shownMarker = -1; }
+        say("Marker " + std::string(mk.name) + " is on " + cm->name);
+    }
+    if (!canUse && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Select a marker (the game tracks Markers)");
+    if (ImGui::Button("Save the printable picture...", ImVec2(-1, 0))) {
+        const std::string f = saveDialog(L"PNG picture\0*.png\0\0", L"png", std::string(mk.name) + ".png");
+        if (!f.empty()) say(Markers::savePng(f, makerPrintable(1024)) ? "Saved: print it at 100%" : "Couldn't save it");
+    }
+    if (ImGui::Button("Print sheet of the project's markers...", ImVec2(-1, 0))) {
+        std::vector<std::pair<Markers::Image, std::string>> all;
+        for (const auto& m : proj.markers) if (proj.tracking == TRACK_MARKERS) all.push_back({printable(m, 600), m.name});
+        std::error_code ec;
+        if (!folder.empty()) for (const auto& e : fs::directory_iterator(markersDir(), ec)) if (e.path().extension() == ".marker") {
+            Scene::Marker tmp; if (applyMarkerFile(tmp, e.path().u8string())) all.push_back({printable(tmp, 600), tmp.name});
+        }
+        if (all.empty()) say("No markers yet");
+        else { const std::string f = saveDialog(L"PNG picture\0*.png\0\0", L"png", "markers sheet.png");
+               if (!f.empty()) say(Markers::savePng(f, Markers::sheet(all, fontFile)) ? "Saved the sheet (A4, 150 dpi)" : "Couldn't save it"); }
+    }
+    ImGui::PopItemWidth();
+    ImGui::EndChild();
+    // right: the printable marker
+    ImGui::SameLine();
+    ImGui::BeginChild("##mkr", ImVec2(0, 0), true);
+    const std::string key = std::to_string(mk.type) + "|" + std::to_string(mk.source) + "|" + mk.letters + "|" + mk.picture + "|" + std::to_string(mk.barcode) + "|" + std::to_string(mk.blocks.px.size() ? mk.blocks.px[600 * 4] + mk.blocks.px[100000] * 7 + mk.blocks.px[400000] * 13 : 0);
+    if (key != mk.shownKey || !mk.tex) { mk.shownKey = key; showImage(mk.tex, makerPrintable(512)); }
+    const ImVec2 av = ImGui::GetContentRegionAvail();
+    const float side = std::max(64.0f, std::min(av.x, av.y));
+    ImGui::SetCursorPos(ImVec2(ImGui::GetCursorPosX() + (av.x - side) / 2, ImGui::GetCursorPosY() + (av.y - side) / 2));
+    ImGui::Image((ImTextureID)(intptr_t)mk.tex, ImVec2(side, side));
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 // ---------- the menus ----------
 static void gameObjectItems() {
     if (ImGui::MenuItem("Create Empty", "Ctrl+Shift+N")) create(EMPTY);
@@ -917,6 +1115,11 @@ static void menuBar() {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("GameObject")) { gameObjectItems(); ImGui::EndMenu(); }
+    if (ImGui::BeginMenu("Window")) {
+        if (ImGui::MenuItem("Marker Maker", nullptr, showMaker)) showMaker = !showMaker;
+        if (ImGui::MenuItem("Script Editor", nullptr, showScripts, !scripts.empty())) showScripts = !showScripts;
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Help")) { if (ImGui::MenuItem("About Diorama")) showAbout = true; ImGui::EndMenu(); }
     ImGui::EndMainMenuBar();
 }
@@ -975,6 +1178,15 @@ static void dropAsset(Scene::Marker& m, int mi, int onto, const std::string& fil
         return;
     }
     if (e == ".prefab") { const int id = placePrefab(m, file, onto); if (id >= 0) { selMarker = mi; selObject = id; } return; }
+    if (e == ".marker") { if (applyMarkerFile(m, file)) { selMarker = mi; selObject = -1; say("The marker is now " + m.name); } return; }
+    if (e == ".mp3" || e == ".ogg" || e == ".wav" || e == ".m4a") {
+        if (i < 0) { say("Drop a sound onto an object: it gets an Audio Source"); return; }
+        Object& t = m.objects[i]; t.hasAudio = true; t.audioOn = true; t.audioFile = file; selMarker = mi; selObject = onto; return;
+    }
+    if (e == ".mp4" || e == ".webm" || e == ".mov" || e == ".m4v") {
+        if (i < 0) { Object o = make(proj, EMPTY, -1); o.name = fs::u8path(file).stem().u8string(); m.objects.push_back(o); giveVideo(m.objects.back(), file); selMarker = mi; selObject = o.id; return; }
+        giveVideo(m.objects[i], file); selMarker = mi; selObject = onto; return;
+    }
     int kind = -1;
     if (e == ".png" || e == ".jpg" || e == ".jpeg") kind = PICTURE;
     if (e == ".glb" || e == ".gltf") kind = MODEL;
@@ -1150,6 +1362,12 @@ static void markerInspector(Scene::Marker& m) {
         } else {
             labelled("Number"); ImGui::SliderInt("##code", &m.barcode, 0, 63);
             ImGui::TextDisabled("64 barcodes (0..63) can be on the table at once.");
+        }
+        if (ImGui::Button("Marker Maker...", ImVec2(-1, 0))) showMaker = true;
+        tip("Make markers (random barcodes and patterns too) and save them into the project;\ndrop a .marker from the Project window here or on the marker in the Hierarchy");
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) { const std::string f((const char*)pl->Data); if (fs::u8path(f).extension() == ".marker") { beginEdit(); applyMarkerFile(m, f); } }
+            ImGui::EndDragDropTarget();
         }
         if (ImGui::Button("Save the printable marker...", ImVec2(-1, 0))) {
             const std::string f = saveDialog(L"PNG picture\0*.png\0\0", L"png", m.name + ".png");
@@ -1806,6 +2024,7 @@ static void frame() {
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + leftW, vp->Pos.y + top + H - bottomH)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x - leftW - rightW, bottomH));
     ImGui::Begin("##bottom", nullptr, fixed); bottomPanel(); ImGui::End();
     scriptEditor();
+    markerMaker();
     // the status line
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - status)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x, status));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 4));
@@ -1839,6 +2058,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--template" && i + 1 < args.size()) tmpl = args[++i];
         else if (args[i] == "--select" && i + 1 < args.size()) selectArg = atoi(args[++i].c_str());
         else if (args[i] == "--build" && i + 1 < args.size()) buildArg = args[++i];
+        else if (args[i] == "--maker") { showMaker = true; mk.source = 4; }   // opens the Marker Maker (for screenshots)
         else if (args[i] == "--pick" && i + 2 < args.size()) { pickX = atoi(args[i + 1].c_str()); pickY = atoi(args[i + 2].c_str()); i += 2; }
         else openArg = args[i];
     }
