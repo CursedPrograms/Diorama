@@ -638,7 +638,14 @@
           var x = ((pt.clientX - r.left) / r.width) * 2 - 1, y = -((pt.clientY - r.top) / r.height) * 2 + 1;
           R.input.tapped = true; R.input.x = x; R.input.y = y;
           unlockMedia();
-          ray.setFromCamera({ x: x, y: y }, camera);
+          if (camera.isPerspectiveCamera || camera.isOrthographicCamera) ray.setFromCamera({ x: x, y: y }, camera);
+          else {   // ARToolKit's camera is a plain THREE.Camera with the webcam's own projection: the ray by hand
+            camera.updateMatrixWorld();
+            var inv = new THREE.Matrix4(); if (inv.invert) inv.copy(camera.projectionMatrix).invert(); else inv.getInverse(camera.projectionMatrix);
+            var o = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+            var d = new THREE.Vector3(x, y, 0.5).applyMatrix4(inv).applyMatrix4(camera.matrixWorld).sub(o).normalize();
+            ray.set(o, d);
+          }
           var targets = []; Object.keys(R.roots).forEach(function (k) { if (R.roots[k].visible !== false) targets.push(R.roots[k]); });
           var hits = ray.intersectObjects(targets, true);
           for (var i = 0; i < hits.length; ++i) {

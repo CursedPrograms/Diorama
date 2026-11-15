@@ -3,3 +3,4 @@ dist/
 external/SDL2-*/
 external/imgui-*/
 *.log
+external/webview2/

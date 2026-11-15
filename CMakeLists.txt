@@ -57,3 +57,22 @@ if(WIN32)
     add_custom_command(TARGET Diorama POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:Diorama>)
 endif()
+
+# ---- DioramaGame.exe: the Windows player (a built game as a Windows program: WebView2 + a local server) ----
+if(WIN32)
+    set(WV2_DIR ${CMAKE_SOURCE_DIR}/external/webview2)
+    if(NOT EXISTS ${WV2_DIR}/build/native/include/WebView2.h)
+        file(DOWNLOAD https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2/1.0.4314.35 ${CMAKE_BINARY_DIR}/webview2.zip)
+        file(ARCHIVE_EXTRACT INPUT ${CMAKE_BINARY_DIR}/webview2.zip DESTINATION ${WV2_DIR})
+    endif()
+    add_executable(DioramaGame WIN32 player/win/main.cpp player/win/app.rc)
+    target_include_directories(DioramaGame PRIVATE ${WV2_DIR}/build/native/include)
+    target_link_libraries(DioramaGame PRIVATE ${WV2_DIR}/build/native/x64/WebView2LoaderStatic.lib ws2_32 shlwapi)
+    target_compile_definitions(DioramaGame PRIVATE UNICODE _UNICODE)
+    if(MSVC)
+        target_compile_options(DioramaGame PRIVATE /utf-8 /O2 /D_CRT_SECURE_NO_WARNINGS)
+    endif()
+    # beside Diorama.exe (in its player folder): Diorama copies it into Windows builds
+    set_target_properties(DioramaGame PROPERTIES RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}/Release/player RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}/Debug/player)
+    add_dependencies(Diorama DioramaGame)
+endif()

@@ -883,6 +883,70 @@ static void buildDialog(bool run) {
     say("Running on http://localhost:" + std::to_string(port) + "/ : allow the webcam, hold up the printed marker");
 }
 
+// ---------- Build for Windows: <Game>.exe (Diorama's player: WebView2 + a local server) beside the game's folder ----------
+#ifdef _WIN32
+// the exe's icon, from a picture: one 256 x 256 PNG icon (Windows reads PNG icons since Vista)
+static bool setExeIcon(const std::string& exe, const Markers::Image& pic) {
+    if (pic.px.empty()) return false;
+    const Markers::Image im = Markers::resized(pic, 256, 256);
+    std::vector<unsigned char> bytes;
+    if (!stbi_write_png_to_func([](void* c, void* d, int n) { auto* v = (std::vector<unsigned char>*)c; v->insert(v->end(), (unsigned char*)d, (unsigned char*)d + n); },
+                                &bytes, im.w, im.h, 4, im.px.data(), im.w * 4)) return false;
+    unsigned char* png = bytes.data(); const int len = (int)bytes.size();
+    // the language its icons were written in (an icon in another language would be a second one)
+    WORD lang = MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US);
+    if (HMODULE mod = LoadLibraryExW(fs::u8path(exe).wstring().c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)) {
+        EnumResourceLanguagesW(mod, MAKEINTRESOURCEW(14), MAKEINTRESOURCEW(1), [](HMODULE, LPCWSTR, LPCWSTR, WORD l, LONG_PTR p) -> BOOL { *(WORD*)p = l; return FALSE; }, (LONG_PTR)&lang);
+        FreeLibrary(mod);
+    }
+#pragma pack(push, 2)
+    struct Group { WORD reserved, type, count; BYTE w, h, colours, res; WORD planes, bits; DWORD bytes; WORD id; } g = {0, 1, 1, 0, 0, 0, 0, 1, 32, (DWORD)len, 1};
+#pragma pack(pop)
+    HANDLE u = BeginUpdateResourceW(fs::u8path(exe).wstring().c_str(), FALSE);
+    bool ok = u && UpdateResourceW(u, MAKEINTRESOURCEW(3), MAKEINTRESOURCEW(1), lang, png, (DWORD)len) && UpdateResourceW(u, MAKEINTRESOURCEW(14), MAKEINTRESOURCEW(1), lang, &g, sizeof g);
+    if (u) ok = EndUpdateResourceW(u, !ok) && ok;
+    return ok;
+}
+#endif
+static bool buildWindows(const std::string& out, std::string& err) {
+#ifdef _WIN32
+    const fs::path o = fs::u8path(out), player = fs::u8path(exeDir) / "player" / "DioramaGame.exe";
+    std::error_code ec;
+    if (!fs::exists(player, ec)) { err = "The Windows player (player/DioramaGame.exe) isn't beside Diorama: reinstall Diorama"; return false; }
+    if (!buildGame((o / "game").u8string(), err)) return false;
+    std::string name = proj.title; for (auto& c : name) if (strchr("\\/:*?\"<>|", c)) c = '_';
+    if (name.empty()) name = "Game";
+    const fs::path exe = o / fs::u8path(name + ".exe");
+    fs::copy_file(player, exe, fs::copy_options::overwrite_existing, ec);
+    if (ec) { err = "Couldn't write " + exe.u8string() + " (is the game running?)"; return false; }
+    { Markers::Image icon; if (Markers::load((o / "game" / "icon.png").u8string(), icon)) setExeIcon(exe.u8string(), icon); }
+    std::ofstream(o / "game" / "game.json", std::ios::binary) << "{\"title\": " << Json::quote(proj.title) << ", \"made-with\": \"Diorama\"}\n";
+    std::ofstream(o / "README.txt", std::ios::binary) <<
+        proj.title << ", made with Diorama.\r\n\r\n"
+        "Double-click " << name << ".exe to play (keep the game folder beside it). It uses the webcam: print\r\n"
+        "game\\markers.png at 100% and hold a marker up to the camera. F11: full screen.\r\n"
+        "It runs on Microsoft's WebView2 (part of Windows 11; for Windows 10: microsoft.com/edge/webview2).\r\n";
+    return true;
+#else
+    (void)out; err = "Windows builds are made on Windows"; return false;
+#endif
+}
+static void buildWindowsDialog(bool run) {
+    static std::string lastWin;
+    std::string out = lastWin;
+    if (out.empty() || !run) {
+        const std::string pick = pickFolder();
+        if (pick.empty()) return;
+        out = (fs::u8path(pick) / fs::u8path(slugOf(proj.title) + "-windows")).u8string();
+    }
+    std::string err;
+    if (!buildWindows(out, err)) { say(err); return; }
+    lastWin = out;
+    std::string name = proj.title; for (auto& c : name) if (strchr("\\/:*?\"<>|", c)) c = '_';
+    if (run) { ShellExecuteW(nullptr, L"open", (fs::u8path(out) / fs::u8path((name.empty() ? "Game" : name) + ".exe")).wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL); say("Running the Windows build"); }
+    else { say("Built for Windows: " + out); openInExplorer(out); }
+}
+
 
 // ---------- the Marker Maker: markers made here, saved into the project (assets/markers), Hiro and Kanji stay stock ----------
 // a saved marker is <name>.marker (what it is), <name>.png (to print) and, for patterns, <name>.patt (what the game looks for)
@@ -1368,6 +1432,8 @@ static void menuBar() {
         if (ImGui::MenuItem("Play in the browser", "Ctrl+P")) playInBrowser();
         if (ImGui::MenuItem("Build Game...", "Ctrl+B")) buildDialog(false);
         if (ImGui::MenuItem("Build And Run", "Ctrl+Shift+B")) buildDialog(true);
+        if (ImGui::MenuItem("Build for Windows...")) buildWindowsDialog(false);
+        if (ImGui::MenuItem("Build And Run for Windows")) buildWindowsDialog(true);
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Ctrl+Q")) quit = true;
         ImGui::EndMenu();
@@ -2398,7 +2464,7 @@ static void frame() {
 }
 
 int main(int argc, char** argv) {
-    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1;
+    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false;
     std::vector<std::string> args;
 #ifdef _WIN32
     { int n; LPWSTR* wa = CommandLineToArgvW(GetCommandLineW(), &n); if (wa) { for (int i = 1; i < n; ++i) args.push_back(fs::path(wa[i]).u8string()); LocalFree(wa); } }
@@ -2412,6 +2478,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--template" && i + 1 < args.size()) tmpl = args[++i];
         else if (args[i] == "--select" && i + 1 < args.size()) selectArg = atoi(args[++i].c_str());
         else if (args[i] == "--build" && i + 1 < args.size()) buildArg = args[++i];
+        else if (args[i] == "--build-windows" && i + 1 < args.size()) { buildArg = args[++i]; buildWin = true; }
         else if (args[i] == "--maker") { showMaker = true; mk.source = 4; }
         else if (args[i] == "--scenes") showScenes = true;   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
         else if (args[i] == "--pick" && i + 2 < args.size()) { pickX = atoi(args[i + 1].c_str()); pickY = atoi(args[i + 2].c_str()); i += 2; }
@@ -2476,7 +2543,7 @@ int main(int argc, char** argv) {
     if (!openArg.empty()) openProject(openArg);
     else if (!last.empty() && fs::exists(fs::u8path(last) / "project.diorama")) openProject(last);
     else newFromTemplate(tmpl == "basic" ? 0 : 1);
-    if (!buildArg.empty()) { std::string err; const bool ok = buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
+    if (!buildArg.empty()) { std::string err; const bool ok = buildWin ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
     if (capture.empty()) { SDL_ShowWindow(window); SDL_MaximizeWindow(window); SDL_RaiseWindow(window); }
 
