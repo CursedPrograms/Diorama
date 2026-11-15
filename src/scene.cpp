@@ -134,6 +134,7 @@ static std::string markersJson(const std::vector<Marker>& list) {
               .b("spatial", o.spatial).f("audioNear", o.audioNear).f("audioFar", o.audioFar)
               .b("hasVideo", o.hasVideo).b("videoOn", o.videoOn).s("videoFile", o.videoFile).b("videoLoop", o.videoLoop).b("videoPlayOnStart", o.videoPlayOnStart)
               .b("videoMuted", o.videoMuted).f("videoVolume", o.videoVolume).f("videoSpeed", o.videoSpeed)
+              .i("videoAlpha", o.videoAlpha).f("videoKeyTol", o.videoKeyTol).f("videoKeySoft", o.videoKeySoft)
               .b("hasPath", o.hasPath).b("pathOn", o.pathOn).b("pathLoop", o.pathLoop).b("pathLine", o.pathLine).s("pathName", o.pathName)
               .f("arrowSpacing", o.arrowSpacing).f("arrowSize", o.arrowSize)
               .b("hasFollower", o.hasFollower).b("followerOn", o.followerOn).b("followLoop", o.followLoop).b("followOnStart", o.followOnStart)
@@ -151,6 +152,7 @@ static std::string markersJson(const std::vector<Marker>& list) {
             ow.key("lineColour"); ow.out += arr(o.lineColour, 4);
             ow.key("trailColour"); ow.out += arr(o.trailColour, 4);
             ow.key("uiRect"); ow.out += arr(o.uiRect, 4);
+            ow.key("videoKey"); ow.out += arr(o.videoKey, 3);
             ow.key("pathColour"); ow.out += arr(o.pathColour, 4);
             ow.key("pathPoints"); ow.out += arr(o.pathPoints.data(), (int)o.pathPoints.size());
             ow.key("uiColour"); ow.out += arr(o.uiColour, 4);
@@ -201,6 +203,8 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
             o.hasVideo = readBool(ov, "hasVideo", false); o.videoOn = readBool(ov, "videoOn", true); o.videoFile = ov.str("videoFile");
             o.videoLoop = readBool(ov, "videoLoop", true); o.videoPlayOnStart = readBool(ov, "videoPlayOnStart", true); o.videoMuted = readBool(ov, "videoMuted", false);
             o.videoVolume = (float)ov.num("videoVolume", 1); o.videoSpeed = (float)ov.num("videoSpeed", 1);
+                o.videoAlpha = (int)ov.num("videoAlpha", 0); o.videoKeyTol = (float)ov.num("videoKeyTol", o.videoKeyTol); o.videoKeySoft = (float)ov.num("videoKeySoft", o.videoKeySoft);
+                readArr(ov, "videoKey", o.videoKey, 3);
             o.hasPath = readBool(ov, "hasPath", false); o.pathOn = readBool(ov, "pathOn", true); o.pathLoop = readBool(ov, "pathLoop", false); o.pathLine = readBool(ov, "pathLine", true);
             o.pathName = ov.str("pathName", o.pathName); o.arrowSpacing = (float)ov.num("arrowSpacing", o.arrowSpacing); o.arrowSize = (float)ov.num("arrowSize", o.arrowSize);
             readArr(ov, "pathColour", o.pathColour, 4);

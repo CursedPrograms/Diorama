@@ -361,8 +361,16 @@
         var v = document.createElement('video');
         v.src = o.videoFile; v.loop = !!o.videoLoop; v.muted = !!o.videoMuted; v.volume = o.videoVolume; v.playbackRate = o.videoSpeed || 1;
         v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', ''); v.crossOrigin = 'anonymous'; v.preload = 'auto';
-        var vt = srgb(new THREE.VideoTexture(v));
-        node.traverse(function (c) { if ((c.isMesh || c.isSprite) && c.material && !o.occluder) { c.material.map = vt; c.material.needsUpdate = true; } });
+        var vt;
+        if (o.videoAlpha === 2) { var key = chromaKey(v, o); vt = srgb(key.texture); node.userData.chroma = key; }
+        else vt = srgb(new THREE.VideoTexture(v));
+        node.traverse(function (c) {
+          if ((c.isMesh || c.isSprite) && c.material && !o.occluder) {
+            c.material.map = vt;
+            if (o.videoAlpha) { c.material.transparent = true; c.material.alphaTest = 0.02; c.material.depthWrite = false; }
+            c.material.needsUpdate = true;
+          }
+        });
         v.userData = { kind: 'video', auto: o.playOnStart !== false && o.videoPlayOnStart !== false && o.videoOn !== false };
         node.userData.video = v; media.push(v);
       }
@@ -492,6 +500,45 @@
         try { var j = localStorage.getItem(storeKey(name)); if (j) setPath(name, JSON.parse(j)); } catch (e) {}
       });
     }
+    // a green screen keyed out: the video drawn through a small shader into a canvas of its own (its texture), each frame
+    function chromaKey(video, o) {
+      var cv = document.createElement('canvas'); cv.width = 2; cv.height = 2;
+      var gl = cv.getContext('webgl2', { premultipliedAlpha: false, preserveDrawingBuffer: true, alpha: true });
+      var tex = new THREE.CanvasTexture(cv);
+      if (!gl) { tex.image = video; return { texture: tex, update: function () { tex.needsUpdate = true; } }; }   // no WebGL 2: unkeyed
+      var sh = function (type, src) { var x = gl.createShader(type); gl.shaderSource(x, src); gl.compileShader(x); return x; };
+      var pr = gl.createProgram();
+      gl.attachShader(pr, sh(gl.VERTEX_SHADER, '#version 300 es\nin vec2 p; out vec2 uv; void main(){ uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p, 0.0, 1.0); }'));
+      gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, '#version 300 es\nprecision mediump float; in vec2 uv; uniform sampler2D v; uniform vec3 key; uniform float tol, soft; out vec4 o;\n' +
+        'vec2 cbcr(vec3 c){ return vec2(-0.1687*c.r - 0.3313*c.g + 0.5*c.b, 0.5*c.r - 0.4187*c.g - 0.0813*c.b); }\n' +
+        'void main(){ vec4 c = texture(v, uv); float d = distance(cbcr(c.rgb), cbcr(key)) * 1.4;\n' +
+        '  float a = smoothstep(tol, tol + max(soft, 0.001), d);\n' +
+        '  float spill = max(0.0, dot(c.rgb, key) / max(dot(key, key), 0.001) - 0.5 * dot(c.rgb, vec3(1.0) - key) / max(dot(vec3(1.0) - key, vec3(1.0) - key), 0.001));\n' +
+        '  vec3 rgb = c.rgb - key * spill * (1.0 - a) * 0.8;   // the key colour\'s fringe taken out of the edge\n' +
+        '  o = vec4(rgb, a * c.a); }'));
+      gl.linkProgram(pr); gl.useProgram(pr);
+      var buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+      var loc = gl.getAttribLocation(pr, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+      var vt = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, vt);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      var k = o.videoKey || [0, 1, 0];
+      gl.uniform3f(gl.getUniformLocation(pr, 'key'), k[0], k[1], k[2]);
+      gl.uniform1f(gl.getUniformLocation(pr, 'tol'), o.videoKeyTol === undefined ? 0.35 : o.videoKeyTol);
+      gl.uniform1f(gl.getUniformLocation(pr, 'soft'), o.videoKeySoft === undefined ? 0.1 : o.videoKeySoft);
+      var last = -1;
+      return { texture: tex, update: function () {
+        if (video.readyState < 2 || video.currentTime === last) return;
+        last = video.currentTime;
+        var w = Math.min(1280, video.videoWidth || 2), h = Math.round(w * (video.videoHeight || 2) / (video.videoWidth || 2));
+        if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; tex.dispose(); }
+        gl.viewport(0, 0, w, h);
+        gl.bindTexture(gl.TEXTURE_2D, vt);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+        gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        tex.needsUpdate = true;
+      } };
+    }
     function tryPlay(m) {
       m.userData.want = true;
       if (m.userData.kind === 'video') { var pr = m.play(); if (pr && pr.catch) pr.catch(function () {}); return; }
@@ -522,6 +569,7 @@
     function animateComponents(node, t) {
       var o = node.userData.o;
       if (node.userData.follow) follow(node, R.dt || 0);
+      if (node.userData.chroma) node.userData.chroma.update();
       if (node.userData.pathLook) node.userData.pathLook.visible = o.pathOn !== false;
       if (node.userData.el) animateUI(node);
       if (node.userData.light) node.userData.light.visible = o.lightOn !== false;
@@ -744,7 +792,7 @@
       var node = go.node, o = go.data, fresh = build(o, R.players);
       while (node.children.length) { var c = node.children[0]; if (c.userData && c.userData.o) break; node.remove(c); }
       fresh.children.slice().forEach(function (c) { node.add(c); });
-      ['sprites', 'rays', 'light', 'audio', 'video', 'particles', 'line', 'trail', 'el', 'pathLook', 'follow'].forEach(function (k) { node.userData[k] = fresh.userData[k]; });
+      ['sprites', 'rays', 'light', 'audio', 'video', 'particles', 'line', 'trail', 'el', 'pathLook', 'follow', 'chroma'].forEach(function (k) { node.userData[k] = fresh.userData[k]; });
     }
     function find(path, from) {
       var parts = String(path).split('/'), hit = null;

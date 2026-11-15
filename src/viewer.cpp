@@ -544,7 +544,7 @@ static void drawObject(const Draw& d, float t) {
     if (o.glow) glBlendFunc(GL_SRC_ALPHA, GL_ONE); else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     // a Video Player shows its first frame (made by ffmpeg beside the video) where the look has no texture
     const GLuint tex = !o.file.empty() ? texture(o.file).id
-                     : o.hasVideo && o.videoOn && !o.videoFile.empty() ? texture(o.videoFile + ".poster.jpg").id : 0;
+                     : o.hasVideo && o.videoOn && !o.videoFile.empty() ? texture(o.videoFile + ".poster.png").id : 0;
     switch (o.kind) {
     case PLANE: setCommon(d.world, col, tex, o.lit); draw(mPlane); break;
     case CUBE: setCommon(d.world, col, tex, o.lit); draw(mCube); break;
@@ -892,7 +892,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
                 ++nl;
             }
             if (!o.lookOn || o.kind == EMPTY) continue;   // (its children are placed already)
-            const bool blend = !o.occluder && (o.kind == PICTURE || o.kind == SPRITES || o.kind == RAYS || o.kind == WORDS || o.colour[3] < 0.999f || o.glow);
+            const bool blend = !o.occluder && (o.kind == PICTURE || o.kind == SPRITES || o.kind == RAYS || o.kind == WORDS || o.colour[3] < 0.999f || o.glow || (o.hasVideo && o.videoAlpha));
             draws.push_back({world, &o, vz, portal && c[1] < -0.01f, blend, 0});
             // where it is on screen (for clicking it)
             const float cc[4] = {c[0], c[1], c[2], 1};

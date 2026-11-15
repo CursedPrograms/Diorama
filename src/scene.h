@@ -64,6 +64,9 @@ struct Object {
     std::string videoFile;
     bool videoLoop = true, videoPlayOnStart = true, videoMuted = false;
     float videoVolume = 1, videoSpeed = 1;
+    int videoAlpha = 0;                // see-through: 0 none, 1 the video's own (WebM with alpha), 2 green screen (a colour keyed out)
+    float videoKey[3] = {0, 1, 0};     // the green screen's colour
+    float videoKeyTol = 0.35f, videoKeySoft = 0.1f;   // how far from it is keyed out; how soft the edge
     // Canvas (the game's UI, laid over the camera as HTML) and its UI elements (children of a Canvas)
     bool hasCanvas = false, canvasWithAnchor = false;   // withAnchor: shown only while its anchor is found
     std::string canvasCss;             // the game's own style sheet for its UI ("" none)

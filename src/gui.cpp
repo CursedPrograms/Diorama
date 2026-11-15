@@ -567,7 +567,7 @@ static void projectPanel() {
     ImGui::SameLine(); ImGui::TextDisabled("drag files onto the Hierarchy or an object; an object here makes a prefab; drop files from Explorer to import");
     ImGui::BeginChild("##files", ImVec2(0, 0), true);
     std::vector<fs::directory_entry> items;
-    for (const auto& e : fs::directory_iterator(cur, ec)) { const std::string fn = e.path().filename().u8string(); if (fn.size() > 11 && fn.compare(fn.size() - 11, 11, ".poster.jpg") == 0) continue; items.push_back(e); }   // video posters are the editor's own
+    for (const auto& e : fs::directory_iterator(cur, ec)) { const std::string fn = e.path().filename().u8string(); if (fn.size() > 11 && (fn.compare(fn.size() - 11, 11, ".poster.jpg") == 0 || fn.compare(fn.size() - 11, 11, ".poster.png") == 0)) continue; items.push_back(e); }   // video posters are the editor's own
     std::sort(items.begin(), items.end(), [](const fs::directory_entry& a, const fs::directory_entry& b) {
         if (a.is_directory() != b.is_directory()) return a.is_directory();
         return a.path().filename().u8string() < b.path().filename().u8string();
@@ -2264,15 +2264,35 @@ static void newScript(Object& o) {
 }
 static const wchar_t* VIDEOS = L"Videos\0*.mp4;*.webm;*.m4v;*.mov\0\0";
 // the first frame of a video, beside it, for the editor's view (ffmpeg, when it's there; the game plays the real thing)
-static void videoPoster(const std::string& video) {
+static std::string posterOf(const std::string& video) { return video + ".poster.png"; }
+static void videoPoster(const std::string& video, const Object* o = nullptr, bool again = false) {
     if (video.empty()) return;
-    const fs::path out = fs::u8path(video + ".poster.jpg");
-    std::error_code ec; if (fs::exists(out, ec)) return;
-    std::wstring cmd = L"ffmpeg -nostdin -loglevel error -y -ss 0.5 -i \"" + fs::u8path(video).wstring() + L"\" -frames:v 1 -vf scale=640:-2 \"" + out.wstring() + L"\"";
+    const fs::path out = fs::u8path(posterOf(video));
+    std::error_code ec; if (!again && fs::exists(out, ec)) return;
+    std::string ext = fs::u8path(video).extension().u8string(); for (auto& c : ext) c = (char)tolower((unsigned char)c);
+    // WebM's alpha only comes out through libvpx's decoder; a green screen is keyed out by ffmpeg's colorkey
+    const std::wstring decoder = ext == ".webm" ? L"-c:v libvpx-vp9 " : L"";
+    std::wstring vf = L"scale=640:-2";
+    if (o && o->videoAlpha == 2) {
+        char key[96]; snprintf(key, sizeof key, "colorkey=0x%02X%02X%02X:%.3f:%.3f,", (int)(o->videoKey[0] * 255), (int)(o->videoKey[1] * 255), (int)(o->videoKey[2] * 255), o->videoKeyTol, std::max(0.001f, o->videoKeySoft));
+        vf = fs::u8path(key).wstring() + vf;
+    }
+    vf += L",format=rgba";
+    std::wstring cmd = L"ffmpeg -nostdin -loglevel error -y -ss 0.5 " + decoder + L"-i \"" + fs::u8path(video).wstring() + L"\" -frames:v 1 -vf \"" + vf + L"\" \"" + out.wstring() + L"\"";
     STARTUPINFOW si{}; si.cb = sizeof si; PROCESS_INFORMATION pi{};
     std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(0);
     if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         WaitForSingleObject(pi.hProcess, 15000); CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    }
+    if (fs::exists(out, ec)) {
+        // WebM made without alpha (or a decoder that drops it): libvpx refuses some files, so once more plainly
+        Viewer::reload(posterOf(video));
+    } else if (!decoder.empty()) {
+        std::wstring plain = L"ffmpeg -nostdin -loglevel error -y -ss 0.5 -i \"" + fs::u8path(video).wstring() + L"\" -frames:v 1 -vf \"" + vf + L"\" \"" + out.wstring() + L"\"";
+        std::vector<wchar_t> b2(plain.begin(), plain.end()); b2.push_back(0);
+        STARTUPINFOW s2{}; s2.cb = sizeof s2; PROCESS_INFORMATION p2{};
+        if (CreateProcessW(nullptr, b2.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &s2, &p2)) { WaitForSingleObject(p2.hProcess, 15000); CloseHandle(p2.hProcess); CloseHandle(p2.hThread); }
+        Viewer::reload(posterOf(video));
     }
 }
 // a Video Player, and a screen to play on when the object has no look yet (a Quad the video's shape)
@@ -2282,7 +2302,7 @@ static void giveVideo(Object& o, const std::string& file) {
     if (o.kind == EMPTY) {
         giveLook(o, QUAD);
         int w = 0, h = 0, n = 0;
-        if (stbi_info((file + ".poster.jpg").c_str(), &w, &h, &n) && w > 0) o.scl[1] = o.scl[0] * h / w;
+        if (stbi_info(posterOf(file).c_str(), &w, &h, &n) && w > 0) o.scl[1] = o.scl[0] * h / w;
         o.colour[0] = o.colour[1] = o.colour[2] = o.colour[3] = 1; o.lit = false;
     }
 }
@@ -2631,7 +2651,18 @@ static void objectInspector(Scene::Marker& m, Object& o) {
         else {
             if ((h & 0xff) == C_RESET) { o.videoLoop = D.videoLoop; o.videoPlayOnStart = D.videoPlayOnStart; o.videoMuted = D.videoMuted; o.videoVolume = D.videoVolume; o.videoSpeed = D.videoSpeed; }
             if (h & 0x100) {
-                if (fileRow("Video", o.videoFile, VIDEOS)) videoPoster(o.videoFile);
+                if (fileRow("Video", o.videoFile, VIDEOS)) videoPoster(o.videoFile, &o, true);
+                const char* alphas[] = {"None", "The video's own (WebM with alpha)", "Green screen (a colour keyed out)"};
+                labelled("See-through"); if (ImGui::Combo("##va", &o.videoAlpha, alphas, 3)) videoPoster(o.videoFile, &o, true);
+                if (o.videoAlpha == 1) ImGui::TextDisabled("WebM (VP8/VP9) with an alpha channel: Chrome, Edge, Android, Windows builds.\nSafari doesn't show WebM's alpha.");
+                if (o.videoAlpha == 2) {
+                    labelled("Key colour"); ImGui::ColorEdit3("##vk", o.videoKey, ImGuiColorEditFlags_NoInputs);
+                    if (ImGui::IsItemDeactivatedAfterEdit()) videoPoster(o.videoFile, &o, true);
+                    labelled("Tolerance"); ImGui::SliderFloat("##vkt", &o.videoKeyTol, 0.01f, 1, "%.2f"); if (ImGui::IsItemDeactivatedAfterEdit()) videoPoster(o.videoFile, &o, true);
+                    tip("How far from the key colour still goes see-through");
+                    labelled("Softness"); ImGui::SliderFloat("##vks", &o.videoKeySoft, 0, 0.5f, "%.2f"); if (ImGui::IsItemDeactivatedAfterEdit()) videoPoster(o.videoFile, &o, true);
+                    tip("A soft edge round what's kept (hair, motion blur); the green fringe is taken out too");
+                }
                 ImGui::Checkbox("Play on start", &o.videoPlayOnStart); tip("Starts when its anchor is first found;\nscripts can play(), pause() and stop() it too");
                 ImGui::SameLine(); ImGui::Checkbox("Loop", &o.videoLoop);
                 labelled("Speed"); ImGui::SliderFloat("##vs", &o.videoSpeed, 0.1f, 3, "%.2f");
