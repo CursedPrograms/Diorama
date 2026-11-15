@@ -80,6 +80,7 @@ struct Object {
     bool uiChecked = false;
     std::string uiFile;                // Image's picture
     std::string uiClass;               // extra CSS classes
+    std::string uiOnClick;             // Button: Unity's On Click, as a line of script (nav, find, loadScene, log, button)
     // AR Path: a route on the floor (drawn here, or walked and saved in the game), marked with arrows (path marking)
     bool hasPath = false, pathOn = true, pathLoop = false, pathLine = true;
     std::string pathName = "Path 1";

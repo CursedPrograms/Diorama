@@ -18,6 +18,78 @@
   function say(t) { var h = document.getElementById('hint'); if (h) h.firstChild ? (h.firstChild.textContent = t + ' ') : (h.textContent = t); }
 
   // ---- the scene, with whichever three.js the tracker brings
+
+  // ---------- ArNav: surfaces and paths, the same maths as the editor's (src/arnav.cpp), line for line ----------
+  var ArNav = (function () {
+    function dist(a, b) { var dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z; return Math.sqrt(dx * dx + dy * dy + dz * dz); }
+    function yawOf(dx, dz) { return Math.atan2(-dx, -dz); }   // -Z turned by yaw points along (dx, dz)
+    function fromFlat(xyz) { var out = []; for (var i = 0; i + 2 < xyz.length; i += 3) out.push({ x: xyz[i], y: xyz[i + 1], z: xyz[i + 2] }); return out; }
+    function length(pts, loop) {
+      var L = 0; for (var i = 1; i < pts.length; ++i) L += dist(pts[i - 1], pts[i]);
+      if (loop && pts.length > 2) L += dist(pts[pts.length - 1], pts[0]);
+      return L;
+    }
+    function at(pts, s, loop) {
+      var r = { p: { x: 0, y: 0, z: 0 }, yaw: 0 };
+      if (!pts.length) return r;
+      if (pts.length === 1) { r.p = pts[0]; return r; }
+      var n = pts.length, segs = loop && n > 2 ? n : n - 1, L = length(pts, loop);
+      if (L <= 1e-6) { r.p = pts[0]; return r; }
+      if (loop) { s = s % L; if (s < 0) s += L; } else s = Math.min(Math.max(s, 0), L);
+      for (var i = 0; i < segs; ++i) {
+        var a = pts[i], b = pts[(i + 1) % n], d = dist(a, b);
+        if (s <= d || i + 1 === segs) {
+          var f = d > 1e-6 ? Math.min(Math.max(s / d, 0), 1) : 0;
+          r.p = { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, z: a.z + (b.z - a.z) * f };
+          r.yaw = yawOf(b.x - a.x, b.z - a.z);
+          return r;
+        }
+        s -= d;
+      }
+      r.p = pts[n - 1]; return r;
+    }
+    function arrows(pts, spacing, loop) {
+      var out = [], L = length(pts, loop);
+      if (spacing <= 0.01 || L <= 0) return out;
+      for (var s = spacing * 0.5; s < L && out.length < 2000; s += spacing) out.push(at(pts, s, loop));
+      return out;
+    }
+    function resample(pts, spacing) {
+      var out = []; if (!pts.length) return out;
+      out.push(pts[0]);
+      for (var i = 1; i < pts.length; ++i) if (dist(out[out.length - 1], pts[i]) >= spacing) out.push(pts[i]);
+      if (pts.length > 1 && dist(out[out.length - 1], pts[pts.length - 1]) > 1e-4) out.push(pts[pts.length - 1]);
+      return out;
+    }
+    function inside(poly, x, z) {
+      var inn = false;
+      for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        var xi = poly[i][0], zi = poly[i][1], xj = poly[j][0], zj = poly[j][1];
+        if (((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) inn = !inn;
+      }
+      return inn;
+    }
+    function dots(poly, spacing) {
+      var out = []; if (poly.length < 3 || spacing <= 0.005) return out;
+      var x0 = poly[0][0], x1 = x0, z0 = poly[0][1], z1 = z0;
+      poly.forEach(function (q) { x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); z0 = Math.min(z0, q[1]); z1 = Math.max(z1, q[1]); });
+      var rowH = spacing * 0.8660254, row = 0;
+      for (var z = Math.floor(z0 / rowH) * rowH; z <= z1 && out.length < 20000; z += rowH, ++row) {
+        var off = (row & 1) ? spacing * 0.5 : 0;
+        for (var x = Math.floor(x0 / spacing) * spacing + off; x <= x1; x += spacing) if (inside(poly, x, z)) out.push([x, z]);
+      }
+      return out;
+    }
+    function fan(poly) { var idx = []; for (var i = 1; i + 1 < poly.length; ++i) idx.push(0, i, i + 1); return idx; }
+    // the editor's pretend room (floor, table top, wall): the planes the desktop preview "finds"
+    var simPlanes = [
+      { id: 'floor', alignment: 'horizontal', position: [0, 0, 0], rotX: 0,
+        poly: [[-1.6, -2.3], [1.2, -2.4], [2.3, -1.0], [2.2, 1.3], [0.6, 2.2], [-1.4, 2.0], [-2.3, 0.4]] },
+      { id: 'table', alignment: 'horizontal', position: [1.45, 0.751, -1.2], rotX: 0, poly: [[-0.48, -0.3], [0.48, -0.3], [0.48, 0.3], [-0.48, 0.3]] },
+      { id: 'wall', alignment: 'vertical', position: [0, 1.2, -2.59], rotX: Math.PI / 2, poly: [[-2.0, -1.1], [2.0, -1.1], [2.0, 1.1], [-2.0, 1.1]] }];
+    return { fromFlat: fromFlat, length: length, at: at, arrows: arrows, resample: resample, inside: inside, dots: dots, fan: fan, simPlanes: simPlanes };
+  })();
+
   function core(THREE, GLTFLoader) {
     var texLoader = new THREE.TextureLoader(), textures = {};
     var srgb = function (t) { if (THREE.SRGBColorSpace) t.colorSpace = THREE.SRGBColorSpace; return t; };
@@ -213,7 +285,11 @@
       switch (o.ui) {
       case 'Text': el = document.createElement('div'); el.textContent = o.uiText; el.style.justifyContent = ['flex-start', 'center', 'flex-end'][o.uiAlign] || 'center'; el.style.color = css(o.uiColour); break;
       case 'Button': el = document.createElement('button'); el.textContent = o.uiText; el.style.background = css(o.uiBg); el.style.color = css(o.uiColour);
-        el.addEventListener('click', function (ev) { ev.stopPropagation(); unlockMedia(); fire('onClick'); }); break;
+        el.addEventListener('click', function (ev) {
+          ev.stopPropagation(); unlockMedia(); fire('onClick');
+          if (o.uiOnClick) try { new Function('nav', 'find', 'loadScene', 'log', 'button', o.uiOnClick)(nav, function (p) { return find(p); }, loadScene, function () { console.log.apply(console, arguments); }, node.userData.go); }
+            catch (e) { report('error', o.name + ' On Click', 0, e.message); }
+        }); break;
       case 'Slider': el = document.createElement('input'); el.type = 'range'; el.min = o.uiMin; el.max = o.uiMax; el.step = 'any'; el.value = o.uiValue; el.style.accentColor = css(o.uiBg);
         el.addEventListener('input', function () { o.uiValue = +el.value; fire('onChange', o.uiValue); }); break;
       case 'Toggle': el = document.createElement('label'); var box = document.createElement('input'); box.type = 'checkbox'; box.checked = !!o.uiChecked; box.style.accentColor = css(o.uiBg);
@@ -296,6 +372,115 @@
         node.userData.line = segs;
       }
       if (o.hasTrail) node.userData.trail = { segs: [], past: [] };
+      if (o.hasPath) pathLook(node, o);
+      if (o.hasFollower) node.userData.follow = { s: 0, walking: o.followOnStart !== false, path: o.followPath };
+    }
+    // ---------- AR Path (path marking: arrows along it, its line) and AR Path Follower (path following) ----------
+    var arrowGeo = null;
+    function arrowGeometry() {   // the editor's chevron: along -Z, 1 long, a little thick
+      if (arrowGeo) return arrowGeo;
+      var sh = new THREE.Shape(), pts = [[0, -0.5], [0.4, 0.35], [0, 0.12], [-0.4, 0.35]];
+      sh.moveTo(pts[0][0], -pts[0][1]); for (var i = 1; i < 4; ++i) sh.lineTo(pts[i][0], -pts[i][1]); sh.lineTo(pts[0][0], -pts[0][1]);
+      arrowGeo = new THREE.ExtrudeGeometry(sh, { depth: 0.06, bevelEnabled: false });
+      arrowGeo.rotateX(-Math.PI / 2);
+      return arrowGeo;
+    }
+    function pathLook(node, o) {   // (again, when its points change)
+      if (node.userData.pathLook) node.remove(node.userData.pathLook);
+      var g = new THREE.Group(); g.userData.isPathLook = true;
+      var pts = ArNav.fromFlat(o.pathPoints || []), c = o.pathColour || [0.15, 0.2, 0.75, 0.95];
+      var mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(c[0], c[1], c[2]), transparent: c[3] < 1, opacity: c[3] });
+      ArNav.arrows(pts, o.arrowSpacing || 0.5, !!o.pathLoop).forEach(function (a) {
+        var m = new THREE.Mesh(arrowGeometry(), mat);
+        m.position.set(a.p.x, a.p.y + 0.01, a.p.z); m.rotation.y = a.yaw; m.scale.setScalar(o.arrowSize || 0.25);
+        g.add(m);
+      });
+      if (o.pathLine !== false) for (var i = 0; i + 1 < pts.length + (o.pathLoop && pts.length > 2 ? 1 : 0); ++i) {
+        var s = segmentMesh(); s.material.color.setRGB(c[0], c[1], c[2]); s.material.opacity = c[3] * 0.45;
+        var p0 = pts[i], p1 = pts[(i + 1) % pts.length];
+        placeSegment(s, new THREE.Vector3(p0.x, p0.y + 0.004, p0.z), new THREE.Vector3(p1.x, p1.y + 0.004, p1.z), 0.02);
+        g.add(s);
+      }
+      g.visible = o.pathOn !== false;
+      node.add(g); node.userData.pathLook = g;
+    }
+    function pathOwner(name) {   // the AR Path of that name (in the scene, or walked and saved)
+      var hit = null;
+      (R.nodes || []).forEach(function (n) { var o = n.userData.o; if (!hit && o && o.hasPath && o.pathName === name && !(n.userData.go && n.userData.go.dead)) hit = n; });
+      return hit;
+    }
+    var mFollow = new THREE.Matrix4(), mTmp = new THREE.Matrix4(), mParentInv = new THREE.Matrix4();
+    function follow(node, dt) {   // on its path, facing the way it goes; its own Position is an offset from it
+      var o = node.userData.o, f = node.userData.follow;
+      if (o.followerOn === false) return;
+      var owner = pathOwner(f.path);
+      if (!owner) return;
+      var po = owner.userData.o, pts = ArNav.fromFlat(po.pathPoints || []);
+      if (f.walking) f.s += (o.followSpeed || 0.6) * dt;
+      var L = ArNav.length(pts, !!o.followLoop);
+      if (!o.followLoop && f.s >= L && f.walking) { f.walking = false; f.s = L; if (node.userData.go) node.userData.go.scripts.forEach(function (sc) { call(node.userData.go, sc, 'onArrived', f.path); }); }
+      var pose = ArNav.at(pts, f.s, !!o.followLoop);
+      owner.updateWorldMatrix(true, false);
+      node.updateMatrix();
+      mFollow.copy(owner.matrixWorld).multiply(mTmp.makeTranslation(pose.p.x, pose.p.y, pose.p.z)).multiply(mTmp.makeRotationY(pose.yaw)).multiply(node.matrix);
+      if (node.parent) { node.parent.updateWorldMatrix(true, false); mParentInv.copy(node.parent.matrixWorld); if (mParentInv.invert) mParentInv.invert(); else mParentInv.getInverse(node.parent.matrixWorld); mFollow.premultiply(mParentInv); }
+      mFollow.decompose(node.position, node.quaternion, node.scale);
+    }
+    // nav: record a walked path, save it, have the guides follow one (path marking and following, from scripts and buttons)
+    var NAV = { recording: null, points: [], lastDt: 0 };
+    function navRoot() { var k = Object.keys(R.roots); return k.length ? R.roots[k[0]] : null; }
+    function storeKey(name) { return 'dio-path:' + (document.title || '') + ':' + name; }
+    function setPath(name, ptsRoot) {   // a path (in its anchor's space) onto the AR Paths of that name, or a new one
+      var root = navRoot(); if (!root) return;
+      var owner = pathOwner(name), v = new THREE.Vector3();
+      if (!owner) {
+        var data = { id: ++R.nextId, parent: -1, name: name, kind: 'Empty', active: true, position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], colour: [1, 1, 1, 1],
+          anim: 'Still', animSpeed: 1, animAmount: 0, scripts: [], hasPath: true, pathOn: true, pathName: name, pathPoints: [], arrowSpacing: 0.5, arrowSize: 0.25,
+          pathColour: [0.15, 0.2, 0.75, 0.95], pathLine: true, pathLoop: false };
+        owner = build(data, R.players); root.add(owner); R.nodes.push(owner); attachScripts(owner);
+      }
+      owner.updateWorldMatrix(true, false); root.updateWorldMatrix(true, false);
+      var flat = [];
+      ptsRoot.forEach(function (q) { v.set(q.x, q.y, q.z); root.localToWorld(v); owner.worldToLocal(v); flat.push(v.x, v.y, v.z); });
+      owner.userData.o.pathPoints = flat;
+      pathLook(owner, owner.userData.o);
+    }
+    var nav = {
+      get recording() { return NAV.recording; },
+      record: function (name) { NAV.recording = name || 'Path 1'; NAV.points = []; say('Recording ' + NAV.recording + ': walk the way'); },
+      stop: function () { var pts = ArNav.resample(NAV.points, 0.25); NAV.recording = null; return pts; },
+      save: function (name) {
+        var n = name || NAV.recording || 'Path 1', pts = NAV.recording ? nav.stop() : ArNav.resample(NAV.points, 0.25);
+        if (pts.length < 2) { say('Walk a little first'); return false; }
+        try { localStorage.setItem(storeKey(n), JSON.stringify(pts)); } catch (e) {}
+        setPath(n, pts); say('Saved ' + n + ' (' + pts.length + ' points)'); return true;
+      },
+      toggle: function (name) { if (NAV.recording === name) { nav.save(name); return 'saved'; } nav.record(name); return 'recording'; },
+      follow: function (name) {
+        (R.nodes || []).forEach(function (n) { var f = n.userData.follow; if (f) { f.path = name; f.s = 0; f.walking = true; } });
+        if (!pathOwner(name)) say('No ' + name + ' yet: save it first');
+      },
+      stopFollowing: function () { (R.nodes || []).forEach(function (n) { if (n.userData.follow) n.userData.follow.walking = false; }); },
+      reset: function () {
+        NAV.recording = null; NAV.points = [];
+        (R.nodes || []).forEach(function (n) { var f = n.userData.follow; if (f) { f.s = 0; f.walking = false; } });
+        say('Reset');
+      },
+      paths: function () { var names = []; (R.nodes || []).forEach(function (n) { var o = n.userData.o; if (o && o.hasPath && names.indexOf(o.pathName) < 0) names.push(o.pathName); }); return names; },
+      points: function (name) { var o = pathOwner(name); return o ? ArNav.fromFlat(o.userData.o.pathPoints) : []; },
+      forget: function (name) { try { localStorage.removeItem(storeKey(name)); } catch (e) {} }
+    };
+    function navSample() {   // while recording: where the phone is, on the floor (its anchor's space)
+      if (!NAV.recording || !R.camera) return;
+      var root = navRoot(); if (!root || !root.visible) return;
+      var p = new THREE.Vector3(); R.camera.getWorldPosition(p); root.worldToLocal(p); p.y = 0;
+      var last = NAV.points[NAV.points.length - 1];
+      if (!last || Math.hypot(p.x - last.x, p.z - last.z) > 0.08) NAV.points.push({ x: p.x, y: 0, z: p.z });
+    }
+    function navLoadSaved() {   // paths walked and saved before: in their place
+      nav.paths().forEach(function (name) {
+        try { var j = localStorage.getItem(storeKey(name)); if (j) setPath(name, JSON.parse(j)); } catch (e) {}
+      });
     }
     function tryPlay(m) {
       m.userData.want = true;
@@ -326,6 +511,8 @@
     var tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
     function animateComponents(node, t) {
       var o = node.userData.o;
+      if (node.userData.follow) follow(node, R.dt || 0);
+      if (node.userData.pathLook) node.userData.pathLook.visible = o.pathOn !== false;
       if (node.userData.el) animateUI(node);
       if (node.userData.light) node.userData.light.visible = o.lightOn !== false;
       var ps = node.userData.particles;
@@ -547,7 +734,7 @@
       var node = go.node, o = go.data, fresh = build(o, R.players);
       while (node.children.length) { var c = node.children[0]; if (c.userData && c.userData.o) break; node.remove(c); }
       fresh.children.slice().forEach(function (c) { node.add(c); });
-      ['sprites', 'rays', 'light', 'audio', 'video', 'particles', 'line', 'trail', 'el'].forEach(function (k) { node.userData[k] = fresh.userData[k]; });
+      ['sprites', 'rays', 'light', 'audio', 'video', 'particles', 'line', 'trail', 'el', 'pathLook', 'follow'].forEach(function (k) { node.userData[k] = fresh.userData[k]; });
     }
     function find(path, from) {
       var parts = String(path).split('/'), hit = null;
@@ -571,11 +758,11 @@
         if (code === undefined) { report('error', sc.file, 0, 'not found'); return; }
         var name = sc.file.split('/').pop().replace(/\.js$/, '');
         try {
-          var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input', 'loadScene', 'scene',
+          var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input', 'loadScene', 'scene', 'nav', 'planes',
             '"use strict";\n' + code + '\n;return { start: typeof start === "function" ? start : null, update: typeof update === "function" ? update : null,' +
-            ' onTap: typeof onTap === "function" ? onTap : null, onFound: typeof onFound === "function" ? onFound : null, onLost: typeof onLost === "function" ? onLost : null, onClick: typeof onClick === "function" ? onClick : null, onChange: typeof onChange === "function" ? onChange : null };\n//# sourceURL=' + sc.file);
+            ' onTap: typeof onTap === "function" ? onTap : null, onFound: typeof onFound === "function" ? onFound : null, onLost: typeof onLost === "function" ? onLost : null, onClick: typeof onClick === "function" ? onClick : null, onChange: typeof onChange === "function" ? onChange : null, onPlanesChanged: typeof onPlanesChanged === "function" ? onPlanesChanged : null, onArrived: typeof onArrived === "function" ? onArrived : null };\n//# sourceURL=' + sc.file);
           var log = function () { report('log', sc.file, 0, Array.prototype.map.call(arguments, function (a) { return typeof a === 'object' ? JSON.stringify(a) : String(a); }).join(' ')); };
-          var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, R.cameraApi, R.input, loadScene, sceneInfo());
+          var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, R.cameraApi, R.input, loadScene, sceneInfo(), nav, PLANES);
           go.scripts.push({ name: name, file: sc.file, fns: api, self: go, started: false });
         } catch (e) { report('error', sc.file, lineOf(e, sc.file), e.message); }
       });
@@ -626,6 +813,63 @@
       if (go.node.parent) go.node.parent.remove(go.node);
       R.nodes = R.nodes.filter(function (n) { return !n.userData.go || !n.userData.go.dead; });
     }
+    var PLANES = { list: [], byId: {}, changed: { added: [], updated: [], removed: [] }, look: null, settings: null };
+    // a plane found (or changed): its pose (a THREE.Matrix4, world), its boundary in its own space ([[x, z], ...]), horizontal / vertical
+    PLANES.set = function (id, matrix, poly, alignment) {
+      var st = PLANES.settings || { planeDetect: 2, showPlanes: true, planeColour: [0.25, 0.95, 0.55, 0.35] };
+      if ((st.planeDetect === 0 && alignment === 'vertical') || (st.planeDetect === 1 && alignment !== 'vertical')) return;
+      var p = PLANES.byId[id], isNew = !p;
+      if (isNew) { p = { id: id, alignment: alignment, node: new THREE.Group() }; PLANES.byId[id] = p; PLANES.list.push(p); if (PLANES.look) PLANES.look.add(p.node); }
+      p.node.matrixAutoUpdate = false; p.node.matrix.copy(matrix); p.node.matrixWorldNeedsUpdate = true;
+      var key = JSON.stringify(poly);
+      if (key !== p.key) {   // its look: the fill, the dots, the edge (and the plane prefab, once)
+        p.key = key; p.boundary = poly.map(function (q) { return { x: q[0], z: q[1] }; });
+        while (p.node.children.length && !p.node.children[0].userData.prefab) p.node.remove(p.node.children[0]);
+        if (st.showPlanes !== false && poly.length >= 3) {
+          var c = st.planeColour || [0.25, 0.95, 0.55, 0.35];
+          var g = new THREE.BufferGeometry(), pos = [];
+          poly.forEach(function (q) { pos.push(q[0], 0.004, q[1]); });
+          attr(g, 'position', pos, 3); g.setIndex(ArNav.fan(poly));
+          p.node.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: new THREE.Color(c[0], c[1], c[2]), transparent: true, opacity: c[3] * 0.45, depthWrite: false, side: THREE.DoubleSide })));
+          var dg = new THREE.BufferGeometry(), dp = [];
+          ArNav.dots(poly, 0.15).forEach(function (d) { dp.push(d[0], 0.006, d[1]); });
+          attr(dg, 'position', dp, 3);
+          p.node.add(new THREE.Points(dg, new THREE.PointsMaterial({ color: new THREE.Color(c[0], c[1], c[2]), size: 0.025, transparent: true, opacity: Math.min(1, c[3] * 2.2), depthWrite: false })));
+          var ep = []; poly.concat([poly[0]]).forEach(function (q) { ep.push(q[0], 0.006, q[1]); });
+          var eg = new THREE.BufferGeometry(); attr(eg, 'position', ep, 3);
+          p.node.add(new THREE.Line(eg, new THREE.LineBasicMaterial({ color: new THREE.Color(c[0], c[1], c[2]) })));
+        }
+        var x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9; poly.forEach(function (q) { x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); z0 = Math.min(z0, q[1]); z1 = Math.max(z1, q[1]); });
+        p.size = { x: x1 - x0, y: z1 - z0 };
+        if (isNew && st.planePrefab && window.DIORAMA_PREFABS && window.DIORAMA_PREFABS[st.planePrefabName]) {
+          var made = spawn(st.planePrefabName); if (made) { made.node.parent && made.node.parent.remove(made.node); made.node.userData.prefab = true; p.node.add(made.node); }
+        }
+      }
+      var cpos = new THREE.Vector3().setFromMatrixPosition(matrix);
+      p.center = { x: cpos.x, y: cpos.y, z: cpos.z };
+      (isNew ? PLANES.changed.added : PLANES.changed.updated).push(p);
+    };
+    PLANES.remove = function (id) {
+      var p = PLANES.byId[id]; if (!p) return;
+      delete PLANES.byId[id]; PLANES.list.splice(PLANES.list.indexOf(p), 1);
+      if (p.node.parent) p.node.parent.remove(p.node);
+      PLANES.changed.removed.push(p);
+    };
+    PLANES.flush = function () {   // scripts' onPlanesChanged({ added, updated, removed }), AR Foundation's planesChanged
+      var c = PLANES.changed;
+      if (!c.added.length && !c.updated.length && !c.removed.length) return;
+      var info = function (p) { return { id: p.id, alignment: p.alignment, center: p.center, size: p.size, boundary: p.boundary }; };
+      var ev = { added: c.added.map(info), updated: c.updated.map(info), removed: c.removed.map(info) };
+      PLANES.changed = { added: [], updated: [], removed: [] };
+      R.objects.forEach(function (g) { if (!g.dead) g.scripts.forEach(function (sc) { call(g, sc, 'onPlanesChanged', ev); }); });
+    };
+    // a ray from the screen (x, y: -1..1) onto the planes found: [{ position, distance, plane }], nearest first
+    PLANES.raycast = function (x, y) {
+      if (!R.camera || !PLANES.look) return [];
+      var rc = new THREE.Raycaster(); rc.setFromCamera({ x: x, y: y }, R.camera);
+      var meshes = []; PLANES.list.forEach(function (p) { p.node.updateMatrixWorld(true); p.node.children.forEach(function (c) { if (c.isMesh) { c.userData.plane = p; meshes.push(c); } }); });
+      return rc.intersectObjects(meshes, false).map(function (h) { return { position: { x: h.point.x, y: h.point.y, z: h.point.z }, distance: h.distance, plane: h.object.userData.plane.id }; });
+    };
     R.input = { tapped: false, x: 0, y: 0 };
     R.cameraApi = { get position() { var p = new THREE.Vector3(); if (R.camera) R.camera.getWorldPosition(p); return { x: p.x, y: p.y, z: p.z }; } };
     var runtime = {
@@ -663,7 +907,8 @@
         root.traverse(function (c) { var g = c.userData.go; if (g && !g.dead) g.scripts.forEach(function (s) { call(g, s, on ? 'onFound' : 'onLost'); }); });
       },
       update: function (dt, t) {
-        R.t = t;
+        R.t = t; R.dt = dt;
+        navSample(); PLANES.flush();
         R.objects.forEach(function (g) {
           if (g.dead) return;
           g.scripts.forEach(function (s) { if (!s.started) { s.started = true; call(g, s, 'start'); } call(g, s, 'update', dt); });
@@ -696,7 +941,7 @@
       runtime.anchor(m.name, root, m.objects);
       return root;
     }
-    return { anchorWorld: anchorWorld, animate: animate, runtime: runtime };
+    return { anchorWorld: anchorWorld, animate: animate, runtime: runtime, planes: PLANES, nav: nav, navLoadSaved: navLoadSaved };
   }
 
   function fromDisk() {
@@ -869,5 +1114,152 @@
     });
   }
 
-  window.Diorama = { say: say, start: startMarkers, startMarkers: startMarkers, startMind: startMind };
+
+  // ---------- Surfaces: plane detection (WebXR: the phone's own AR, ARCore), a reticle, tap to place; a preview elsewhere ----------
+  function startSurfaces(lib) {
+    splash();
+    if (fromDisk()) return;
+    var THREE = lib.THREE;
+    say('Loading the scene...');
+    withScene(function (proj) {
+      document.title = proj.title;
+      var C = core(THREE, lib.GLTFLoader);
+      var renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(window.devicePixelRatio || 1);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.domElement.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh';
+      document.body.appendChild(renderer.domElement);
+      var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 200);
+      scene.add(camera);
+      scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, THREE.SRGBColorSpace ? Math.PI * 0.6 : 0.6));
+      C.runtime.setCamera(camera, renderer.domElement);
+      var first = proj.markers[0] || {};
+      C.planes.settings = { planeDetect: first.planeDetect === undefined ? 2 : first.planeDetect, showPlanes: first.showPlanes !== false,
+        planeColour: first.planeColour || [0.25, 0.95, 0.55, 0.35], planePrefab: first.planePrefab,
+        planePrefabName: first.planePrefab ? String(first.planePrefab).split('/').pop().replace(/\.prefab$/, '') : '' };
+      C.planes.look = new THREE.Group(); scene.add(C.planes.look);
+      var nodes = [], players = [];
+      var anchors = proj.markers.map(function (m) { var root = C.anchorWorld(m, nodes, players); root.visible = false; scene.add(root); return { m: m, root: root, placed: false }; });
+      C.navLoadSaved();
+      window.addEventListener('resize', function () { renderer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); });
+      // where an anchor goes: a point on a surface, turned to face the player
+      var place = function (a, pos) {
+        var cam = new THREE.Vector3(); camera.getWorldPosition(cam);
+        a.root.position.copy(pos);
+        a.root.rotation.set(0, Math.atan2(cam.x - pos.x, cam.z - pos.z), 0);
+        if (!a.placed) { a.placed = true; a.root.visible = true; C.runtime.seen(a.m.name, true); }
+      };
+      var clock = new THREE.Clock(), t = 0;
+      var tick = function (frameCb) {
+        return function (time, frame) {
+          var dt = Math.min(0.1, clock.getDelta()); t += dt;
+          if (frameCb) frameCb(frame);
+          C.runtime.update(dt, t);
+          nodes.forEach(function (n) { if (!n.userData.go || !n.userData.go.dead) C.animate(n, t); });
+          players.forEach(function (p) { p.update(dt); });
+          renderer.render(scene, camera);
+        };
+      };
+
+      // the preview (a PC, or a phone without ARCore): the editor's pretend room, its planes "found" one by one
+      var preview = function (why) {
+        say(why);
+        scene.background = new THREE.Color(0x161616);
+        var yaw = 0.35, pitch = 0.55, dist = 6.5, tgt = new THREE.Vector3(0.2, 0.4, -0.6);
+        var aim = function () { camera.position.set(tgt.x + dist * Math.cos(pitch) * Math.sin(yaw), tgt.y + dist * Math.sin(pitch), tgt.z + dist * Math.cos(pitch) * Math.cos(yaw)); camera.lookAt(tgt); };
+        aim();
+        var drag = null;
+        renderer.domElement.addEventListener('pointerdown', function (e) { drag = { x: e.clientX, y: e.clientY }; });
+        window.addEventListener('pointerup', function () { drag = null; });
+        window.addEventListener('pointermove', function (e) { if (!drag) return; yaw -= (e.clientX - drag.x) * 0.006; pitch = Math.max(0.05, Math.min(1.5, pitch + (e.clientY - drag.y) * 0.006)); drag = { x: e.clientX, y: e.clientY }; aim(); });
+        renderer.domElement.addEventListener('wheel', function (e) { dist = Math.max(1, Math.min(30, dist * (e.deltaY > 0 ? 1.1 : 0.9))); aim(); }, { passive: true });
+        var found = 0;
+        var findNext = function () {
+          if (found >= ArNav.simPlanes.length) return;
+          var sp = ArNav.simPlanes[found++];
+          var m = new THREE.Matrix4().makeTranslation(sp.position[0], sp.position[1], sp.position[2]).multiply(new THREE.Matrix4().makeRotationX(sp.rotX));
+          C.planes.set(sp.id, m, sp.poly, sp.alignment);
+          setTimeout(findNext, 700);
+        };
+        setTimeout(findNext, 400);
+        // placement: on the floor (tap places where the floor is hit)
+        anchors.forEach(function (a) { if (a.m.placement !== 0) place(a, new THREE.Vector3(0, 0, 0)); });
+        renderer.domElement.addEventListener('click', function (e) {
+          var r = renderer.domElement.getBoundingClientRect();
+          var hits = C.planes.raycast(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+          anchors.forEach(function (a) { if (a.m.placement === 0 && hits.length) place(a, new THREE.Vector3(hits[0].position.x, hits[0].position.y, hits[0].position.z)); });
+        });
+        renderer.setAnimationLoop(tick(null));
+      };
+
+      // the real thing: an immersive-ar session with hit-test and (when the phone has it) plane detection
+      var startXR = function () {
+        var opts = { requiredFeatures: ['hit-test', 'local'], optionalFeatures: ['plane-detection', 'dom-overlay', 'anchors', 'light-estimation'], domOverlay: { root: document.body } };
+        navigator.xr.requestSession('immersive-ar', opts).then(function (session) {
+          renderer.xr.enabled = true;
+          renderer.xr.setReferenceSpaceType('local');
+          return renderer.xr.setSession(session).then(function () {
+            say('Move the phone slowly over the floor.');
+            var ref = renderer.xr.getReferenceSpace(), hitSource = null, seen = new Map(), nextId = 1;
+            session.requestReferenceSpace('viewer').then(function (vs) { return session.requestHitTestSource({ space: vs }); }).then(function (h) { hitSource = h; }).catch(function () {});
+            var ring = new THREE.Mesh(new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+            ring.matrixAutoUpdate = false; ring.visible = false; scene.add(ring);
+            var floorY = null;
+            session.addEventListener('select', function () {
+              if (!ring.visible) return;
+              var pos = new THREE.Vector3().setFromMatrixPosition(ring.matrix);
+              anchors.forEach(function (a) { if (a.m.placement === 0) place(a, pos); });
+            });
+            session.addEventListener('end', function () { say('AR ended'); });
+            renderer.setAnimationLoop(tick(function (frame) {
+              if (!frame) return;
+              // the reticle: where a tap would place things
+              if (hitSource) {
+                var hs = frame.getHitTestResults(hitSource);
+                if (hs.length) { var hp = hs[0].getPose(ref); ring.visible = true; ring.matrix.fromArray(hp.transform.matrix); } else ring.visible = false;
+              }
+              // the planes the phone has found
+              if (frame.detectedPlanes) {
+                var now = new Set();
+                frame.detectedPlanes.forEach(function (pl) {
+                  now.add(pl);
+                  var rec = seen.get(pl);
+                  if (rec && rec.changed === pl.lastChangedTime) return;
+                  var pose = frame.getPose(pl.planeSpace, ref); if (!pose) return;
+                  if (!rec) { rec = { id: 'plane-' + (nextId++) }; seen.set(pl, rec); }
+                  rec.changed = pl.lastChangedTime;
+                  var mtx = new THREE.Matrix4().fromArray(pose.transform.matrix);
+                  C.planes.set(rec.id, mtx, pl.polygon.map(function (q) { return [q.x, q.z]; }), pl.orientation === 'vertical' ? 'vertical' : 'horizontal');
+                  if (pl.orientation !== 'vertical') { var y = pose.transform.position.y, cy = camera.position.y; if (y < cy - 0.5 && (floorY === null || y < floorY)) floorY = y; }
+                });
+                seen.forEach(function (rec, pl) { if (!now.has(pl)) { C.planes.remove(rec.id); seen.delete(pl); } });
+              }
+              // placement 1: on the first floor found, ahead of the player; 2: round where the phone started
+              anchors.forEach(function (a) {
+                if (a.placed) return;
+                if (a.m.placement === 1 && floorY !== null) {
+                  var cam = new THREE.Vector3(), fwd = new THREE.Vector3(); camera.getWorldPosition(cam); camera.getWorldDirection(fwd); fwd.y = 0; fwd.normalize();
+                  place(a, new THREE.Vector3(cam.x + fwd.x * 1.2, floorY, cam.z + fwd.z * 1.2));
+                } else if (a.m.placement === 2) place(a, new THREE.Vector3(0, floorY !== null ? floorY : -1.4, 0));
+                else if (a.m.placement === 0 && ring.visible) say('Tap to place');
+              });
+            }));
+          });
+        }).catch(function (e) { preview('AR didn\'t start (' + (e && (e.message || e.name) || e) + '): a preview instead. Drag to look round.'); });
+      };
+      if (navigator.xr && navigator.xr.isSessionSupported) {
+        navigator.xr.isSessionSupported('immersive-ar').then(function (ok) {
+          if (!ok) { preview('This needs a phone with ARCore (Chrome on Android) for real surfaces. A preview: drag to look round, tap the floor to place.'); return; }
+          // the browser lets AR start from a tap only
+          var b = document.createElement('button'); b.textContent = 'Start AR';
+          b.style.cssText = 'position:fixed;left:50%;bottom:64px;transform:translateX(-50%);z-index:40;padding:14px 36px;font:inherit;font-size:18px;border:0;border-radius:6px;background:#007bb7;color:#fff';
+          b.addEventListener('click', function () { b.remove(); startXR(); });
+          document.body.appendChild(b);
+          say('Tap Start AR, then move the phone slowly over the floor.');
+        }).catch(function () { preview('No AR here: a preview. Drag to look round.'); });
+      } else preview('No AR in this browser (it needs Chrome on an Android phone with ARCore). A preview: drag to look round, tap the floor to place.');
+    });
+  }
+
+  window.Diorama = { say: say, start: startMarkers, startMarkers: startMarkers, startMind: startMind, startSurfaces: startSurfaces, ArNav: ArNav };
 })();

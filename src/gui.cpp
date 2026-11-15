@@ -2404,6 +2404,11 @@ static void objectInspector(Scene::Marker& m, Object& o) {
                 labelled("Value"); ImGui::SliderFloat("##uiv", &o.uiValue, o.uiMin, o.uiMax);
             }
             if (o.ui == UI_TOGGLE) ImGui::Checkbox("On", &o.uiChecked);
+            if (o.ui == UI_BUTTON) {   // Unity's On Click: what it does, as a line of script
+                char oc[512]; snprintf(oc, sizeof oc, "%s", o.uiOnClick.c_str());
+                labelled("On Click"); if (ImGui::InputTextWithHint("##uioc", "nav.follow('Path 1')", oc, sizeof oc)) o.uiOnClick = oc;
+                tip("A line of script run on a tap: nav (paths), find(\"Name\"), loadScene(...), log(...), button (this one)");
+            }
             char cls[128]; snprintf(cls, sizeof cls, "%s", o.uiClass.c_str());
             labelled("CSS class"); if (ImGui::InputText("##uicl", cls, sizeof cls)) o.uiClass = cls;
             const char* hint = o.ui == UI_BUTTON ? "Scripts on it get onClick(); others: getComponent(\"Button\").onClick(fn)"
