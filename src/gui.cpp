@@ -531,7 +531,7 @@ static const char* assetKind(const fs::path& p) {
     if (e == ".glb" || e == ".gltf") return "Model";
     if (e == ".prefab") return "Prefab";
     if (e == ".mp3" || e == ".ogg" || e == ".wav") return "Audio";
-    if (e == ".mp4" || e == ".webm" || e == ".mov" || e == ".m4v") return "Video";
+    if (e == ".mp4" || e == ".webm" || e == ".mov" || e == ".m4v" || e == ".mkv" || e == ".avi" || e == ".gif" || e == ".apng") return "Video";
     if (e == ".patt" || e == ".marker") return "Marker";
     return "File";
 }
@@ -1947,7 +1947,7 @@ static void dropAsset(Scene::Marker& m, int mi, int onto, const std::string& fil
         if (i < 0) { say("Drop a sound onto an object: it gets an Audio Source"); return; }
         Object& t = m.objects[i]; t.hasAudio = true; t.audioOn = true; t.audioFile = file; selMarker = mi; selObject = onto; return;
     }
-    if (e == ".mp4" || e == ".webm" || e == ".mov" || e == ".m4v") {
+    if (e == ".mp4" || e == ".webm" || e == ".mov" || e == ".m4v" || e == ".mkv" || e == ".avi" || e == ".gif" || e == ".apng") {
         if (i < 0) { Object o = make(proj, EMPTY, -1); o.name = fs::u8path(file).stem().u8string(); m.objects.push_back(o); giveVideo(m.objects.back(), file); selMarker = mi; selObject = o.id; return; }
         giveVideo(m.objects[i], file); selMarker = mi; selObject = onto; return;
     }
@@ -2262,7 +2262,62 @@ static void newScript(Object& o) {
     openScript(f.u8string());
     o.scripts.push_back({f.u8string(), true});
 }
-static const wchar_t* VIDEOS = L"Videos\0*.mp4;*.webm;*.m4v;*.mov\0\0";
+static const wchar_t* VIDEOS = L"Videos (with alpha too: MOV, WebM, GIF, APNG)\0*.mp4;*.webm;*.m4v;*.mov;*.mkv;*.avi;*.gif;*.apng\0\0";
+// a tool's output (ffprobe), waited for
+static std::string runCapture(const std::wstring& cmd, DWORD ms) {
+    std::string out;
+#ifdef _WIN32
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE}; HANDLE rd = nullptr, wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return out;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{}; si.cb = sizeof si; si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = wr; si.hStdError = wr;
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(0);
+    if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(wr); wr = nullptr;
+        char b[4096]; DWORD n = 0;
+        while (ReadFile(rd, b, sizeof b, &n, nullptr) && n) out.append(b, n);
+        WaitForSingleObject(pi.hProcess, ms); CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    }
+    if (wr) CloseHandle(wr);
+    CloseHandle(rd);
+#else
+    (void)cmd; (void)ms;
+#endif
+    return out;
+}
+// does this video have an alpha channel (like a PNG's)? ffprobe: an alpha pixel format, WebM's alpha_mode, or a GIF
+static bool videoHasAlpha(const std::string& file) {
+    std::string ext = fs::u8path(file).extension().u8string(); for (auto& c : ext) c = (char)tolower((unsigned char)c);
+    const std::string r = runCapture(L"ffprobe -v error -select_streams v:0 -show_entries stream=pix_fmt,codec_name:stream_tags=alpha_mode -of default=nw=1 \"" + fs::u8path(file).wstring() + L"\"", 20000);
+    if (r.find("alpha_mode=1") != std::string::npos) return true;
+    const size_t at = r.find("pix_fmt="); if (at == std::string::npos) return ext == ".gif" || ext == ".apng";
+    const std::string pf = r.substr(at + 8, r.find_first_of("\r\n", at) - at - 8);
+    for (const char* a : {"rgba", "bgra", "argb", "abgr", "yuva", "gbrap", "ya8", "ya16", "rgba64", "bgra64"}) if (pf.find(a) == 0) return true;
+    return ext == ".gif" && pf == "pal8";
+}
+// a video with alpha the browsers can't play (MOV ProRes 4444 / PNG / Animation, GIF, APNG...) as WebM VP9 with alpha, once
+static std::string toWebmAlpha(const std::string& file) {
+    std::string ext = fs::u8path(file).extension().u8string(); for (auto& c : ext) c = (char)tolower((unsigned char)c);
+    if (ext == ".webm") return file;
+    const fs::path out = fs::u8path(file).parent_path() / fs::u8path(fs::u8path(file).stem().u8string() + ".alpha.webm");
+    std::error_code ec;
+    if (fs::exists(out, ec) && fs::last_write_time(out, ec) >= fs::last_write_time(fs::u8path(file), ec)) return out.u8string();
+    const std::wstring cmd = L"ffmpeg -nostdin -loglevel error -y -i \"" + fs::u8path(file).wstring() + L"\" -c:v libvpx-vp9 -pix_fmt yuva420p -b:v 0 -crf 28 -row-mt 1 "
+                             L"-auto-alt-ref 0 -c:a libopus \"" + out.wstring() + L"\"";
+    runCapture(cmd, 600000);
+    return fs::exists(out, ec) && fs::file_size(out, ec) > 0 ? out.u8string() : file;
+}
+// a video chosen for a Video Player: alpha found and turned on (and made playable), its preview frame
+static void useVideo(Object& o, const std::string& chosen) {
+    std::string file = chosen;
+    if (videoHasAlpha(file)) {
+        const std::string web = toWebmAlpha(file);
+        if (web != file) say("It has alpha: made " + fs::u8path(web).filename().u8string() + " (WebM with alpha) for the game");
+        file = web; o.videoAlpha = 1;
+    } else if (o.videoAlpha == 1) o.videoAlpha = 0;
+    o.videoFile = file;
+}
 // the first frame of a video, beside it, for the editor's view (ffmpeg, when it's there; the game plays the real thing)
 static std::string posterOf(const std::string& video) { return video + ".poster.png"; }
 static void videoPoster(const std::string& video, const Object* o = nullptr, bool again = false) {
@@ -2297,12 +2352,13 @@ static void videoPoster(const std::string& video, const Object* o = nullptr, boo
 }
 // a Video Player, and a screen to play on when the object has no look yet (a Quad the video's shape)
 static void giveVideo(Object& o, const std::string& file) {
-    o.hasVideo = true; o.videoOn = true; o.videoFile = file;
-    videoPoster(file);
+    o.hasVideo = true; o.videoOn = true;
+    useVideo(o, file);
+    videoPoster(o.videoFile, &o, true);
     if (o.kind == EMPTY) {
         giveLook(o, QUAD);
         int w = 0, h = 0, n = 0;
-        if (stbi_info(posterOf(file).c_str(), &w, &h, &n) && w > 0) o.scl[1] = o.scl[0] * h / w;
+        if (stbi_info(posterOf(o.videoFile).c_str(), &w, &h, &n) && w > 0) o.scl[1] = o.scl[0] * h / w;
         o.colour[0] = o.colour[1] = o.colour[2] = o.colour[3] = 1; o.lit = false;
     }
 }
@@ -2651,7 +2707,7 @@ static void objectInspector(Scene::Marker& m, Object& o) {
         else {
             if ((h & 0xff) == C_RESET) { o.videoLoop = D.videoLoop; o.videoPlayOnStart = D.videoPlayOnStart; o.videoMuted = D.videoMuted; o.videoVolume = D.videoVolume; o.videoSpeed = D.videoSpeed; }
             if (h & 0x100) {
-                if (fileRow("Video", o.videoFile, VIDEOS)) videoPoster(o.videoFile, &o, true);
+                if (fileRow("Video", o.videoFile, VIDEOS)) { useVideo(o, o.videoFile); videoPoster(o.videoFile, &o, true); }
                 const char* alphas[] = {"None", "The video's own (WebM with alpha)", "Green screen (a colour keyed out)"};
                 labelled("See-through"); if (ImGui::Combo("##va", &o.videoAlpha, alphas, 3)) videoPoster(o.videoFile, &o, true);
                 if (o.videoAlpha == 1) ImGui::TextDisabled("WebM (VP8/VP9) with an alpha channel: Chrome, Edge, Android, Windows builds.\nSafari doesn't show WebM's alpha.");
@@ -3037,7 +3093,7 @@ static void frame() {
 }
 
 int main(int argc, char** argv) {
-    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false; std::string buildFor;
+    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false; std::string buildFor, addVideoArg;
     std::vector<std::string> args;
 #ifdef _WIN32
     { int n; LPWSTR* wa = CommandLineToArgvW(GetCommandLineW(), &n); if (wa) { for (int i = 1; i < n; ++i) args.push_back(fs::path(wa[i]).u8string()); LocalFree(wa); } }
@@ -3055,7 +3111,8 @@ int main(int argc, char** argv) {
         else if (args[i] == "--build-for" && i + 2 < args.size()) { buildFor = args[++i]; buildArg = args[++i]; }
         else if (args[i] == "--build-ui") showBuild = true;   // opens Build Settings (screenshots)
         else if (args[i] == "--maker") { showMaker = true; mk.source = 4; }
-        else if (args[i] == "--scenes") showScenes = true;   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
+        else if (args[i] == "--scenes") showScenes = true;
+        else if (args[i] == "--add-video" && i + 1 < args.size()) addVideoArg = args[++i];   // tests: a video, as dropped on the first anchor   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
         else if (args[i] == "--pick" && i + 2 < args.size()) { pickX = atoi(args[i + 1].c_str()); pickY = atoi(args[i + 2].c_str()); i += 2; }
         else openArg = args[i];
     }
@@ -3118,6 +3175,7 @@ int main(int argc, char** argv) {
     if (!openArg.empty()) openProject(openArg);
     else if (!last.empty() && fs::exists(fs::u8path(last) / "project.diorama")) openProject(last);
     else newFromTemplate(tmpl == "basic" ? 0 : tmpl == "navigation" ? 2 : 1);
+    if (!addVideoArg.empty() && !proj.markers.empty()) dropAsset(proj.markers[0], 0, -1, addVideoArg);
     if (!buildArg.empty()) { std::string err, apk; const bool ok = buildFor == "android" ? buildAndroid(buildArg, err, apk) : buildFor == "linux" ? buildLinux(buildArg, false, err) : buildFor == "pi" ? buildLinux(buildArg, true, err) : (buildWin || buildFor == "windows") ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
     if (capture.empty()) { SDL_ShowWindow(window); SDL_MaximizeWindow(window); SDL_RaiseWindow(window); }
