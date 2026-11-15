@@ -153,6 +153,7 @@ struct Marker {
     // any camera (a PC's webcam, a phone without ARCore): the surface tracker's guess of how the camera sees the table at the lock
     // (phones use their gravity for the tilt)
     float webcamTilt = 50, webcamHeight = 0.6f, webcamFov = 60;
+    int webcamSurface = 0;             // 0 auto (a phone held upright: facing), 1 a table or floor (it looks down at), 2 facing it (a wall, a poster, a screen)
     std::vector<Object> objects;       // parents before their children
     std::string patt;                  // in a build only: its pattern file there
 };

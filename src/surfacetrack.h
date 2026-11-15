@@ -15,7 +15,8 @@ namespace SurfaceTrack {
 struct Settings {
     double fovDeg = 60;          // the camera's field of view, across
     double tiltDeg = 50;         // how far it looks down at the surface when locking (90: straight down)
-    double height = 0.6;         // its height above the surface when locking, metres
+    double height = 0.6;         // its height above the surface when locking, metres (facing: its distance from it)
+    bool facing = false;         // the surface faces the camera (a wall, a poster, a screen) instead of lying under it
     int width = 320;             // frames are worked on at this width
     int features = 700;
     double ratio = 0.75;         // Lowe's ratio test
@@ -34,6 +35,7 @@ public:
     int inliers() const { return inliers_; }
     cv::Matx33d K() const { return K_; }
     static Pose lockPose(const Settings& s);       // where the surface is at the lock, from the tilt and height
+    int preview(const cv::Mat& frame, std::vector<cv::Point2f>* points = nullptr);   // before locking: the features it sees (how many)
 private:
     void prepare(const cv::Mat& frame, cv::Mat& gray);
     bool reference(const cv::Mat& gray, const Pose& P, double margin);   // this frame's features, placed on the surface

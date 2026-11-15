@@ -2191,6 +2191,9 @@ static void markerInspector(Scene::Marker& m) {
         ImGui::PushTextWrapPos(0);
         ImGui::TextDisabled("PCs and phones without ARCore: the player points at a table or floor with some pattern and taps; it's followed from there.");
         ImGui::PopTextWrapPos();
+        const char* kinds[] = {"Auto", "A table or floor (it looks down)", "Facing it (a wall, a poster, a screen)"};
+        labelled("Surface"); ImGui::Combo("##wsk", &m.webcamSurface, kinds, 3);
+        tip("Auto: a phone held upright locks onto what faces it, tilted down onto a table or floor; a PC webcam: a table or floor");
         labelled("Looks down"); ImGui::SliderFloat("##wt", &m.webcamTilt, 10, 90, "%.0f\xc2\xb0"); tip("How far a webcam looks down at the table (phones use their own gravity)");
         labelled("Height"); ImGui::SliderFloat("##wh", &m.webcamHeight, 0.1f, 3, "%.2f m"); tip("The camera's height above the surface: sets the scale");
         labelled("Field of view"); ImGui::SliderFloat("##wf", &m.webcamFov, 30, 110, "%.0f\xc2\xb0"); tip("Across; most webcams 60-80");

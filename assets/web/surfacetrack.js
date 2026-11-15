@@ -11,12 +11,13 @@
 
   // the surface at the lock: the camera at height h looking down by tilt; its origin where the middle of the view meets it
   function lockPose(s) {
+    var F = [1, 0, 0, 0, -1, 0, 0, 0, -1];                                                  // three's camera -> OpenCV's
+    if (s.facing) return { R: mul3(F, [1, 0, 0, 0, 0, -1, 0, 1, 0]), t: apply3(F, [0, 0, -s.height]) };   // a wall facing the camera
     var th = s.tiltDeg * D2R, h = s.height;
     var Rcw = [1, 0, 0, 0, Math.cos(th), Math.sin(th), 0, -Math.sin(th), Math.cos(th)];   // camera -> world
     var origin = [0, 0, -h / Math.tan(th)], camPos = [0, h, 0];
     var Rwc = transpose3(Rcw);
     var R = Rwc, t = apply3(Rwc, [origin[0] - camPos[0], origin[1] - camPos[1], origin[2] - camPos[2]]);
-    var F = [1, 0, 0, 0, -1, 0, 0, 0, -1];                                                  // three's camera -> OpenCV's
     return { R: mul3(F, R), t: apply3(F, t) };
   }
 
@@ -77,6 +78,16 @@
     this.refDesc = cv.matFromArray(rows.length, cols, cv.CV_8U, keep);
     this.refPx = px; this.refX = X; this.refCount = rows.length;
     return this.refCount >= s.minInliers * 2;
+  };
+  // before locking: the features it sees in this frame ({ count, points: [x, y, ...] in the frame's own pixels })
+  Tracker.prototype.preview = function (src) {
+    var cv = this.cv, gray = this.prepare(src), kps = new cv.KeyPointVector();
+    if (!this.noMask) this.noMask = new cv.Mat();
+    this.orb.detect(gray, kps, this.noMask);
+    var sw = src.videoWidth || src.naturalWidth || src.width, k = sw / this.s.width, pts = [];
+    for (var i = 0; i < kps.size(); ++i) { var p = kps.get(i).pt; pts.push(p.x * k, p.y * k); }
+    var n = kps.size(); kps.delete(); gray.delete();
+    return { count: n, points: pts };
   };
   Tracker.prototype.lock = function (src) {
     var gray = this.prepare(src), P = lockPose(this.s);

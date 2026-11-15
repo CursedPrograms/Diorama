@@ -1358,7 +1358,7 @@
           video.play();
           useRenderer(!!lib.webgpu);
           if (renderer.setClearColor) renderer.setClearColor(0x000000, 0);
-          var settings = { fovDeg: first.webcamFov || 60, tiltDeg: first.webcamTilt || 50, height: first.webcamHeight || 0.6 };
+          var settings = { fovDeg: first.webcamFov || 60, tiltDeg: first.webcamTilt || 50, height: first.webcamHeight || 0.6, facing: first.webcamSurface === 2 };
           var gravityTilt = null;   // the phone's own: how far it looks down
           window.addEventListener('deviceorientation', function (e) { if (e.beta !== null && e.beta !== undefined) gravityTilt = Math.max(15, Math.min(89, 90 - Math.abs(e.beta))); });
           var surface = new THREE.Group(); surface.matrixAutoUpdate = false; surface.visible = false; scene.add(surface);
@@ -1373,18 +1373,40 @@
           video.addEventListener('loadedmetadata', fit); window.addEventListener('resize', fit);
           var tracker = null, lostAt = 0, F = new THREE.Matrix4().makeScale(1, -1, -1), M = new THREE.Matrix4();
           var poly = [[-1.5, -1.5], [1.5, -1.5], [1.5, 1.5], [-1.5, 1.5]];
-          var relock = document.createElement('button'); relock.textContent = 'Re-lock';
-          relock.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:40;padding:8px 16px;font:inherit;border:0;border-radius:6px;background:#007bb7;color:#fff;display:none';
+          var relock = document.createElement('button'); relock.textContent = 'Lock';
+          relock.style.cssText = 'position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:40;padding:12px 34px;font:inherit;font-size:17px;border:0;border-radius:6px;background:#007bb7;color:#fff;display:none';
           document.body.appendChild(relock);
+          // before locking: what it can see (the features) as dots, and the middle of the view
+          var overlay = document.createElement('canvas');
+          overlay.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:30;pointer-events:none';
+          document.body.appendChild(overlay);
+          var octx = overlay.getContext('2d'), lastPreview = 0;
+          var drawPreview = function (pv) {
+            var sw = window.innerWidth, sh = window.innerHeight;
+            if (overlay.width !== sw || overlay.height !== sh) { overlay.width = sw; overlay.height = sh; }
+            octx.clearRect(0, 0, sw, sh);
+            if (!pv) return;
+            var vw = video.videoWidth || 1280, vh = video.videoHeight || 720, sc = Math.max(sw / vw, sh / vh), ox = (sw - vw * sc) / 2, oy = (sh - vh * sc) / 2;
+            octx.fillStyle = 'rgba(90, 240, 140, 0.9)';
+            for (var i = 0; i < pv.points.length; i += 2) octx.fillRect(ox + pv.points[i] * sc - 2, oy + pv.points[i + 1] * sc - 2, 4, 4);
+            var cx = sw / 2, cy = sh / 2;   // the part that's locked: the middle 70% of the camera's picture
+            octx.strokeStyle = 'rgba(255,255,255,0.8)'; octx.lineWidth = 2;
+            octx.strokeRect(Math.max(4, ox + vw * sc * 0.15), Math.max(4, oy + vh * sc * 0.15), Math.min(sw - 8, vw * sc * 0.7), Math.min(sh - 8, vh * sc * 0.7));
+            octx.beginPath(); octx.moveTo(cx - 12, cy); octx.lineTo(cx + 12, cy); octx.moveTo(cx, cy - 12); octx.lineTo(cx, cy + 12); octx.stroke();
+          };
           var lock = function () {
             if (!tracker) return;
             if (gravityTilt !== null) tracker.s.tiltDeg = gravityTilt;
+            // auto: a phone held upright (looking ahead) locks onto what faces it
+            tracker.s.facing = first.webcamSurface === 2 || (first.webcamSurface !== 1 && gravityTilt !== null && gravityTilt < 28);
             C.runtime.consumeTap();   // the tap that locks only locks
             if (!tracker.lock(video)) { say('Not enough to see there: point at a table or floor with some pattern, in good light, then tap.'); return; }
             var P = window.SurfaceTrack.lockPose(tracker.s);
             show(P);
             anchors.forEach(function (a) { if (!a.placed) { a.placed = true; a.root.visible = true; C.runtime.seen(a.m.name, true); } });
-            relock.style.display = '';
+            relock.textContent = 'Re-lock'; relock.style.left = '12px'; relock.style.bottom = '12px'; relock.style.transform = 'none';
+            relock.style.padding = '8px 16px'; relock.style.fontSize = '';
+            drawPreview(null);
             say('Locked. Move slowly; Re-lock to choose another spot.');
           };
           var show = function (P) {   // the surface, where the camera sees it (OpenCV's camera turned into three's)
@@ -1410,7 +1432,11 @@
           // OpenCV.js: only here (it's big), then the tracker
           say('Loading the surface finder...');
           loadScripts(['lib/opencv/opencv.js', 'lib/surfacetrack.js'], function () {
-            var ready = function (cv) { tracker = new window.SurfaceTrack.Tracker(cv, settings); say('Point the camera at a table or the floor (something with a pattern), then tap to lock it.'); };
+            var ready = function (cv) {
+              tracker = new window.SurfaceTrack.Tracker(cv, settings);
+              relock.style.display = '';
+              say('Point the camera at a table, the floor or a wall with some pattern (the green dots), then Lock.');
+            };
             var wait = setInterval(function () {
               if (typeof window.cv === 'undefined') return;
               if (window.cv instanceof Promise) { clearInterval(wait); window.cv.then(ready); }
@@ -1418,6 +1444,15 @@
             }, 100);
           });
           renderer.setAnimationLoop(tick(function () {
+            if (tracker && !tracker.locked() && video.readyState >= 2 && t - lastPreview > 0.15) {   // before locking: what it sees
+              lastPreview = t;
+              var pv = tracker.preview(video);
+              drawPreview(pv);
+              relock.disabled = pv.count < 40;
+              relock.style.opacity = pv.count < 40 ? 0.5 : 1;
+              say(pv.count < 40 ? 'Too plain or dark here (' + pv.count + ' features): point at something with a pattern, in good light.'
+                                : pv.count + ' features: Lock (or tap) when the middle shows what to lock.');
+            }
             if (!tracker || !tracker.locked() || video.readyState < 2) return;
             var r = tracker.track(video);
             if (r.ok) { lostAt = 0; show({ R: r.R, t: r.t }); }

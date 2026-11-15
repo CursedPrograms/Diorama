@@ -12,6 +12,13 @@ static const double D2R = 3.14159265358979 / 180;
 // the surface at the lock: the camera at height h, looking down by tilt; the surface's origin where the middle of the view
 // meets it, its z towards the camera. In three.js's axes first (y up), then turned into OpenCV's camera axes (y down, z ahead).
 Pose Tracker::lockPose(const Settings& s) {
+    const cv::Matx33d F(1, 0, 0, 0, -1, 0, 0, 0, -1);           // three's camera (y up, z back) -> OpenCV's (y down, z ahead)
+    if (s.facing) {   // a wall facing the camera, s.height ahead: its up (y) towards the camera, its z down the wall
+        const cv::Matx33d R(1, 0, 0, 0, 0, -1, 0, 1, 0);
+        const cv::Vec3d t(0, 0, -s.height);
+        Pose p; p.R = F * R; p.t = F * t;
+        return p;
+    }
     const double th = s.tiltDeg * D2R, h = s.height;
     // the camera in the world: at (0, h, 0), turned down by th about x (three: it looks along -z)
     const cv::Matx33d Rcw(1, 0, 0, 0, std::cos(th), std::sin(th), 0, -std::sin(th), std::cos(th));   // camera -> world (rotation by -th about x)
@@ -20,8 +27,6 @@ Pose Tracker::lockPose(const Settings& s) {
     // surface -> three's camera: R = Rcw^T, t = Rcw^T (origin - camPos)
     const cv::Matx33d Rwc = Rcw.t();
     cv::Matx33d R = Rwc; cv::Vec3d t = Rwc * (origin - camPos);
-    // three's camera (y up, z back) -> OpenCV's (y down, z ahead)
-    const cv::Matx33d F(1, 0, 0, 0, -1, 0, 0, 0, -1);
     Pose p; p.R = F * R; p.t = F * t;
     return p;
 }
@@ -64,6 +69,13 @@ bool Tracker::reference(const cv::Mat& gray, const Pose& P, double margin) {
     refDesc_ = keep;
     refCount_ = (int)refX_.size();
     return refCount_ >= s_.minInliers * 2;
+}
+
+int Tracker::preview(const cv::Mat& frame, std::vector<cv::Point2f>* points) {
+    cv::Mat gray; prepare(frame, gray);
+    std::vector<cv::KeyPoint> kps; orb_->detect(gray, kps);
+    if (points) { points->clear(); for (const auto& k : kps) points->push_back(k.pt * (1.0 / scale_)); }
+    return (int)kps.size();
 }
 
 bool Tracker::lock(const cv::Mat& frame) {
