@@ -1123,7 +1123,11 @@
             };
             arCam.updateProjectionMatrix();
             // the webcam picture is sRGB (today's three manages colour)
-            arScene.videoScene.traverse(function (c) { if (c.material && c.material.map && THREE.SRGBColorSpace) c.material.map.colorSpace = THREE.SRGBColorSpace; });
+            // ARToolKit's own texture is made before the video has a size; today's three.js gives a texture fixed storage at
+            // its first upload, so that one stays empty (a black background). A VideoTexture, made now the camera runs
+            var webcamTex = new THREE.VideoTexture(arScene.video);
+            if (THREE.SRGBColorSpace) webcamTex.colorSpace = THREE.SRGBColorSpace;
+            arScene.videoScene.traverse(function (c) { if (c.material && c.material.map) { webcamTex.flipY = c.material.map.flipY; c.material.map = webcamTex; c.material.needsUpdate = true; } });
             var fit = function () {
               var vw = arController.videoWidth, vh = arController.videoHeight;
               if (arController.orientation === 'portrait') { var w = window.innerWidth / vh * vw, h = window.innerWidth; renderer.setSize(w, h); }

@@ -51,6 +51,14 @@ static const char* typeOf(const std::string& ext) {
     if (ext == ".gltf") return "model/gltf+json";
     if (ext == ".css") return "text/css";
     if (ext == ".svg") return "image/svg+xml";
+    if (ext == ".mp4" || ext == ".m4v") return "video/mp4";
+    if (ext == ".webm") return "video/webm";
+    if (ext == ".mov") return "video/quicktime";
+    if (ext == ".mp3") return "audio/mpeg";
+    if (ext == ".ogg") return "audio/ogg";
+    if (ext == ".wav") return "audio/wav";
+    if (ext == ".m4a") return "audio/mp4";
+    if (ext == ".patt" || ext == ".txt") return "text/plain";
     return "application/octet-stream";
 }
 
@@ -95,14 +103,38 @@ static void answer(Sock c) {
     std::ifstream f(file, std::ios::binary);
     if (inside && f) {
         std::stringstream ss; ss << f.rdbuf(); body = ss.str();
-        head = "HTTP/1.0 200 OK\r\nContent-Type: " + std::string(typeOf(file.extension().u8string())) + "\r\nContent-Length: " + std::to_string(body.size()) +
-               "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+        std::string ext = file.extension().u8string(); for (auto& ch : ext) ch = (char)tolower((unsigned char)ch);
+        const size_t total = body.size();
+        // a range (videos seek with them)
+        size_t from = 0, to = total ? total - 1 : 0; bool ranged = false;
+        const size_t rg = req.find("\r\nRange: bytes=");
+        if (rg != std::string::npos && total) {
+            const std::string v = req.substr(rg + 15, req.find("\r\n", rg + 2) - rg - 15);
+            const size_t d = v.find('-');
+            if (d != std::string::npos) {
+                if (d > 0) from = (size_t)atoll(v.substr(0, d).c_str());
+                if (d + 1 < v.size()) to = (std::min)(to, (size_t)atoll(v.substr(d + 1).c_str()));
+                ranged = from <= to && from < total;
+            }
+        }
+        if (ranged) body = body.substr(from, to - from + 1); else from = 0;
+        head = std::string(ranged ? "HTTP/1.1 206 Partial Content" : "HTTP/1.1 200 OK") + "\r\nContent-Type: " + typeOf(ext) +
+               "\r\nContent-Length: " + std::to_string(body.size()) + "\r\nAccept-Ranges: bytes\r\n" +
+               (ranged ? "Content-Range: bytes " + std::to_string(from) + "-" + std::to_string(from + body.size() - 1) + "/" + std::to_string(total) + "\r\n" : std::string()) +
+               "Cache-Control: no-store\r\nConnection: close\r\n\r\n";
     } else {
         body = "Not found";
         head = "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\n";
     }
     send(c, head.data(), (int)head.size(), 0);
     for (size_t off = 0; off < body.size();) { const int s = send(c, body.data() + off, (int)std::min<size_t>(1 << 16, body.size() - off), 0); if (s <= 0) break; off += (size_t)s; }
+    // a graceful close: closing at once can reset the connection and lose the end of a big file (OpenCV.js is 10 MB)
+#ifdef _WIN32
+    shutdown(c, SD_SEND);
+#else
+    shutdown(c, SHUT_WR);
+#endif
+    { char drain[512]; while (recv(c, drain, sizeof drain, 0) > 0) {} }
     closeSock(c);
 }
 

@@ -3169,6 +3169,9 @@ int main(int argc, char** argv) {
         else if (args[i] == "--build-for" && i + 2 < args.size()) { buildFor = args[++i]; buildArg = args[++i]; }
         else if (args[i] == "--build-ui") showBuild = true;   // opens Build Settings (screenshots)
         else if (args[i] == "--maker") { showMaker = true; mk.source = 4; }
+        else if (args[i] == "--serve" && i + 2 < args.size()) {   // tests: Play's server on a folder for some seconds, then quit
+            Serve::start(args[i + 1], 8796); SDL_Delay((Uint32)(atof(args[i + 2].c_str()) * 1000)); return 0;
+        }
         else if (args[i] == "--scenes") showScenes = true;
         else if (args[i] == "--add-video" && i + 1 < args.size()) addVideoArg = args[++i];   // tests: a video, as dropped on the first anchor   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
         else if (args[i] == "--pick" && i + 2 < args.size()) { pickX = atoi(args[i + 1].c_str()); pickY = atoi(args[i + 2].c_str()); i += 2; }
