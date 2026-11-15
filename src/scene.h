@@ -164,6 +164,7 @@ struct Project {
     // Build Settings: the platform it builds for, and its runtime
     std::string platform = "web";      // web, windows, linux, pi, android
     int windowsRuntime = 0;            // 0 JavaScript (WebView2), 1 C++ (Diorama's native player)
+    int renderer = 0;                  // the JavaScript runtime's drawing: 0 WebGL 2, 1 WebGPU (WebGL 2 where there's none)
     // Player Settings
     std::string company = "Cursed Entertainment", version = "1.0";
     std::string packageId;             // Android; "" = com.cursedentertainment.<game>

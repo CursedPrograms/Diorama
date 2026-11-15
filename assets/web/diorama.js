@@ -19,6 +19,15 @@
 
   // ---- the scene, with whichever three.js the tracker brings
 
+  // the game's renderer (Build Settings > Graphics): three's WebGLRenderer, or its WebGPURenderer (WebGPU where the
+  // browser has it, else WebGL 2 by itself). WebXR (Surfaces' AR) needs WebGL, so AR sessions always get WebGL.
+  function makeRenderer(lib, opts) {
+    var THREE = lib.THREE;
+    if (lib.webgpu && THREE.WebGPURenderer) return new THREE.WebGPURenderer(opts);
+    return new THREE.WebGLRenderer(opts);
+  }
+  function usesWebGPU(renderer) { return !!(renderer && renderer.backend && renderer.backend.isWebGPUBackend); }
+
   // ---------- ArNav: surfaces and paths, the same maths as the editor's (src/arnav.cpp), line for line ----------
   var ArNav = (function () {
     function dist(a, b) { var dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z; return Math.sqrt(dx * dx + dy * dy + dz * dz); }
@@ -327,14 +336,15 @@
       if (el.shown !== vis) { el.shown = vis; el.style.display = vis ? '' : 'none'; }
     }
 
+    // lights fade to nothing at their Range (decay 0: no inverse square), as the editor draws them
     function components(o, node) {
       if (o.hasCanvas || o.ui) { var ue = uiElement(o, node); if (ue) node.userData.el = ue; }
       if (o.occluder) occlude(node);
       if (o.hasLight) {
         var col = new THREE.Color(o.lightColour[0], o.lightColour[1], o.lightColour[2]), li;
-        if (o.lightType === 1) li = new THREE.SpotLight(col, o.lightIntensity * K, o.lightRange, o.spotAngle * D2R / 2, 0.15, 2);
+        if (o.lightType === 1) li = new THREE.SpotLight(col, o.lightIntensity * K, o.lightRange, o.spotAngle * D2R / 2, 0.15, 0);
         else if (o.lightType === 2) li = new THREE.DirectionalLight(col, o.lightIntensity * K);
-        else li = new THREE.PointLight(col, o.lightIntensity * K, o.lightRange, 2);
+        else li = new THREE.PointLight(col, o.lightIntensity * K, o.lightRange, 0);
         if (li.target) { var tg = new THREE.Object3D(); tg.position.set(0, 0, -1); node.add(tg); li.target = tg; }
         li.visible = o.lightOn !== false;
         node.add(li); node.userData.light = li;
@@ -831,10 +841,15 @@
           poly.forEach(function (q) { pos.push(q[0], 0.004, q[1]); });
           attr(g, 'position', pos, 3); g.setIndex(ArNav.fan(poly));
           p.node.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: new THREE.Color(c[0], c[1], c[2]), transparent: true, opacity: c[3] * 0.45, depthWrite: false, side: THREE.DoubleSide })));
-          var dg = new THREE.BufferGeometry(), dp = [];
-          ArNav.dots(poly, 0.15).forEach(function (d) { dp.push(d[0], 0.006, d[1]); });
-          attr(dg, 'position', dp, 3);
-          p.node.add(new THREE.Points(dg, new THREE.PointsMaterial({ color: new THREE.Color(c[0], c[1], c[2]), size: 0.025, transparent: true, opacity: Math.min(1, c[3] * 2.2), depthWrite: false })));
+          var ds = ArNav.dots(poly, 0.15);
+          if (ds.length) {
+            var disc = new THREE.CircleGeometry(0.012, 8); disc.rotateX(-Math.PI / 2);
+            var dots = new THREE.InstancedMesh(disc, new THREE.MeshBasicMaterial({ color: new THREE.Color(c[0], c[1], c[2]), transparent: true, opacity: Math.min(1, c[3] * 2.2), depthWrite: false }), ds.length);
+            var dm = new THREE.Matrix4();
+            ds.forEach(function (d, i) { dm.makeTranslation(d[0], 0.006, d[1]); dots.setMatrixAt(i, dm); });
+            dots.instanceMatrix.needsUpdate = true;
+            p.node.add(dots);
+          }
           var ep = []; poly.concat([poly[0]]).forEach(function (q) { ep.push(q[0], 0.006, q[1]); });
           var eg = new THREE.BufferGeometry(); attr(eg, 'position', ep, 3);
           p.node.add(new THREE.Line(eg, new THREE.LineBasicMaterial({ color: new THREE.Color(c[0], c[1], c[2]) })));
@@ -867,7 +882,7 @@
     PLANES.raycast = function (x, y) {
       if (!R.camera || !PLANES.look) return [];
       var rc = new THREE.Raycaster(); rc.setFromCamera({ x: x, y: y }, R.camera);
-      var meshes = []; PLANES.list.forEach(function (p) { p.node.updateMatrixWorld(true); p.node.children.forEach(function (c) { if (c.isMesh) { c.userData.plane = p; meshes.push(c); } }); });
+      var meshes = []; PLANES.list.forEach(function (p) { p.node.updateMatrixWorld(true); p.node.children.forEach(function (c) { if (c.isMesh && !c.isInstancedMesh) { c.userData.plane = p; meshes.push(c); } }); });
       return rc.intersectObjects(meshes, false).map(function (h) { return { position: { x: h.point.x, y: h.point.y, z: h.point.z }, distance: h.distance, plane: h.object.userData.plane.id }; });
     };
     R.input = { tapped: false, x: 0, y: 0 };
@@ -977,14 +992,29 @@
     d.addEventListener('click', go);
     document.body.appendChild(d);
   }
-  function startMarkers() {
+  function loadScripts(list, done) {   // in order
+    if (!list.length) { done(); return; }
+    var el = document.createElement('script'); el.src = list[0];
+    el.onload = function () { loadScripts(list.slice(1), done); };
+    el.onerror = function () { say('Couldn\'t load ' + list[0]); };
+    document.head.appendChild(el);
+  }
+  function startMarkers(lib) {
     splash();
     if (fromDisk()) return;
+    lib = lib || { THREE: window.THREE, GLTFLoader: window.THREE && window.THREE.GLTFLoader };
+    var THREE = lib.THREE;
+    // ARToolKit's three.js glue (artoolkit.three.js) was written for an older three: what it needs, under its old names
+    if (!window.THREE || window.THREE !== THREE) {
+      var shim = {}; for (var k in THREE) shim[k] = THREE[k];
+      if (!shim.PlaneBufferGeometry) shim.PlaneBufferGeometry = THREE.PlaneGeometry;
+      window.THREE = shim;
+    }
     say('Loading the scene...');
     withScene(function (proj) {
       say('Starting the camera...');
       document.title = proj.title;
-      var C = core(THREE, THREE.GLTFLoader);
+      var C = core(THREE, lib.GLTFLoader);
       window.ARThreeOnLoad = function () {
         ARController.getUserMediaThreeScene({
           maxARVideoSize: 640, cameraParam: 'data/camera_para.dat',
@@ -997,7 +1027,18 @@
             // the black-and-white split worked out from each picture (Otsu), not a fixed level: copes with dim or
             // uneven light on the paper
             try { arController.setThresholdMode(2); } catch (e) {}
-            var renderer = new THREE.WebGLRenderer({ antialias: true });
+            var renderer = makeRenderer(lib, { antialias: true });
+            // the camera: ARToolKit's own projection (the webcam's lens); WebGPU's depth runs 0..1, WebGL's -1..1
+            var arCam = arScene.camera, P = arCam.projectionMatrix.clone();
+            var toWebGPU = new THREE.Matrix4().set(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.5, 0.5, 0, 0, 0, 1);
+            arCam.updateProjectionMatrix = function () {
+              this.projectionMatrix.copy(P);
+              if (THREE.WebGPUCoordinateSystem !== undefined && this.coordinateSystem === THREE.WebGPUCoordinateSystem) this.projectionMatrix.premultiply(toWebGPU);
+              this.projectionMatrixInverse.copy(this.projectionMatrix).invert();
+            };
+            arCam.updateProjectionMatrix();
+            // the webcam picture is sRGB (today's three manages colour)
+            arScene.videoScene.traverse(function (c) { if (c.material && c.material.map && THREE.SRGBColorSpace) c.material.map.colorSpace = THREE.SRGBColorSpace; });
             var fit = function () {
               var vw = arController.videoWidth, vh = arController.videoHeight;
               if (arController.orientation === 'portrait') { var w = window.innerWidth / vh * vw, h = window.innerWidth; renderer.setSize(w, h); }
@@ -1031,14 +1072,20 @@
               nodes.forEach(function (n) { if (!n.userData.go || !n.userData.go.dead) C.animate(n, t); });
               players.forEach(function (p) { p.update(dt); });
               arScene.renderOn(renderer);
-              requestAnimationFrame(tick);
             };
-            tick();
+            var started = renderer.init ? renderer.init() : Promise.resolve();
+            Promise.resolve(started).then(function () {
+              if (usesWebGPU(renderer)) console.log('Diorama: drawing with WebGPU');
+              arCam.coordinateSystem = renderer.coordinateSystem !== undefined ? renderer.coordinateSystem : arCam.coordinateSystem;
+              arCam.updateProjectionMatrix();
+              renderer.setAnimationLoop(tick);
+            });
           }
         });
         delete window.ARThreeOnLoad;
       };
       if (window.ARController && ARController.getUserMediaThreeScene) window.ARThreeOnLoad();
+      else if (!window.artoolkit) loadScripts(['lib/artoolkit.min.js', 'lib/artoolkit.three.js'], function () {});
     });
   }
 
@@ -1124,15 +1171,18 @@
     withScene(function (proj) {
       document.title = proj.title;
       var C = core(THREE, lib.GLTFLoader);
-      var renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-      renderer.setPixelRatio(window.devicePixelRatio || 1);
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.domElement.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh';
-      document.body.appendChild(renderer.domElement);
+      var renderer = null;
+      var useRenderer = function (gpu) {   // WebXR needs WebGL; the preview can draw with WebGPU
+        renderer = makeRenderer({ THREE: THREE, webgpu: gpu }, { antialias: true, alpha: true });
+        renderer.setPixelRatio(window.devicePixelRatio || 1);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.domElement.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh';
+        document.body.insertBefore(renderer.domElement, document.body.firstChild);
+        C.runtime.setCamera(camera, renderer.domElement);
+      };
       var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 200);
       scene.add(camera);
       scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, THREE.SRGBColorSpace ? Math.PI * 0.6 : 0.6));
-      C.runtime.setCamera(camera, renderer.domElement);
       var first = proj.markers[0] || {};
       C.planes.settings = { planeDetect: first.planeDetect === undefined ? 2 : first.planeDetect, showPlanes: first.showPlanes !== false,
         planeColour: first.planeColour || [0.25, 0.95, 0.55, 0.35], planePrefab: first.planePrefab,
@@ -1141,7 +1191,7 @@
       var nodes = [], players = [];
       var anchors = proj.markers.map(function (m) { var root = C.anchorWorld(m, nodes, players); root.visible = false; scene.add(root); return { m: m, root: root, placed: false }; });
       C.navLoadSaved();
-      window.addEventListener('resize', function () { renderer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); });
+      window.addEventListener('resize', function () { if (renderer) renderer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); });
       // where an anchor goes: a point on a surface, turned to face the player
       var place = function (a, pos) {
         var cam = new THREE.Vector3(); camera.getWorldPosition(cam);
@@ -1164,6 +1214,7 @@
       // the preview (a PC, or a phone without ARCore): the editor's pretend room, its planes "found" one by one
       var preview = function (why) {
         say(why);
+        useRenderer(!!lib.webgpu);
         scene.background = new THREE.Color(0x161616);
         var yaw = 0.35, pitch = 0.55, dist = 6.5, tgt = new THREE.Vector3(0.2, 0.4, -0.6);
         var aim = function () { camera.position.set(tgt.x + dist * Math.cos(pitch) * Math.sin(yaw), tgt.y + dist * Math.sin(pitch), tgt.z + dist * Math.cos(pitch) * Math.cos(yaw)); camera.lookAt(tgt); };
@@ -1194,6 +1245,7 @@
 
       // the real thing: an immersive-ar session with hit-test and (when the phone has it) plane detection
       var startXR = function () {
+        if (!renderer) useRenderer(false);
         var opts = { requiredFeatures: ['hit-test', 'local'], optionalFeatures: ['plane-detection', 'dom-overlay', 'anchors', 'light-estimation'], domOverlay: { root: document.body } };
         navigator.xr.requestSession('immersive-ar', opts).then(function (session) {
           renderer.xr.enabled = true;
@@ -1253,6 +1305,7 @@
           // the browser lets AR start from a tap only
           var b = document.createElement('button'); b.textContent = 'Start AR';
           b.style.cssText = 'position:fixed;left:50%;bottom:64px;transform:translateX(-50%);z-index:40;padding:14px 36px;font:inherit;font-size:18px;border:0;border-radius:6px;background:#007bb7;color:#fff';
+          useRenderer(false);
           b.addEventListener('click', function () { b.remove(); startXR(); });
           document.body.appendChild(b);
           say('Tap Start AR, then move the phone slowly over the floor.');

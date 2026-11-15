@@ -106,7 +106,7 @@ std::string toJson(const Project& p) {
     std::string out = "{\n  \"diorama\": 1,\n  \"title\": " + Json::quote(p.title) + ",\n  \"tracking\": \"" + TRACKING_NAMES[p.tracking] +
                       "\",\n  \"gps\": " + (p.gps ? "true" : "false") + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"scene\": " + Json::quote(p.scene) + ",\n  \"scenes\": [";
     for (size_t i = 0; i < p.scenes.size(); ++i) out += (i ? ", " : "") + Json::quote(p.scenes[i]);
-    out += "],\n  \"platform\": " + Json::quote(p.platform) + ", \"windowsRuntime\": " + std::to_string(p.windowsRuntime) +
+    out += "],\n  \"platform\": " + Json::quote(p.platform) + ", \"windowsRuntime\": " + std::to_string(p.windowsRuntime) + ", \"renderer\": " + std::to_string(p.renderer) +
            ",\n  \"company\": " + Json::quote(p.company) + ", \"version\": " + Json::quote(p.version) + ", \"packageId\": " + Json::quote(p.packageId) +
            ",\n  \"icon\": " + Json::quote(p.icon) + ", \"splash\": " + Json::quote(p.splash) + ", \"intro\": " + Json::quote(p.intro) +
            ",\n  \"skipSplash\": " + (p.skipSplash ? "true" : "false") + ", \"fullscreen\": " + (p.fullscreen ? "true" : "false") +
@@ -190,7 +190,7 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
         if (!names.empty()) p.scenes = names;
     }
     p.scene = v.str("scene", p.scenes[0]);
-    p.platform = v.str("platform", "web"); p.windowsRuntime = (int)v.num("windowsRuntime", 0);
+    p.platform = v.str("platform", "web"); p.windowsRuntime = (int)v.num("windowsRuntime", 0); p.renderer = (int)v.num("renderer", 0);
     p.company = v.str("company", p.company); p.version = v.str("version", p.version); p.packageId = v.str("packageId");
     p.icon = v.str("icon"); p.splash = v.str("splash"); p.intro = v.str("intro");
     { const Json::Value* b = v.get("skipSplash"); p.skipSplash = b && b->type == Json::Value::BOOL && b->b; }

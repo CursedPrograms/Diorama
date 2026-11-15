@@ -697,8 +697,16 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     // only what this game's tracking needs: jsartoolkit5 (markers) or MindAR (pictures, faces)
     std::error_code rm; fs::remove_all(o / "lib", rm);
     const bool surfaces = proj.tracking == TRACK_SURFACES;
-    if (surfaces ? !copyTree(web / "mindar" / "three", o / "lib" / "three")
-                 : mind ? !copyTree(web / "mindar", o / "lib" / "mindar") : (!copyTree(web / "lib", o / "lib") || !copyTree(web / "data", o / "data"))) {
+    bool copied = true;
+    if (mind) copied = copyTree(web / "mindar", o / "lib" / "mindar");
+    else {
+        copied = copyTree(web / "three", o / "lib" / "three");
+        if (!surfaces) {   // ARToolKit (and its camera data)
+            for (const char* f : {"artoolkit.min.js", "artoolkit.three.js", "LICENSE-jsartoolkit5.txt"}) { std::error_code ce; fs::copy_file(web / "lib" / f, o / "lib" / f, fs::copy_options::overwrite_existing, ce); if (ce) copied = false; }
+            copied = copied && copyTree(web / "data", o / "data");
+        }
+    }
+    if (!copied) {
         err = "Couldn't copy the player into " + out; return false;
     }
     fs::create_directories(o / "lib", ec);
@@ -848,19 +856,25 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
          "  <div id=\"hint\">" << (proj.tracking == TRACK_FACES ? "Look at the camera." : proj.tracking == TRACK_SURFACES ? "Move the phone slowly over the floor." : proj.tracking == TRACK_IMAGES ? "Point the camera at the picture." : "Point the camera at the marker.")
       << (proj.tracking == TRACK_FACES || proj.tracking == TRACK_SURFACES ? "" : proj.tracking == TRACK_IMAGES ? " <a href=\"markers.png\" target=\"_blank\">The pictures</a>" : " <a href=\"markers.png\" target=\"_blank\">Print the markers</a>")
       << "</div>\n";
+    const std::string threeBuild = proj.renderer == 1 ? "three.webgpu.min.js" : "three.module.min.js";
+    const std::string importMap = "  <script type=\"importmap\">{ \"imports\": { \"three\": \"./lib/three/" + threeBuild + "\", \"three/addons/\": \"./lib/three/addons/\" } }</script>\n";
+    const char* gpu = proj.renderer == 1 ? "true" : "false";
     if (surfaces)
-        h << "  <script type=\"importmap\">{ \"imports\": { \"three\": \"./lib/three/three.module.min.js\", \"three/addons/\": \"./lib/three/addons/\" } }</script>\n"
+        h << importMap <<
              "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
              "  <script type=\"module\">\n"
              "    import * as THREE from 'three';\n"
              "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
-             "    Diorama.startSurfaces({ THREE: THREE, GLTFLoader: GLTFLoader });\n"
+             "    Diorama.startSurfaces({ THREE: THREE, GLTFLoader: GLTFLoader, webgpu: " << gpu << " });\n"
              "  </script>\n  <!-- Made with Diorama (Cursed Entertainment). three.js: MIT (see lib/three/). WebXR: the phone's own AR (ARCore). -->\n";
     else if (!mind)
-        h << "  <script src=\"lib/three.min.js\"></script>\n  <script src=\"lib/GLTFLoader.js\"></script>\n"
+        h << importMap <<
              "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
-             "  <script>Diorama.startMarkers();</script>\n"
-             "  <script async src=\"lib/artoolkit.min.js\"></script>\n  <script async src=\"lib/artoolkit.three.js\"></script>\n"
+             "  <script type=\"module\">\n"
+             "    import * as THREE from 'three';\n"
+             "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
+             "    Diorama.startMarkers({ THREE: THREE, GLTFLoader: GLTFLoader, webgpu: " << gpu << " });\n"
+             "  </script>\n"
              "  <!-- Made with Diorama (Cursed Entertainment). jsartoolkit5: LGPL-3.0; three.js: MIT (see lib/). -->\n";
     else {
         const bool faces = proj.tracking == TRACK_FACES;
@@ -1299,6 +1313,18 @@ static void buildSettings() {
         ImGui::TextDisabled("JavaScript (Chromium). The C++ runtime comes to Linux and the Pi after Windows.");
         if (shownPlatform == "linux") ImGui::Checkbox("Start full screen", &proj.fullscreen);
     } else ImGui::TextDisabled("JavaScript: three.js with jsartoolkit5 (markers) or MindAR (pictures, faces).");
+    ImGui::SeparatorText("Graphics");
+    {
+        ImGui::RadioButton("WebGL 2", &proj.renderer, 0); tip("Works in every browser and phone");
+        ImGui::SameLine(); ImGui::RadioButton("WebGPU", &proj.renderer, 1);
+        tip("Newer and faster where the browser has it (Chrome, Edge, WebView2); WebGL 2 by itself where it hasn't");
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextDisabled("%s", proj.tracking == TRACK_IMAGES || proj.tracking == TRACK_FACES
+            ? "Images and Faces draw with MindAR's own WebGL, whichever is picked."
+            : proj.tracking == TRACK_SURFACES ? "Surfaces: WebGPU draws the preview; AR on a phone (WebXR) always draws with WebGL."
+            : "Markers draw with the one picked (three.js r172).");
+        ImGui::PopTextWrapPos();
+    }
     ImGui::SeparatorText("Player Settings");
     { char b[128]; snprintf(b, sizeof b, "%s", proj.title.c_str()); labelled("Game name"); if (ImGui::InputText("##gname", b, sizeof b) && b[0]) proj.title = b; }
     text("Company", proj.company);
