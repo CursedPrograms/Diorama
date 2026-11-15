@@ -144,6 +144,16 @@ struct Project {
     // each scene is kept in scenes/<name>.scene
     std::vector<std::string> scenes = {"Main"};
     std::string scene = "Main";
+    // Build Settings: the platform it builds for, and its runtime
+    std::string platform = "web";      // web, windows, linux, pi, android
+    int windowsRuntime = 0;            // 0 JavaScript (WebView2), 1 C++ (Diorama's native player)
+    // Player Settings
+    std::string company = "Cursed Entertainment", version = "1.0";
+    std::string packageId;             // Android; "" = com.cursedentertainment.<game>
+    std::string icon, splash;          // pictures ("" Diorama's)
+    std::string intro;                 // words on the splash screen
+    bool skipSplash = false, fullscreen = false;
+    int orientation = 0;               // phones: 0 turns with the phone, 1 portrait, 2 landscape
 };
 
 int newId(Project& p);

@@ -26,7 +26,10 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <atomic>
 #include <map>
+#include <mutex>
+#include <thread>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -154,7 +157,7 @@ static void say(const std::string& s) { toast = s; toastUntil = now() + 6; }
 static bool showAbout = false, showSettings = false;
 static void rememberProject();
 static void sceneToFile(const Project& p, const std::string& name);
-static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out);
+static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out, bool bumpIds = true);
 static std::vector<Scene::Marker> sceneMarkers(const std::string& name);
 // where projects live: Documents/Diorama, or the home folder's Diorama when Windows guards Documents
 // (Controlled Folder Access refuses unknown apps there, without a word)
@@ -264,6 +267,7 @@ static std::string bring(const std::string& file) {   // a file into the project
     return fs::exists(dst, ec) ? dst.u8string() : file;   // couldn't copy it: keep using it where it is
 }
 static void forEachFile(Project& p, const std::function<void(std::string&)>& f) {
+    f(p.icon); f(p.splash);
     for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); f(o.uiFile); f(o.canvasCss); for (auto& sc : o.scripts) f(sc.file); } }
 }
 static bool saveProject(bool askFolder) {
@@ -653,6 +657,22 @@ static void bottomPanel() {
 
 // ---------- Build: the game as a static website (jsartoolkit5 + three.js), for phones and any web host ----------
 static std::string lastBuild;
+static bool showScenes = false;   // the Scenes window
+// a build runs on its own thread: the editor keeps drawing, shows its progress, and can cancel it
+struct BuildJob {
+    std::thread th;
+    std::atomic<bool> running{false}, cancel{false}, finished{false};
+    std::mutex mu;
+    std::string status, error, out, platform;
+    float progress = 0;
+    bool ok = false, run = false;
+#ifdef _WIN32
+    HANDLE jobObject = nullptr;   // the tools it runs (Gradle): Cancel stops them all
+#endif
+};
+static BuildJob job;
+static void jobSay(const std::string& st, float pr) { std::lock_guard<std::mutex> l(job.mu); job.status = st; if (pr >= 0) job.progress = pr; }
+static bool jobCancelled(std::string& err) { if (job.cancel) { err = "Build cancelled"; return true; } return false; }
 static bool copyTree(const fs::path& from, const fs::path& to) {
     std::error_code ec;
     fs::create_directories(to, ec);
@@ -689,6 +709,8 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     for (size_t si = 0; si < proj.scenes.size(); ++si) scenesJs += std::string(si ? ", " : "") + "{\"name\": " + Json::quote(proj.scenes[si]) + ", \"page\": " + Json::quote(pages[si]) + "}";
     scenesJs += "];\n";
     for (size_t si = 0; si < proj.scenes.size(); ++si) {   // ---- each scene, its own page ----
+    if (jobCancelled(err)) return false;
+    jobSay("Scene " + std::to_string(si) + ": " + proj.scenes[si], 0.1f + 0.5f * si / std::max<size_t>(1, proj.scenes.size()));
     Project b = proj; b.markers = sceneMarkers(proj.scenes[si]);
     const std::string sceneSlug = si == 0 ? "" : slugOf(proj.scenes[si]) + "-";
     const std::string jsName = si == 0 ? "scene.js" : "scene-" + slugOf(proj.scenes[si]) + ".js";
@@ -703,6 +725,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
         fs::copy_file(src, o / "assets" / fs::u8path(name), fs::copy_options::overwrite_existing, ec);
         const std::string key = f; f = "assets/" + name; done[key] = f;
     };
+    std::string splashFile = proj.splash; if (si == 0) take(splashFile);
     // the markers: their pattern files (made from their pictures), their printable pictures, a sheet of them all
     for (size_t i = 0; i < b.markers.size(); ++i) {
         Scene::Marker& m = b.markers[i];
@@ -729,13 +752,21 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
         sheet.push_back({im, m.name + (m.type == MK_BARCODE ? "  (barcode " + std::to_string(m.barcode) + ")" : "")});
     }
     if (si + 1 == proj.scenes.size() && !sheet.empty()) Markers::savePng((o / "markers.png").u8string(), Markers::sheet(sheet, fontFile));
-    fs::copy_file(fs::u8path(exeDir) / "assets" / "logo.png", o / "icon.png", fs::copy_options::overwrite_existing, ec);
+    {   // the game's icon (Player Settings), else Diorama's
+        Markers::Image ic;
+        if (!proj.icon.empty() && Markers::load(proj.icon, ic)) Markers::savePng((o / "icon.png").u8string(), Markers::resized(ic, 512, 512));
+        else fs::copy_file(fs::u8path(exeDir) / "assets" / "logo.png", o / "icon.png", fs::copy_options::overwrite_existing, ec);
+    }
     if (si == 0) { std::ofstream f(o / "scene.json", std::ios::binary); f << Scene::toJson(b); if (!f) { err = "Couldn't write scene.json"; return false; } }
     {   // the scene and its scripts, inside the page (so they need no loading)
         std::ofstream f(o / fs::u8path(jsName), std::ios::binary);
         f << "// the scene and its scripts, inside the page (so they need no loading)\n";
         if (play) f << "window.DIORAMA_PLAY = true;   // played from the editor: logs go to its Console\n";
         f << scenesJs << "window.DIORAMA_SCENE_INDEX = " << si << ";\n";
+        if (si == 0)   // Player Settings: the splash screen (the first page only)
+            f << "window.DIORAMA_PLAYER = {\"title\": " << Json::quote(proj.title) << ", \"company\": " << Json::quote(proj.company)
+              << ", \"splash\": " << Json::quote(splashFile.empty() ? "icon.png" : splashFile) << ", \"intro\": " << Json::quote(proj.intro)
+              << ", \"skip\": " << (proj.skipSplash ? "true" : "false") << "};\n";
         f << "window.DIORAMA_SCENE = " << Scene::toJson(b) << ";\nwindow.DIORAMA_SCRIPTS = {";
         bool first = true;
         for (const auto& d : done) {
@@ -947,6 +978,347 @@ static void buildWindowsDialog(bool run) {
     else { say("Built for Windows: " + out); openInExplorer(out); }
 }
 
+
+static void tip(const char* s); static void labelled(const char* l); static bool fileRow(const char* label, std::string& file, const wchar_t* filter);
+// ---------- Build Settings: platforms (Web, Windows, Linux, Raspberry Pi, Android), each built on the job's thread ----------
+struct PlatformInfo { const char* id; const char* name; const char* what; };
+static const PlatformInfo PLATFORMS[] = {
+    {"web", "Web", "A static website: any https host (GitHub Pages, Netlify, itch.io). Phones open it in their browser."},
+    {"windows", "Windows", "<Game>.exe with the game folder beside it. Webcam allowed, works offline, F11 full screen."},
+    {"linux", "Linux", "The game with a launcher (<game>.sh): a local server and Chromium (or the default browser)."},
+    {"pi", "Raspberry Pi", "The game with a launcher for Raspberry Pi OS: full screen Chromium (kiosk), the Pi camera or a USB webcam; can start with the Pi."},
+    {"android", "Android", "An app (.apk): the game inside, the camera asked for once. Install it, or Build And Run onto a phone on USB."},
+};
+static const PlatformInfo* platformOf(const std::string& id) { for (const auto& p : PLATFORMS) if (id == p.id) return &p; return &PLATFORMS[0]; }
+static std::string gameFileName() { std::string n = proj.title; for (auto& c : n) if (strchr("\\/:*?\"<>|", c)) c = '_'; return n.empty() ? "Game" : n; }
+static std::string packageIdOf() {
+    if (!proj.packageId.empty()) return proj.packageId;
+    std::string g; for (char c : proj.title) if (isalnum((unsigned char)c)) g += (char)tolower((unsigned char)c);
+    if (g.empty() || isdigit((unsigned char)g[0])) g = "game" + g;
+    return "com.cursedentertainment." + g;
+}
+static std::string buildFolderFor(const std::string& platform) {
+    const fs::path base = folder.empty() ? fs::u8path(projectsHome()) / "Builds" / fs::u8path(slugOf(proj.title)) : fs::u8path(folder) / "Builds";
+    return (base / fs::u8path(platformOf(platform)->name)).u8string();
+}
+
+#ifdef _WIN32
+// a tool (Gradle, adb) on the job's thread: its output into a log, stopped (with everything it started) by Cancel
+static int runTool(const std::wstring& cmd, const std::wstring& dir, const std::wstring& log, const std::vector<std::pair<std::wstring, std::wstring>>& env) {
+    for (const auto& e : env) SetEnvironmentVariableW(e.first.c_str(), e.second.c_str());
+    std::wstring line = L"cmd.exe /c \"" + cmd + L" > \"" + log + L"\" 2>&1\"";
+    std::vector<wchar_t> buf(line.begin(), line.end()); buf.push_back(0);
+    STARTUPINFOW si{}; si.cb = sizeof si; PROCESS_INFORMATION pi{};
+    if (!job.jobObject) {
+        job.jobObject = CreateJobObjectW(nullptr, nullptr);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{}; li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job.jobObject, JobObjectExtendedLimitInformation, &li, sizeof li);
+    }
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, dir.empty() ? nullptr : dir.c_str(), &si, &pi)) return -1;
+    AssignProcessToJobObject(job.jobObject, pi.hProcess);
+    ResumeThread(pi.hThread); CloseHandle(pi.hThread);
+    DWORD code = 1;
+    for (;;) {
+        if (WaitForSingleObject(pi.hProcess, 200) == WAIT_OBJECT_0) { GetExitCodeProcess(pi.hProcess, &code); break; }
+        if (job.cancel) { TerminateJobObject(job.jobObject, 1); code = (DWORD)-2; break; }
+    }
+    CloseHandle(pi.hProcess);
+    return (int)code;
+}
+static std::string lastLines(const std::wstring& log, int n) {
+    std::ifstream f(log, std::ios::binary); std::vector<std::string> lines; std::string l;
+    while (std::getline(f, l)) { if (!l.empty() && l.back() == '\r') l.pop_back(); if (!l.empty()) lines.push_back(l); }
+    std::string out; for (size_t i = lines.size() > (size_t)n ? lines.size() - n : 0; i < lines.size(); ++i) out += lines[i] + "\n";
+    return out;
+}
+static std::wstring envOr(const wchar_t* k) { wchar_t b[2048]; const DWORD n = GetEnvironmentVariableW(k, b, 2048); return n && n < 2048 ? b : L""; }
+static fs::path androidSdk() {
+    for (const std::wstring& c : {envOr(L"ANDROID_HOME"), envOr(L"ANDROID_SDK_ROOT"), envOr(L"LOCALAPPDATA") + L"\\Android\\Sdk"})
+        if (!c.empty() && fs::exists(fs::path(c) / "platforms")) return c;
+    return {};
+}
+static fs::path javaHome() {   // Gradle needs Java 17 or newer
+    std::vector<fs::path> c;
+    if (!envOr(L"JAVA_HOME").empty()) c.push_back(envOr(L"JAVA_HOME"));
+    std::error_code ec;
+    for (const auto& base : {fs::path(envOr(L"USERPROFILE")) / ".jdks", fs::path(envOr(L"USERPROFILE")) / ".gradle" / "jdks", fs::path(L"C:\\Program Files\\Java"), fs::path(L"C:\\Program Files\\Eclipse Adoptium"), fs::path(L"C:\\Program Files\\Microsoft")})
+        for (const auto& e : fs::directory_iterator(base, ec)) c.push_back(e.path());
+    for (const auto& base : {fs::path(L"C:\\Program Files\\Android")}) for (const auto& e : fs::directory_iterator(base, ec)) c.push_back(e.path() / "jbr");
+    for (const auto& j : c) {
+        if (!fs::exists(j / "bin" / "java.exe", ec)) continue;
+        const std::string n = j.u8string();   // jdk-1.8 / jdk8 are too old
+        if (n.find("1.8") != std::string::npos || n.find("jdk8") != std::string::npos || n.find("jre") != std::string::npos) continue;
+        return j;
+    }
+    return {};
+}
+#endif
+
+static bool writeText(const fs::path& f, const std::string& text) { std::ofstream o(f, std::ios::binary); o << text; return (bool)o; }
+static std::string replaceAll(std::string s, const std::string& a, const std::string& b) { for (size_t i = 0; (i = s.find(a, i)) != std::string::npos; i += b.size()) s.replace(i, a.size(), b); return s; }
+static std::string fileText(const fs::path& f) { std::ifstream i(f, std::ios::binary); std::stringstream ss; ss << i.rdbuf(); return ss.str(); }
+
+// Linux / Raspberry Pi: the game, a launcher and a desktop entry
+static bool buildLinux(const std::string& out, bool pi, std::string& err) {
+    const fs::path o = fs::u8path(out);
+    if (!buildGame((o / "game").u8string(), err)) return false;
+    const std::string slug = slugOf(proj.title), name = gameFileName();
+    const std::string browser = pi
+        ? "for b in chromium-browser chromium; do command -v $b >/dev/null && BROWSER=$b && break; done\n"
+          "\"$BROWSER\" --kiosk --noerrdialogs --disable-infobars --check-for-update-interval=31536000 --user-data-dir=\"$HOME/.config/" + slug + "\" \\\n"
+          "  --autoplay-policy=no-user-gesture-required --use-fake-ui-for-media-stream \"http://127.0.0.1:$PORT/\"\n"
+        : "BROWSER=\"\"; for b in chromium chromium-browser google-chrome microsoft-edge brave-browser; do command -v $b >/dev/null && BROWSER=$b && break; done\n"
+          "if [ -n \"$BROWSER\" ]; then\n"
+          "  \"$BROWSER\" --app=\"http://127.0.0.1:$PORT/\" --user-data-dir=\"$HOME/.config/" + slug + "\" --autoplay-policy=no-user-gesture-required" + (proj.fullscreen ? " --start-fullscreen" : "") + "\n"
+          "else\n  xdg-open \"http://127.0.0.1:$PORT/\"; echo \"Playing; press Enter to stop.\"; read _\nfi\n";
+    writeText(o / (slug + ".sh"),
+        "#!/usr/bin/env bash\n# " + name + ", made with Diorama: serves the game on this computer only and opens it.\n"
+        "cd \"$(dirname \"$(readlink -f \"$0\")\")/game\"\n"
+        "PORT=$(( 41000 + $(printf '%s' \"" + slug + "\" | cksum | cut -d' ' -f1) % 8000 ))\n"
+        "python3 -m http.server $PORT --bind 127.0.0.1 >/dev/null 2>&1 &\nSERVER=$!\ntrap 'kill $SERVER 2>/dev/null' EXIT\nsleep 1\n" + browser);
+    writeText(o / (slug + ".desktop"),
+        "[Desktop Entry]\nType=Application\nName=" + name + "\nComment=Made with Diorama\nExec=bash -c 'cd \"$(dirname \"%k\")\" && ./" + slug + ".sh'\n"
+        "Icon=" + (o / "game" / "icon.png").generic_u8string() + "\nTerminal=false\nCategories=Game;\n");
+    if (pi) writeText(o / "start-with-the-pi.sh",
+        "#!/usr/bin/env bash\n# Starts " + name + " when the Pi starts (its desktop). Run it once; delete ~/.config/autostart/" + slug + ".desktop to stop.\n"
+        "HERE=\"$(dirname \"$(readlink -f \"$0\")\")\"\nmkdir -p ~/.config/autostart\n"
+        "printf '[Desktop Entry]\\nType=Application\\nName=" + name + "\\nExec=%s/" + slug + ".sh\\n' \"$HERE\" > ~/.config/autostart/" + slug + ".desktop\n"
+        "chmod +x \"$HERE/" + slug + ".sh\"\necho \"" + name + " will start with the Pi.\"\n");
+    writeText(o / "README.txt", name + ", made with Diorama.\n\n"
+        "Copy this folder to the " + std::string(pi ? "Raspberry Pi" : "Linux computer") + " and run:  bash " + slug + ".sh\n"
+        "It needs python3 (to serve the game on the computer itself) and Chromium" + (pi ? " (Raspberry Pi OS has both)" : " or another browser") + ".\n"
+        + (pi ? "To start it with the Pi: bash start-with-the-pi.sh\nA USB webcam, or the Pi camera (rpicam), works as the camera.\n" : "") +
+        "Print game/markers.png at 100% and hold a marker up to the camera.\n");
+    return true;
+}
+
+// Android: the player app (assets/player/android) with the game inside, built by Gradle
+static bool buildAndroid(const std::string& out, std::string& err, std::string& apkOut) {
+#ifdef _WIN32
+    const fs::path sdk = androidSdk(), java = javaHome();
+    if (sdk.empty()) { err = "Android builds need the Android SDK (Android Studio installs it)"; return false; }
+    if (java.empty()) { err = "Android builds need Java 17 or newer (Android Studio has one; or set JAVA_HOME)"; return false; }
+    const fs::path o = fs::u8path(out), proj_ = o / "android-project", tmpl = fs::u8path(exeDir) / "assets" / "player" / "android";
+    std::error_code ec;
+    fs::remove_all(proj_ / "app" / "src" / "main" / "assets", ec);
+    if (!copyTree(tmpl, proj_)) { err = "Couldn't copy the Android player template"; return false; }
+    jobSay("The game", 0.1f);
+    if (!buildGame((proj_ / "app" / "src" / "main" / "assets" / "game").u8string(), err)) return false;
+    if (jobCancelled(err)) return false;
+    // its name, id, version, turning
+    int code = 0; for (char c : proj.version) if (isdigit((unsigned char)c)) code = code * 10 + (c - '0');
+    std::string esc; for (char c : proj.title) { if (c == '&') esc += "&amp;"; else if (c == '<') esc += "&lt;"; else if (c == '\'' || c == '"' || c == '\\' || c == '@' || c == '?') { esc += '\\'; esc += c; } else esc += c; }
+    const fs::path gk = proj_ / "app" / "build.gradle.kts", mf = proj_ / "app" / "src" / "main" / "AndroidManifest.xml", sx = proj_ / "app" / "src" / "main" / "res" / "values" / "strings.xml";
+    writeText(gk, replaceAll(replaceAll(replaceAll(fileText(gk), "{{PACKAGE}}", packageIdOf()), "{{VERSION_CODE}}", std::to_string(std::max(1, code))), "{{VERSION}}", proj.version));
+    writeText(mf, replaceAll(fileText(mf), "{{ORIENTATION}}", proj.orientation == 1 ? "portrait" : proj.orientation == 2 ? "landscape" : "fullSensor"));
+    writeText(sx, replaceAll(fileText(sx), "{{TITLE}}", esc));
+    writeText(proj_ / "local.properties", "sdk.dir=" + replaceAll(sdk.generic_u8string(), ":", "\\:") + "\n");
+    {   // the launcher icon
+        Markers::Image ic; Markers::load((proj_ / "app" / "src" / "main" / "assets" / "game" / "icon.png").u8string(), ic);
+        const std::pair<const char*, int> sizes[] = {{"mdpi", 48}, {"hdpi", 72}, {"xhdpi", 96}, {"xxhdpi", 144}, {"xxxhdpi", 192}};
+        for (const auto& sz : sizes) {
+            const fs::path d = proj_ / "app" / "src" / "main" / "res" / (std::string("mipmap-") + sz.first);
+            fs::create_directories(d, ec);
+            if (!ic.px.empty()) Markers::savePng((d / "ic_launcher.png").u8string(), Markers::resized(ic, sz.second, sz.second));
+        }
+    }
+    // Gradle: offline first (quick, nothing downloaded), then online when it's missing something
+    jobSay("Gradle: building the app (the first time takes a few minutes)", 0.65f);
+    const std::wstring log = (o / "gradle.log").wstring();
+    const std::vector<std::pair<std::wstring, std::wstring>> env = {{L"JAVA_HOME", java.wstring()}, {L"ANDROID_HOME", sdk.wstring()}};
+    const std::wstring gradlew = L"\"" + (proj_ / "gradlew.bat").wstring() + L"\"";   // by its full path (cmd may not look in the current folder)
+    int rc = runTool(gradlew + L" assembleDebug --offline", proj_.wstring(), log, env);
+    if (rc != 0 && rc != -2 && !job.cancel) { jobSay("Gradle: fetching what it needs (online)", 0.7f); rc = runTool(gradlew + L" assembleDebug", proj_.wstring(), log, env); }
+    if (job.cancel || rc == -2) { err = "Build cancelled"; return false; }
+    if (rc != 0) { err = "Gradle couldn't build the app (Builds/Android/gradle.log):\n" + lastLines(log, 6); return false; }
+    const fs::path apk = proj_ / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk";
+    apkOut = (o / fs::u8path(gameFileName() + ".apk")).u8string();
+    fs::copy_file(apk, fs::u8path(apkOut), fs::copy_options::overwrite_existing, ec);
+    if (ec) { err = "Couldn't copy the app to " + apkOut; return false; }
+    writeText(o / "README.txt", gameFileName() + ", made with Diorama: " + gameFileName() + ".apk (" + packageIdOf() + ", version " + proj.version + ").\n\n"
+        "Install it on an Android phone (8.0 or newer): copy the .apk over and open it (allow installing apps from there), or with a USB cable:\n"
+        "adb install -r \"" + gameFileName() + ".apk\"\nIt asks for the camera the first time. Print markers.png from the game folder at 100%.\n"
+        "This is a debug-signed app for testing and sharing; the Play Store needs a release signing key.\n");
+    return true;
+#else
+    (void)out; (void)apkOut; err = "Android builds are made on Windows for now"; return false;
+#endif
+}
+#ifdef _WIN32
+static bool runOnPhone(const std::string& apk, std::string& err) {
+    const fs::path adb = androidSdk() / "platform-tools" / "adb.exe";
+    if (!fs::exists(adb)) { err = "adb isn't in the Android SDK (platform-tools)"; return false; }
+    const std::wstring log = (fs::u8path(apk).parent_path() / "adb.log").wstring();
+    jobSay("Installing on the phone (USB debugging on)", 0.92f);
+    if (runTool(L"\"" + adb.wstring() + L"\" install -r \"" + fs::u8path(apk).wstring() + L"\"", L"", log, {}) != 0) {
+        err = "Couldn't install on a phone: plug one in with USB debugging on.\n" + lastLines(log, 3); return false;
+    }
+    runTool(L"\"" + adb.wstring() + L"\" shell monkey -p " + fs::u8path(packageIdOf()).wstring() + L" -c android.intent.category.LAUNCHER 1", L"", log, {});
+    return true;
+}
+#endif
+
+// the job: build for a platform (and run it), on its own thread
+static void startBuild(const std::string& platform, bool run) {
+    if (job.running) return;
+    if (job.th.joinable()) job.th.join();
+    if (!folder.empty()) saveProject(false);
+    job.cancel = false; job.finished = false; job.ok = false; job.run = run; job.platform = platform;
+    job.out = buildFolderFor(platform); job.error.clear(); job.progress = 0; job.status = "Starting";
+    job.running = true;
+    job.th = std::thread([] {
+        std::string err, apk; bool ok = false;
+        const std::string pf = job.platform, out = job.out;
+        std::error_code ec; fs::create_directories(fs::u8path(out), ec);
+        if (pf == "web") ok = buildGame(out, err);
+        else if (pf == "windows") {
+            if (proj.windowsRuntime == 1) err = "The C++ runtime isn't ready yet: pick JavaScript for Windows (Build Settings)";
+            else ok = buildWindows(out, err);
+        }
+        else if (pf == "linux") ok = buildLinux(out, false, err);
+        else if (pf == "pi") ok = buildLinux(out, true, err);
+        else if (pf == "android") {
+            ok = buildAndroid(out, err, apk);
+#ifdef _WIN32
+            if (ok && job.run) ok = runOnPhone(apk, err);
+#endif
+        }
+        if (job.cancel) { ok = false; err = "Build cancelled"; }
+        { std::lock_guard<std::mutex> l(job.mu); job.ok = ok; job.error = err; job.progress = 1; }
+#ifdef _WIN32
+        if (job.jobObject) { CloseHandle(job.jobObject); job.jobObject = nullptr; }
+#endif
+        job.finished = true;
+    });
+}
+// the main thread: its progress window; when it's done, what happened (and Run)
+static void buildProgress() {
+    if (job.running && !ImGui::IsPopupOpen("Building")) ImGui::OpenPopup("Building");
+    ImGui::SetNextWindowSize(ImVec2(520, 0));
+    if (ImGui::BeginPopupModal("Building", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove)) {
+        std::string st; float pr;
+        { std::lock_guard<std::mutex> l(job.mu); st = job.status; pr = job.progress; }
+        ImGui::Text("%s for %s", job.run ? "Build And Run" : "Build", platformOf(job.platform)->name);
+        ImGui::ProgressBar(pr, ImVec2(-1, 0));
+        ImGui::TextDisabled("%s", st.c_str());
+        ImGui::Spacing();
+        ImGui::BeginDisabled(job.cancel.load());
+        if (ImGui::Button(job.cancel ? "Cancelling..." : "Cancel", ImVec2(-1, 28))) job.cancel = true;
+        ImGui::EndDisabled();
+        if (job.finished) {
+            ImGui::CloseCurrentPopup();
+            if (job.th.joinable()) job.th.join();
+            job.running = false;
+            const std::string out = job.out;
+            if (!job.ok) say(job.error);
+            else if (!job.run) { say("Built for " + std::string(platformOf(job.platform)->name) + ": " + out); openInExplorer(out); }
+            else if (job.platform == "web") {
+                lastBuild = out;
+                if (!Serve::start(out, 8765)) say("Couldn't start the test server on port 8765");
+                else {
+#ifdef _WIN32
+                    ShellExecuteW(nullptr, L"open", L"http://localhost:8765/", nullptr, nullptr, SW_SHOWNORMAL);
+#endif
+                    say("Running on http://localhost:8765/");
+                }
+            }
+#ifdef _WIN32
+            else if (job.platform == "windows") { ShellExecuteW(nullptr, L"open", (fs::u8path(out) / fs::u8path(gameFileName() + ".exe")).wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL); say("Running the Windows build"); }
+#endif
+            else if (job.platform == "android") say("Running on the phone");
+            else { say("Built: copy the folder to the " + std::string(job.platform == "pi" ? "Raspberry Pi" : "Linux computer") + " and run its .sh"); openInExplorer(out); }
+        }
+        ImGui::EndPopup();
+    }
+}
+
+static bool showBuild = false;
+static std::string shownPlatform;
+static void buildSettings() {
+    if (!showBuild) return;
+    if (shownPlatform.empty()) shownPlatform = proj.platform;
+    ImGui::SetNextWindowSize(ImVec2(820, 640), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(380, 110), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Build Settings", &showBuild)) { ImGui::End(); return; }
+    // the scenes in the build
+    ImGui::PushFont(boldFont); ImGui::TextUnformatted("Scenes In Build"); ImGui::PopFont();
+    ImGui::BeginChild("##bscenes", ImVec2(0, 90), true);
+    for (size_t i = 0; i < proj.scenes.size(); ++i) ImGui::Text("%d   %s%s", (int)i, proj.scenes[i].c_str(), i == 0 ? "   (index.html: where it starts)" : "");
+    ImGui::EndChild();
+    if (ImGui::SmallButton("Edit the scenes...")) showScenes = true;
+    ImGui::Spacing();
+    // platforms on the left, the chosen one's settings on the right
+    ImGui::BeginChild("##plats", ImVec2(210, -44), true);
+    ImGui::PushFont(boldFont); ImGui::TextUnformatted("Platform"); ImGui::PopFont();
+    ImGui::Separator();
+    for (const auto& pl : PLATFORMS) {
+        const bool active = proj.platform == pl.id;
+        std::string label = std::string(pl.name) + (active ? "   (active)" : "");
+        if (ImGui::Selectable(label.c_str(), shownPlatform == pl.id, 0, ImVec2(0, 26))) shownPlatform = pl.id;
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+    ImGui::BeginChild("##pset", ImVec2(0, -44), true);
+    const PlatformInfo* sp = platformOf(shownPlatform);
+    ImGui::PushFont(boldFont); ImGui::TextUnformatted(sp->name); ImGui::PopFont();
+    ImGui::PushTextWrapPos(0); ImGui::TextDisabled("%s", sp->what); ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+    ImGui::PushItemWidth(-1);
+    auto text = [](const char* label, std::string& v, const char* hint = "") {
+        char b[256]; snprintf(b, sizeof b, "%s", v.c_str()); labelled(label);
+        if (ImGui::InputTextWithHint((std::string("##") + label).c_str(), hint, b, sizeof b)) v = b;
+    };
+    ImGui::SeparatorText("Runtime");
+    if (shownPlatform == "windows") {
+        ImGui::RadioButton("JavaScript (WebView2)", &proj.windowsRuntime, 0); tip("The game as on the web, in Windows' own browser engine: everything works");
+        ImGui::BeginDisabled(); ImGui::RadioButton("C++ (Diorama's native player)  - coming", &proj.windowsRuntime, 1); ImGui::EndDisabled();
+        ImGui::TextDisabled("C++: Diorama's own renderer with native ARToolKit and the PC's full power\n(more lights, shadows); markers first.");
+        ImGui::Checkbox("Start full screen", &proj.fullscreen);
+    } else if (shownPlatform == "android") {
+        ImGui::TextDisabled("JavaScript (Android's WebView). C++ comes later.");
+        text("Package id", proj.packageId, packageIdOf().c_str()); tip("Empty: com.cursedentertainment.<game>");
+        const char* ori[] = {"Turns with the phone", "Portrait", "Landscape"};
+        labelled("Screen"); ImGui::Combo("##ori", &proj.orientation, ori, 3);
+#ifdef _WIN32
+        const fs::path sdk = androidSdk(), jv = javaHome();
+        ImGui::TextColored(sdk.empty() ? col4(IM_COL32(0xf0, 0xb0, 0x60, 255)) : col4(C_DIM), "Android SDK: %s", sdk.empty() ? "not found (install Android Studio)" : sdk.u8string().c_str());
+        ImGui::TextColored(jv.empty() ? col4(IM_COL32(0xf0, 0xb0, 0x60, 255)) : col4(C_DIM), "Java: %s", jv.empty() ? "17 or newer not found" : jv.u8string().c_str());
+#endif
+    } else if (shownPlatform == "linux" || shownPlatform == "pi") {
+        ImGui::TextDisabled("JavaScript (Chromium). The C++ runtime comes to Linux and the Pi after Windows.");
+        if (shownPlatform == "linux") ImGui::Checkbox("Start full screen", &proj.fullscreen);
+    } else ImGui::TextDisabled("JavaScript: three.js with jsartoolkit5 (markers) or MindAR (pictures, faces).");
+    ImGui::SeparatorText("Player Settings");
+    { char b[128]; snprintf(b, sizeof b, "%s", proj.title.c_str()); labelled("Game name"); if (ImGui::InputText("##gname", b, sizeof b) && b[0]) proj.title = b; }
+    text("Company", proj.company);
+    text("Version", proj.version);
+    fileRow("Icon", proj.icon, L"Pictures\0*.png;*.jpg;*.jpeg\0\0");
+    ImGui::Checkbox("Skip the splash screen", &proj.skipSplash); tip("Off: the game opens on its splash (picture, name, intro words, Tap to start)");
+    if (!proj.skipSplash) {
+        fileRow("Splash", proj.splash, L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); tip("Empty: the icon");
+        char b[1024]; snprintf(b, sizeof b, "%s", proj.intro.c_str());
+        ImGui::TextUnformatted("Intro words");
+        if (ImGui::InputTextMultiline("##intro", b, sizeof b, ImVec2(-1, 70))) proj.intro = b;
+    }
+    ImGui::PopItemWidth();
+    ImGui::EndChild();
+    // the buttons
+    if (proj.platform != shownPlatform) {
+        if (ImGui::Button("Switch Platform", ImVec2(170, 32))) { proj.platform = shownPlatform; if (!folder.empty()) saveProject(false); say(std::string("Platform: ") + sp->name); }
+        ImGui::SameLine();
+    }
+    {   // where it goes (the last two folders; the whole path on hover)
+        const fs::path bf = fs::u8path(buildFolderFor(shownPlatform));
+        ImGui::AlignTextToFramePadding(); ImGui::TextDisabled("...\%s\%s", bf.parent_path().filename().u8string().c_str(), bf.filename().u8string().c_str());
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", bf.u8string().c_str());
+        if (ImGui::IsItemClicked()) { std::error_code ec; fs::create_directories(bf, ec); openInExplorer(bf.u8string()); }
+    }
+    ImGui::SameLine(ImGui::GetWindowWidth() - 290);
+    if (ImGui::Button("Build", ImVec2(130, 32))) startBuild(shownPlatform, false);
+    ImGui::SameLine();
+    if (ImGui::Button("Build And Run", ImVec2(140, 32))) startBuild(shownPlatform, true);
+    ImGui::End();
+}
 
 // ---------- the Marker Maker: markers made here, saved into the project (assets/markers), Hiro and Kanji stay stock ----------
 // a saved marker is <name>.marker (what it is), <name>.png (to print) and, for patterns, <name>.patt (what the game looks for)
@@ -1279,7 +1651,6 @@ static void uiMenuItems() {
 
 
 // ---------- the Scene Manager: the game's scenes (scenes/<name>.scene), in build order; scene 0 is index.html ----------
-static bool showScenes = false;
 static fs::path sceneFile(const std::string& name) { return fs::u8path(folder) / "scenes" / fs::u8path(name + ".scene"); }
 static void sceneToFile(const Project& p, const std::string& name) {   // its anchors and objects, paths relative to the project
     if (folder.empty()) return;
@@ -1289,19 +1660,19 @@ static void sceneToFile(const Project& p, const std::string& name) {   // its an
     std::error_code ec; fs::create_directories(fs::u8path(folder) / "scenes", ec);
     std::ofstream(sceneFile(name), std::ios::binary) << Scene::toJson(rel);
 }
-static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out) {
+static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out, bool bumpIds) {
     std::ifstream f(sceneFile(name), std::ios::binary); if (!f) return false;
     std::stringstream ss; ss << f.rdbuf();
     Project t; std::string err; if (!Scene::fromJson(ss.str(), t, err)) return false;
     const fs::path base = fs::u8path(folder);
     forEachFile(t, [&](std::string& s) { if (!s.empty() && fs::u8path(s).is_relative()) s = (base / fs::u8path(s)).u8string(); });
-    proj.nextId = std::max(proj.nextId, t.nextId);
+    if (bumpIds) proj.nextId = std::max(proj.nextId, t.nextId);
     out = t.markers;
     return true;
 }
 static std::vector<Scene::Marker> sceneMarkers(const std::string& name) {   // a scene's anchors (the open one: as edited)
     if (name == proj.scene) return proj.markers;
-    std::vector<Scene::Marker> ms; sceneFromFile(name, ms); return ms;
+    std::vector<Scene::Marker> ms; sceneFromFile(name, ms, false); return ms;
 }
 static std::vector<Scene::Marker> emptyScene() {
     std::vector<Scene::Marker> v;
@@ -1430,10 +1801,8 @@ static void menuBar() {
         if (!folder.empty() && ImGui::MenuItem("Show the project folder")) openInExplorer(folder);
         ImGui::Separator();
         if (ImGui::MenuItem("Play in the browser", "Ctrl+P")) playInBrowser();
-        if (ImGui::MenuItem("Build Game...", "Ctrl+B")) buildDialog(false);
-        if (ImGui::MenuItem("Build And Run", "Ctrl+Shift+B")) buildDialog(true);
-        if (ImGui::MenuItem("Build for Windows...")) buildWindowsDialog(false);
-        if (ImGui::MenuItem("Build And Run for Windows")) buildWindowsDialog(true);
+        if (ImGui::MenuItem("Build Settings...", "Ctrl+Shift+B")) showBuild = true;
+        if (ImGui::MenuItem((std::string("Build And Run (") + platformOf(proj.platform)->name + ")").c_str(), "Ctrl+B")) startBuild(proj.platform, true);
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Ctrl+Q")) quit = true;
         ImGui::EndMenu();
@@ -1451,7 +1820,8 @@ static void menuBar() {
     }
     if (ImGui::BeginMenu("GameObject")) { gameObjectItems(); ImGui::EndMenu(); }
     if (ImGui::BeginMenu("Window")) {
-        if (ImGui::MenuItem("Scenes (Build Settings)", nullptr, showScenes)) showScenes = !showScenes;
+        if (ImGui::MenuItem("Scenes", nullptr, showScenes)) showScenes = !showScenes;
+        if (ImGui::MenuItem("Build Settings", "Ctrl+Shift+B", showBuild)) showBuild = !showBuild;
         if (ImGui::MenuItem("Marker Maker", nullptr, showMaker)) showMaker = !showMaker;
         if (ImGui::MenuItem("Script Editor", nullptr, showScripts, !scripts.empty())) showScripts = !showScripts;
         ImGui::EndMenu();
@@ -2417,7 +2787,7 @@ static void keys() {
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Q)) quit = true;
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) { const std::string f = openDialog(L"Diorama project\0*.diorama\0\0"); if (!f.empty()) openProject(f); }
     if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_N)) create(EMPTY);
-    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_B)) buildDialog(io.KeyShift);
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_B)) { if (io.KeyShift) showBuild = true; else startBuild(proj.platform, true); }
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) playInBrowser();
     if (m && selObject >= 0 && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) { beginEdit(); selObject = duplicate(proj, *m, selObject); }
     if (m && selObject >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) { beginEdit(); remove(*m, selObject); selObject = -1; }
@@ -2445,6 +2815,8 @@ static void frame() {
     scriptEditor();
     markerMaker();
     sceneManager();
+    buildSettings();
+    buildProgress();
     // the status line
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - status)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x, status));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 4));
@@ -2464,7 +2836,7 @@ static void frame() {
 }
 
 int main(int argc, char** argv) {
-    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false;
+    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false; std::string buildFor;
     std::vector<std::string> args;
 #ifdef _WIN32
     { int n; LPWSTR* wa = CommandLineToArgvW(GetCommandLineW(), &n); if (wa) { for (int i = 1; i < n; ++i) args.push_back(fs::path(wa[i]).u8string()); LocalFree(wa); } }
@@ -2479,6 +2851,8 @@ int main(int argc, char** argv) {
         else if (args[i] == "--select" && i + 1 < args.size()) selectArg = atoi(args[++i].c_str());
         else if (args[i] == "--build" && i + 1 < args.size()) buildArg = args[++i];
         else if (args[i] == "--build-windows" && i + 1 < args.size()) { buildArg = args[++i]; buildWin = true; }
+        else if (args[i] == "--build-for" && i + 2 < args.size()) { buildFor = args[++i]; buildArg = args[++i]; }
+        else if (args[i] == "--build-ui") showBuild = true;   // opens Build Settings (screenshots)
         else if (args[i] == "--maker") { showMaker = true; mk.source = 4; }
         else if (args[i] == "--scenes") showScenes = true;   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
         else if (args[i] == "--pick" && i + 2 < args.size()) { pickX = atoi(args[i + 1].c_str()); pickY = atoi(args[i + 2].c_str()); i += 2; }
@@ -2543,7 +2917,7 @@ int main(int argc, char** argv) {
     if (!openArg.empty()) openProject(openArg);
     else if (!last.empty() && fs::exists(fs::u8path(last) / "project.diorama")) openProject(last);
     else newFromTemplate(tmpl == "basic" ? 0 : 1);
-    if (!buildArg.empty()) { std::string err; const bool ok = buildWin ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
+    if (!buildArg.empty()) { std::string err, apk; const bool ok = buildFor == "android" ? buildAndroid(buildArg, err, apk) : buildFor == "linux" ? buildLinux(buildArg, false, err) : buildFor == "pi" ? buildLinux(buildArg, true, err) : (buildWin || buildFor == "windows") ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
     if (capture.empty()) { SDL_ShowWindow(window); SDL_MaximizeWindow(window); SDL_RaiseWindow(window); }
 

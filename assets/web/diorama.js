@@ -314,6 +314,7 @@
         [c.userData.audio, c.userData.video].forEach(function (m) { if (m && m.userData.auto && !m.userData.started) { m.userData.started = true; tryPlay(m); } });
       });
     }
+    window.DioramaUnlock = function () { unlockMedia(); };
     function unlockMedia() {   // the first tap: what wanted to play (and was refused) plays
       if (listener && listener.context.state !== 'running') listener.context.resume();
       media.forEach(function (m) {
@@ -707,7 +708,32 @@
   function withScene(cb) { if (window.DIORAMA_SCENE) cb(window.DIORAMA_SCENE); else loadJSON('scene.json', cb); }
 
   // ---- Markers: jsartoolkit5 (three r103, loaded as plain scripts)
+  // the splash screen (Player Settings): its picture, the game's name, the intro words, Tap to start. Once per visit.
+  function splash() {
+    var P = window.DIORAMA_PLAYER;
+    if (!P || P.skip) return;
+    try { if (sessionStorage.getItem('dio-splash')) return; } catch (e) {}
+    var d = document.createElement('div');
+    d.id = 'dio-splash';
+    d.style.cssText = 'position:fixed;left:0;top:0;right:0;bottom:0;z-index:50;background:#111;color:#e6e6e6;display:flex;flex-direction:column;' +
+      'align-items:center;justify-content:center;gap:16px;padding:24px;box-sizing:border-box;text-align:center;font-family:"Segoe UI",Roboto,Arial,sans-serif';
+    var img = document.createElement('img'); img.src = P.splash; img.style.cssText = 'max-width:min(70vw,420px);max-height:45vh;object-fit:contain';
+    var h = document.createElement('div'); h.textContent = P.title; h.style.cssText = 'font-size:28px;font-weight:600';
+    var t = document.createElement('div'); t.textContent = P.intro || ''; t.style.cssText = 'font-size:16px;opacity:0.8;white-space:pre-wrap;max-width:560px';
+    var b = document.createElement('button'); b.textContent = 'Tap to start';
+    b.style.cssText = 'margin-top:8px;padding:12px 32px;font:inherit;font-size:18px;border:0;border-radius:6px;background:#007bb7;color:#fff;cursor:pointer';
+    var c = document.createElement('div'); c.textContent = P.company ? P.company : ''; c.style.cssText = 'position:absolute;bottom:14px;font-size:12px;opacity:0.5';
+    [img, h, t, b, c].forEach(function (e) { d.appendChild(e); });
+    var go = function () {
+      try { sessionStorage.setItem('dio-splash', '1'); } catch (e) {}
+      d.parentNode && d.parentNode.removeChild(d);
+      if (window.DioramaUnlock) window.DioramaUnlock();   // the first tap: sound and video may start now
+    };
+    d.addEventListener('click', go);
+    document.body.appendChild(d);
+  }
   function startMarkers() {
+    splash();
     if (fromDisk()) return;
     say('Loading the scene...');
     withScene(function (proj) {
@@ -773,6 +799,7 @@
 
   // ---- Pictures and faces: MindAR (three 0.160, ES modules: the page hands in what it imported)
   function startMind(lib) {
+    splash();
     if (fromDisk()) return;
     var THREE = lib.THREE, faces = lib.mode === 'face';
     say('Loading the scene...');
