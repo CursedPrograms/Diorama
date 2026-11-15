@@ -240,6 +240,7 @@ static void refreshMarkerPicture() {
     shownMarker = selMarker; shownKey = key;
     if (!m) { Viewer::setMarkerPicture({}, 0, 0); Viewer::setAnchorMode(0, nullptr); return; }
     if (proj.tracking == TRACK_FACES) { Viewer::setAnchorMode(2, facePointOf(*m).head); return; }
+    if (proj.tracking == TRACK_SURFACES) { Viewer::setAnchorMode(3, nullptr); return; }
     if (proj.tracking == TRACK_IMAGES) {
         Markers::Image im;
         if (m->target.empty() || !Markers::load(m->target, im)) {   // no picture yet: a grey card
@@ -313,7 +314,7 @@ static bool autosaveFolders = true;   // off for --capture / --build runs
 static void rememberProject() { if (!folder.empty() && autosaveFolders) std::ofstream(fs::u8path(lastFile())) << folder; }
 static void newFromTemplate(int which) {
     const std::string dir = (fs::u8path(exeDir) / "templates" / "gallery").u8string() + "/";
-    proj = which == 1 ? galleryTemplate(dir) : basicTemplate();
+    proj = which == 2 ? navigationTemplate() : which == 1 ? galleryTemplate(dir) : basicTemplate();
     folder.clear(); selMarker = 0; selObject = -1; shownMarker = -1;
     Viewer::frameMarker();
     if (!autosaveFolders) return;
@@ -351,9 +352,9 @@ static void create(int kind) {
     reparent(*m, o.id, parent);
     selObject = o.id;
 }
-static const char* anchorWord() { return proj.tracking == TRACK_IMAGES ? "Picture" : proj.tracking == TRACK_FACES ? "Face" : proj.tracking == TRACK_HANDS ? "Hand" : "Marker"; }
+static const char* anchorWord() { return proj.tracking == TRACK_IMAGES ? "Picture" : proj.tracking == TRACK_FACES ? "Face" : proj.tracking == TRACK_SURFACES ? "Surface" : proj.tracking == TRACK_HANDS ? "Hand" : "Marker"; }
 static const char* anchorIcon() {   // what the Hierarchy shows before an anchor's name
-    return proj.tracking == TRACK_IMAGES ? "\xe2\x96\xa8" : proj.tracking == TRACK_FACES ? "\xe2\x98\xba" : proj.tracking == TRACK_HANDS ? "\xe2\x9c\x8b" : "\xe2\x96\xa3";
+    return proj.tracking == TRACK_IMAGES ? "\xe2\x96\xa8" : proj.tracking == TRACK_FACES ? "\xe2\x98\xba" : proj.tracking == TRACK_SURFACES ? "\xe2\x96\xad" : proj.tracking == TRACK_HANDS ? "\xe2\x9c\x8b" : "\xe2\x96\xa3";
 }
 static void addMarker() {
     Scene::Marker k; k.id = newId(proj);
@@ -695,7 +696,9 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     if (proj.tracking == TRACK_HANDS) { err = "Hand tracking isn't in yet: pick Markers, Images or Faces in Project Settings"; return false; }
     // only what this game's tracking needs: jsartoolkit5 (markers) or MindAR (pictures, faces)
     std::error_code rm; fs::remove_all(o / "lib", rm);
-    if (mind ? !copyTree(web / "mindar", o / "lib" / "mindar") : (!copyTree(web / "lib", o / "lib") || !copyTree(web / "data", o / "data"))) {
+    const bool surfaces = proj.tracking == TRACK_SURFACES;
+    if (surfaces ? !copyTree(web / "mindar" / "three", o / "lib" / "three")
+                 : mind ? !copyTree(web / "mindar", o / "lib" / "mindar") : (!copyTree(web / "lib", o / "lib") || !copyTree(web / "data", o / "data"))) {
         err = "Couldn't copy the player into " + out; return false;
     }
     fs::create_directories(o / "lib", ec);
@@ -740,7 +743,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
             m.picture.clear();
             continue;
         }
-        if (proj.tracking == TRACK_FACES) { m.picture.clear(); continue; }
+        if (proj.tracking == TRACK_FACES || proj.tracking == TRACK_SURFACES) { m.picture.clear(); continue; }
         if (m.type == MK_PATTERN) {
             // every pattern file is written from the very picture that's printed, so the two always agree
             std::ofstream(o / "markers" / (slug + ".patt"), std::ios::binary) << Markers::pattFrom(insidePicture(m));
@@ -842,10 +845,18 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
          "    canvas { display: block; margin: 0 auto; }\n"
          "    #hint { position: fixed; left: 0; right: 0; bottom: 14px; text-align: center; font-size: 14px; opacity: 0.8; }\n"
          "    #hint a { color: #34a9e3; }\n  </style>\n</head>\n<body>\n"
-         "  <div id=\"hint\">" << (proj.tracking == TRACK_FACES ? "Look at the camera." : proj.tracking == TRACK_IMAGES ? "Point the camera at the picture." : "Point the camera at the marker.")
-      << (proj.tracking == TRACK_FACES ? "" : proj.tracking == TRACK_IMAGES ? " <a href=\"markers.png\" target=\"_blank\">The pictures</a>" : " <a href=\"markers.png\" target=\"_blank\">Print the markers</a>")
+         "  <div id=\"hint\">" << (proj.tracking == TRACK_FACES ? "Look at the camera." : proj.tracking == TRACK_SURFACES ? "Move the phone slowly over the floor." : proj.tracking == TRACK_IMAGES ? "Point the camera at the picture." : "Point the camera at the marker.")
+      << (proj.tracking == TRACK_FACES || proj.tracking == TRACK_SURFACES ? "" : proj.tracking == TRACK_IMAGES ? " <a href=\"markers.png\" target=\"_blank\">The pictures</a>" : " <a href=\"markers.png\" target=\"_blank\">Print the markers</a>")
       << "</div>\n";
-    if (!mind)
+    if (surfaces)
+        h << "  <script type=\"importmap\">{ \"imports\": { \"three\": \"./lib/three/three.module.min.js\", \"three/addons/\": \"./lib/three/addons/\" } }</script>\n"
+             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
+             "  <script type=\"module\">\n"
+             "    import * as THREE from 'three';\n"
+             "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
+             "    Diorama.startSurfaces({ THREE: THREE, GLTFLoader: GLTFLoader });\n"
+             "  </script>\n  <!-- Made with Diorama (Cursed Entertainment). three.js: MIT (see lib/three/). WebXR: the phone's own AR (ARCore). -->\n";
+    else if (!mind)
         h << "  <script src=\"lib/three.min.js\"></script>\n  <script src=\"lib/GLTFLoader.js\"></script>\n"
              "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
              "  <script>Diorama.startMarkers();</script>\n"
@@ -1784,6 +1795,7 @@ static void menuBar() {
         if (ImGui::MenuItem("New")) newFromTemplate(0);
         if (ImGui::BeginMenu("New from template")) {
             if (ImGui::MenuItem("Art gallery")) newFromTemplate(1);
+            if (ImGui::MenuItem("Indoor navigation (surfaces)")) newFromTemplate(2);
             if (ImGui::MenuItem("A cube on Hiro")) newFromTemplate(0);
             ImGui::EndMenu();
         }
@@ -2046,6 +2058,17 @@ static void markerInspector(Scene::Marker& m) {
         }
         ImGui::TextDisabled("1 unit is the face's width; +Z comes out of the face.\nThe head hides what's behind it (a hat's back, glasses' arms).");
     }
+    if (proj.tracking == TRACK_SURFACES && section("AR Plane Manager")) {
+        const char* modes[] = {"Horizontal (floors, tables)", "Vertical (walls)", "Both"};
+        labelled("Detection"); ImGui::Combo("##pd", &m.planeDetect, modes, 3);
+        ImGui::Checkbox("Show the planes found", &m.showPlanes); tip("The dotted look on floors, tables and walls as they're found");
+        if (m.showPlanes) { labelled("Plane look"); ImGui::ColorEdit4("##pc", m.planeColour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar); }
+        fileRow("Plane prefab", m.planePrefab, L"Prefab\0*.prefab\0\0"); tip("Made on each plane found (AR Foundation's plane prefab); empty: just the look");
+        const char* places[] = {"Tap to place", "On the first floor found", "Where the phone starts"};
+        labelled("Placement"); ImGui::Combo("##pl", &m.placement, places, 3);
+        tip("Where this anchor's things go: where the player taps on a plane, on the first floor found, or round the phone where the game starts");
+        ImGui::TextDisabled("Surfaces are in metres: 1 = 1 m. The room here is pretend: a floor,\na table and a wall, like the planes a phone finds.");
+    }
     if (proj.tracking == TRACK_MARKERS && section("AR Marker")) {
         labelled("Type");
         const char* types[] = {"Pattern (like Hiro)", "Barcode (3x3)"};
@@ -2090,7 +2113,7 @@ static void markerInspector(Scene::Marker& m) {
         labelled("Direction"); ImGui::SliderFloat("##yaw", &m.sunYaw, -180, 180, "%.0f\xc2\xb0 round");
         labelled("Height"); ImGui::SliderFloat("##pitch", &m.sunPitch, 5, 90, "%.0f\xc2\xb0 up");
     }
-    if (section("Window into the marker")) {
+    if ((proj.tracking == TRACK_MARKERS || proj.tracking == TRACK_IMAGES) && section("Window into the marker")) {
         ImGui::Checkbox("Show what's under the paper only through an opening", &m.portal);
         tip("For scenes that go down into the marker, like the art gallery: the opening is a hole in the table.");
         if (m.portal) { labelled("Opening"); ImGui::DragFloat2("##ps", m.portalSize, 0.01f, 0.1f, 10, "%.2f"); }
@@ -2213,6 +2236,11 @@ static void addComponentMenu(Object& o) {
         if (ImGui::MenuItem("Light", nullptr, false, !o.hasLight)) { o.hasLight = true; o.lightOn = true; }
         if (ImGui::MenuItem("Line Renderer", nullptr, false, !o.hasLine)) { o.hasLine = true; o.lineOn = true; }
         if (ImGui::MenuItem("Trail Renderer", nullptr, false, !o.hasTrail)) { o.hasTrail = true; o.trailOn = true; }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("XR")) {
+        if (ImGui::MenuItem("AR Path", nullptr, false, !o.hasPath)) { o.hasPath = true; o.pathOn = true; }
+        if (ImGui::MenuItem("AR Path Follower", nullptr, false, !o.hasFollower)) { o.hasFollower = true; o.followerOn = true; }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Effects")) {
@@ -2476,6 +2504,53 @@ static void objectInspector(Scene::Marker& m, Object& o) {
             }
         }
     }
+    // AR Path (path marking)
+    if (o.hasPath) {
+        h = componentHeader("AR Path", &o.pathOn, true);
+        if ((h & 0xff) == C_REMOVE) o.hasPath = false;
+        else {
+            if ((h & 0xff) == C_RESET) { o.pathPoints = D.pathPoints; o.arrowSpacing = D.arrowSpacing; o.arrowSize = D.arrowSize; memcpy(o.pathColour, D.pathColour, sizeof o.pathColour); o.pathLoop = D.pathLoop; o.pathLine = D.pathLine; }
+            if (h & 0x100) {
+                char nm[64]; snprintf(nm, sizeof nm, "%s", o.pathName.c_str());
+                labelled("Name"); if (ImGui::InputText("##pn", nm, sizeof nm)) o.pathName = nm;
+                tip("Followers follow it by name; a path walked and saved in the game with this name takes its place");
+                labelled("Arrows every"); ImGui::SliderFloat("##as", &o.arrowSpacing, 0.1f, 3, "%.2f m");
+                labelled("Arrow size"); ImGui::SliderFloat("##az", &o.arrowSize, 0.05f, 1, "%.2f m");
+                labelled("Colour"); ImGui::ColorEdit4("##pcol", o.pathColour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                tip("Colour coding: e.g. green for the way, red for where not to go");
+                ImGui::Checkbox("Line", &o.pathLine); ImGui::SameLine(); ImGui::Checkbox("Loop", &o.pathLoop);
+                const int n = (int)o.pathPoints.size() / 3; int del = -1;
+                for (int i = 0; i < n; ++i) {
+                    ImGui::PushID(2000 + i);
+                    char lab[24]; snprintf(lab, sizeof lab, "Point %d", i + 1);
+                    vec3Row(lab, &o.pathPoints[i * 3], 0.01f);
+                    if (n > 2 && ImGui::BeginPopupContextItem("pp")) { if (ImGui::MenuItem("Remove point")) del = i; ImGui::EndPopup(); }
+                    ImGui::PopID();
+                }
+                if (del >= 0) o.pathPoints.erase(o.pathPoints.begin() + del * 3, o.pathPoints.begin() + del * 3 + 3);
+                if (ImGui::Button("Add point", ImVec2(-1, 0))) { const size_t k = o.pathPoints.size(); float q[3] = {o.pathPoints[k - 3], o.pathPoints[k - 2], o.pathPoints[k - 1] - 0.5f}; o.pathPoints.insert(o.pathPoints.end(), q, q + 3); }
+                ImGui::TextDisabled("On the floor, in metres. Scripts: nav.record(\"Path 1\"), nav.save(), nav.follow(...).");
+            }
+        }
+    }
+    // AR Path Follower (path following)
+    if (o.hasFollower) {
+        h = componentHeader("AR Path Follower", &o.followerOn, true);
+        if ((h & 0xff) == C_REMOVE) o.hasFollower = false;
+        else {
+            if ((h & 0xff) == C_RESET) { o.followSpeed = D.followSpeed; o.followLoop = D.followLoop; o.followOnStart = D.followOnStart; }
+            if (h & 0x100) {
+                labelled("Path");
+                if (ImGui::BeginCombo("##fp", o.followPath.c_str())) {
+                    for (const auto& q : m.objects) if (q.hasPath && ImGui::Selectable(q.pathName.c_str(), q.pathName == o.followPath)) o.followPath = q.pathName;
+                    ImGui::EndCombo();
+                }
+                labelled("Speed"); ImGui::SliderFloat("##fs", &o.followSpeed, 0.05f, 3, "%.2f m/s");
+                ImGui::Checkbox("Walks from the start", &o.followOnStart); ImGui::SameLine(); ImGui::Checkbox("Loop", &o.followLoop);
+                ImGui::TextDisabled("It walks the path facing the way it goes (the player follows it).");
+            }
+        }
+    }
     // Video Player
     if (o.hasVideo) {
         h = componentHeader("Video Player", &o.videoOn, true);
@@ -2733,6 +2808,7 @@ static void projectSettings() {
         {TRACK_MARKERS, "Markers", "Printed markers: Hiro, Kanji, your own picture or letter, barcodes 0..63. Steady and fast; needs printing.", "jsartoolkit5", true},
         {TRACK_IMAGES, "Images", "Any photo, poster, painting or book cover, as it is. Detailed pictures with corners track best.", "MindAR", true},
         {TRACK_FACES, "Faces", "The player's face: masks, glasses, hats, face filters; scripts can read expressions.", "MindAR face", true},
+        {TRACK_SURFACES, "Surfaces", "Floors, tables and walls (plane detection): things placed on real surfaces, routes to walk and follow (indoor navigation). Phones with ARCore, in Chrome.", "WebXR", true},
         {TRACK_HANDS, "Hands", "The player's hand: things on the palm or the fingertips.", "coming", false},
     };
     for (const Opt& o : opts) {
@@ -2916,7 +2992,7 @@ int main(int argc, char** argv) {
     if (autosaveFolders && openArg.empty()) { std::ifstream lf(fs::u8path(lastFile())); std::getline(lf, last); }
     if (!openArg.empty()) openProject(openArg);
     else if (!last.empty() && fs::exists(fs::u8path(last) / "project.diorama")) openProject(last);
-    else newFromTemplate(tmpl == "basic" ? 0 : 1);
+    else newFromTemplate(tmpl == "basic" ? 0 : tmpl == "navigation" ? 2 : 1);
     if (!buildArg.empty()) { std::string err, apk; const bool ok = buildFor == "android" ? buildAndroid(buildArg, err, apk) : buildFor == "linux" ? buildLinux(buildArg, false, err) : buildFor == "pi" ? buildLinux(buildArg, true, err) : (buildWin || buildFor == "windows") ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
     if (capture.empty()) { SDL_ShowWindow(window); SDL_MaximizeWindow(window); SDL_RaiseWindow(window); }

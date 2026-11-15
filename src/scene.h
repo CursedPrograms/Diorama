@@ -16,7 +16,7 @@ enum Anim { A_STILL, A_FLOAT, A_SPIN, A_SWAY, A_PULSE, ANIM_COUNT };
 extern const char* ANIM_NAMES[ANIM_COUNT];
 enum MarkerType { MK_PATTERN, MK_BARCODE, MARKER_TYPE_COUNT };
 // what a game tracks (one per game: Project Settings); the anchors at the top of the Hierarchy are of that kind
-enum Tracking { TRACK_MARKERS, TRACK_IMAGES, TRACK_FACES, TRACK_HANDS, TRACKING_COUNT };
+enum Tracking { TRACK_MARKERS, TRACK_IMAGES, TRACK_FACES, TRACK_SURFACES, TRACK_HANDS, TRACKING_COUNT };
 extern const char* TRACKING_NAMES[TRACKING_COUNT];
 // a face anchor's point: MindAR's face landmarks (of 468) people want things on
 struct FacePoint { const char* name; int landmark; float head[3]; };   // head: where the head's middle is from it (face widths)
@@ -80,6 +80,16 @@ struct Object {
     bool uiChecked = false;
     std::string uiFile;                // Image's picture
     std::string uiClass;               // extra CSS classes
+    // AR Path: a route on the floor (drawn here, or walked and saved in the game), marked with arrows (path marking)
+    bool hasPath = false, pathOn = true, pathLoop = false, pathLine = true;
+    std::string pathName = "Path 1";
+    std::vector<float> pathPoints = {0, 0, 0, 0, 0, -1, 1, 0, -2};   // in the object's space, metres
+    float arrowSpacing = 0.5f, arrowSize = 0.25f;
+    float pathColour[4] = {0.15f, 0.2f, 0.75f, 0.95f};
+    // AR Path Follower: walks a path (path following: a guide the player follows)
+    bool hasFollower = false, followerOn = true, followLoop = true, followOnStart = true;
+    std::string followPath = "Path 1";
+    float followSpeed = 0.6f;          // metres a second
     // Trail Renderer: where it's been
     bool hasTrail = false, trailOn = true;
     float trailTime = 0.5f, trailWidth = 0.03f;
@@ -130,6 +140,12 @@ struct Marker {
     // a window into the marker: what's under the paper only shows through this opening
     bool portal = false;
     float portalSize[2] = {0.9f, 0.9f};
+    // Surfaces: AR Foundation's AR Plane Manager (and where this anchor's things go). In metres: 1 = 1 m.
+    int planeDetect = 2;               // 0 horizontal (floors, tables), 1 vertical (walls), 2 both
+    bool showPlanes = true;            // the dotted look on what's found
+    float planeColour[4] = {0.25f, 0.95f, 0.55f, 0.35f};
+    std::string planePrefab;           // made on each plane found ("" none)
+    int placement = 0;                 // 0 tap to place, 1 on the first floor found, 2 where the phone starts
     std::vector<Object> objects;       // parents before their children
     std::string patt;                  // in a build only: its pattern file there
 };
@@ -176,5 +192,6 @@ int duplicate(Project& p, Marker& m, int id);          // with its children; ret
 // the art gallery: a frame on the Kanji marker, a forest under it, a person in it, butterflies, light rays
 Project galleryTemplate(const std::string& assetsDir);
 Project basicTemplate();
+Project navigationTemplate();   // Surfaces: indoor navigation (plane detection, path marking, path following)
 
 }

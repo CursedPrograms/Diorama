@@ -14,7 +14,7 @@ namespace Scene {
 
 const char* KIND_NAMES[KIND_COUNT] = {"Empty", "Plane", "Cube", "Sphere", "Capsule", "Cylinder", "Quad", "Picture", "Model", "Sprites", "Light rays", "Words"};
 const char* ANIM_NAMES[ANIM_COUNT] = {"Still", "Float", "Spin", "Sway", "Pulse"};
-const char* TRACKING_NAMES[TRACKING_COUNT] = {"markers", "images", "faces", "hands"};
+const char* TRACKING_NAMES[TRACKING_COUNT] = {"markers", "images", "faces", "surfaces", "hands"};
 const FacePoint FACE_POINTS[] = {
     {"Nose tip", 1, {0, 0.05f, -0.62f}}, {"Between the eyes", 168, {0, -0.12f, -0.5f}}, {"Forehead", 10, {0, -0.42f, -0.45f}},
     {"Chin", 152, {0, 0.62f, -0.42f}}, {"Mouth", 13, {0, 0.3f, -0.55f}}, {"Left eye", 159, {0.17f, -0.12f, -0.48f}},
@@ -123,6 +123,8 @@ std::string toJson(const Project& p) {
         w.key("ambient"); w.out += arr(k.ambient, 3);
         w.key("sun"); w.out += arr(k.sun, 3);
         w.key("portalSize"); w.out += arr(k.portalSize, 2);
+        w.i("planeDetect", k.planeDetect).b("showPlanes", k.showPlanes).s("planePrefab", k.planePrefab).i("placement", k.placement);
+        w.key("planeColour"); w.out += arr(k.planeColour, 4);
         w.key("objects"); w.out += "[";
         for (size_t i = 0; i < k.objects.size(); ++i) {
             const Object& o = k.objects[i];
@@ -138,6 +140,10 @@ std::string toJson(const Project& p) {
               .b("spatial", o.spatial).f("audioNear", o.audioNear).f("audioFar", o.audioFar)
               .b("hasVideo", o.hasVideo).b("videoOn", o.videoOn).s("videoFile", o.videoFile).b("videoLoop", o.videoLoop).b("videoPlayOnStart", o.videoPlayOnStart)
               .b("videoMuted", o.videoMuted).f("videoVolume", o.videoVolume).f("videoSpeed", o.videoSpeed)
+              .b("hasPath", o.hasPath).b("pathOn", o.pathOn).b("pathLoop", o.pathLoop).b("pathLine", o.pathLine).s("pathName", o.pathName)
+              .f("arrowSpacing", o.arrowSpacing).f("arrowSize", o.arrowSize)
+              .b("hasFollower", o.hasFollower).b("followerOn", o.followerOn).b("followLoop", o.followLoop).b("followOnStart", o.followOnStart)
+              .s("followPath", o.followPath).f("followSpeed", o.followSpeed)
               .b("hasCanvas", o.hasCanvas).b("canvasWithAnchor", o.canvasWithAnchor).s("canvasCss", o.canvasCss)
               .s("ui", UI_NAMES[std::clamp(o.ui, 0, UI_COUNT - 1)]).b("uiOn", o.uiOn).i("uiAnchor", o.uiAnchor).s("uiText", o.uiText).f("uiFont", o.uiFont).i("uiAlign", o.uiAlign)
               .f("uiMin", o.uiMin).f("uiMax", o.uiMax).f("uiValue", o.uiValue).b("uiChecked", o.uiChecked).s("uiFile", o.uiFile).s("uiClass", o.uiClass)
@@ -151,6 +157,8 @@ std::string toJson(const Project& p) {
             ow.key("lineColour"); ow.out += arr(o.lineColour, 4);
             ow.key("trailColour"); ow.out += arr(o.trailColour, 4);
             ow.key("uiRect"); ow.out += arr(o.uiRect, 4);
+            ow.key("pathColour"); ow.out += arr(o.pathColour, 4);
+            ow.key("pathPoints"); ow.out += arr(o.pathPoints.data(), (int)o.pathPoints.size());
             ow.key("uiColour"); ow.out += arr(o.uiColour, 4);
             ow.key("uiBg"); ow.out += arr(o.uiBg, 4);
             ow.key("linePoints"); ow.out += arr(o.linePoints.data(), (int)o.linePoints.size());
@@ -199,6 +207,8 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
         k.sunStrength = (float)mv.num("sunStrength", k.sunStrength); k.sunYaw = (float)mv.num("sunYaw", k.sunYaw); k.sunPitch = (float)mv.num("sunPitch", k.sunPitch);
         k.portal = readBool(mv, "portal", k.portal); k.expanded = readBool(mv, "expanded", true);
         readArr(mv, "ambient", k.ambient, 3); readArr(mv, "sun", k.sun, 3); readArr(mv, "portalSize", k.portalSize, 2);
+        k.planeDetect = (int)mv.num("planeDetect", 2); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
+        readArr(mv, "planeColour", k.planeColour, 4);
         if (const Json::Value* os = mv.get("objects"))
             for (const Json::Value& ov : os->a) {
                 Object o;
@@ -220,6 +230,14 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
                 o.hasVideo = readBool(ov, "hasVideo", false); o.videoOn = readBool(ov, "videoOn", true); o.videoFile = ov.str("videoFile");
                 o.videoLoop = readBool(ov, "videoLoop", true); o.videoPlayOnStart = readBool(ov, "videoPlayOnStart", true); o.videoMuted = readBool(ov, "videoMuted", false);
                 o.videoVolume = (float)ov.num("videoVolume", 1); o.videoSpeed = (float)ov.num("videoSpeed", 1);
+                o.hasPath = readBool(ov, "hasPath", false); o.pathOn = readBool(ov, "pathOn", true); o.pathLoop = readBool(ov, "pathLoop", false); o.pathLine = readBool(ov, "pathLine", true);
+                o.pathName = ov.str("pathName", o.pathName); o.arrowSpacing = (float)ov.num("arrowSpacing", o.arrowSpacing); o.arrowSize = (float)ov.num("arrowSize", o.arrowSize);
+                readArr(ov, "pathColour", o.pathColour, 4);
+                if (const Json::Value* pp = ov.get("pathPoints")) if (pp->type == Json::Value::ARR && pp->a.size() >= 3) {
+                    o.pathPoints.clear(); for (const auto& v : pp->a) o.pathPoints.push_back((float)v.n); o.pathPoints.resize(o.pathPoints.size() / 3 * 3);
+                }
+                o.hasFollower = readBool(ov, "hasFollower", false); o.followerOn = readBool(ov, "followerOn", true); o.followLoop = readBool(ov, "followLoop", true);
+                o.followOnStart = readBool(ov, "followOnStart", true); o.followPath = ov.str("followPath", o.followPath); o.followSpeed = (float)ov.num("followSpeed", o.followSpeed);
                 o.hasCanvas = readBool(ov, "hasCanvas", false); o.canvasWithAnchor = readBool(ov, "canvasWithAnchor", false); o.canvasCss = ov.str("canvasCss");
                 { const std::string u = ov.str("ui"); o.ui = UI_NONE; for (int k = 1; k < UI_COUNT; ++k) if (u == UI_NAMES[k]) o.ui = k; }
                 o.uiOn = readBool(ov, "uiOn", true); o.uiAnchor = (int)ov.num("uiAnchor", 4); o.uiText = ov.str("uiText", o.uiText); o.uiFont = (float)ov.num("uiFont", 20);
@@ -267,6 +285,33 @@ bool load(Project& p, const std::string& folder, std::string& err) {
 }
 
 // ---------- templates ----------
+// AR indoor navigation, as in "Augmented Reality in Indoor Navigation" (IJSREM, 2023): planes found, a route marked with
+// arrows, a guide that walks it; buttons to save and follow paths (the game records walked paths too)
+Project navigationTemplate() {
+    Project p;
+    p.title = "Indoor navigation";
+    p.tracking = TRACK_SURFACES;
+    p.intro = "Walk slowly and look at the floor until it's found (dots).\nThen follow the arrows, or the guide.";
+    Marker k; k.id = newId(p); k.name = "Floor"; k.preset.clear(); k.placement = 1;
+    Object route = make(p, EMPTY, -1); route.name = "Route"; route.hasPath = true;
+    route.pathPoints = {0, 0, 0.6f, 0, 0, -0.6f, -0.5f, 0, -1.4f, -1.3f, 0, -1.8f, -1.6f, 0, -2.2f};   // round the table, to the wall
+    Object guide = make(p, CAPSULE, -1); guide.name = "Guide"; guide.hasFollower = true; guide.followPath = "Path 1";
+    guide.scl[0] = guide.scl[1] = guide.scl[2] = 0.2f; guide.pos[1] = 0.2f; guide.colour[0] = 0.95f; guide.colour[1] = 0.95f; guide.colour[2] = 0.95f;
+    Object sign = make(p, WORDS, -1); sign.name = "Sign"; sign.text = "Meeting room"; sign.pos[0] = -1.6f; sign.pos[1] = 1.0f; sign.pos[2] = -2.45f;
+    sign.scl[0] = sign.scl[1] = sign.scl[2] = 0.8f; sign.billboard = true;
+    // the paper's buttons, as a Canvas
+    Object canvas = make(p, EMPTY, -1); canvas.name = "Canvas"; canvas.hasCanvas = true;
+    k.objects = {route, guide, sign, canvas};
+    const char* names[] = {"Follow Path 1", "Save Path 1", "Follow Path 2", "Save Path 2", "Reset"};
+    for (int i = 0; i < 5; ++i) {
+        Object b = make(p, EMPTY, canvas.id); b.name = names[i]; b.ui = UI_BUTTON; b.uiText = names[i]; b.uiFont = 15;
+        b.uiAnchor = 2; b.uiRect[0] = -12; b.uiRect[1] = 16 + i * 46.0f; b.uiRect[2] = 140; b.uiRect[3] = 38;
+        b.uiBg[0] = 0.92f; b.uiBg[1] = 0.92f; b.uiBg[2] = 0.92f; b.uiBg[3] = 0.9f; b.uiColour[0] = b.uiColour[1] = b.uiColour[2] = 0.15f;
+        k.objects.push_back(b);
+    }
+    p.markers.push_back(k);
+    return p;
+}
 Project basicTemplate() {
     Project p;
     p.title = "My diorama";

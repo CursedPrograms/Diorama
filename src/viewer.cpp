@@ -1,5 +1,6 @@
 // Diorama - the Scene view (see viewer.h). OpenGL 3.3 core, its functions fetched through SDL.
 #include "viewer.h"
+#include "arnav.h"
 #include "model.h"
 
 #include <SDL.h>
@@ -164,7 +165,7 @@ static Mesh upload(const std::vector<float>& v, const std::vector<unsigned>& idx
 static void draw(const Mesh& m) { glBindVertexArray_(m.vao); glDrawElements(GL_TRIANGLES, m.count, GL_UNSIGNED_INT, nullptr); }
 
 // ---------- the primitives, Unity's sizes ----------
-static Mesh mPlane, mCube, mSphere, mCapsule, mCylinder, mQuad, mPicture, mRay, mPortalBox;
+static Mesh mPlane, mCube, mSphere, mCapsule, mCylinder, mQuad, mPicture, mRay, mPortalBox, mArrow;
 static void addV(std::vector<float>& v, float x, float y, float z, float nx, float ny, float nz, float u, float w) { v.insert(v.end(), {x, y, z, nx, ny, nz, u, w}); }
 static Mesh makeQuadXZ(float half) {   // flat, facing up (a plane, a picture)
     std::vector<float> v; std::vector<unsigned> i = {0, 1, 2, 0, 2, 3};
@@ -235,6 +236,24 @@ static void makePrimitives() {
       face(0.5f, 0, -0.5f, 0.5f, 0, 0.5f, 0.5f, -d, 0.5f, 0.5f, -d, -0.5f, -1, 0, 0);
       face(-0.5f, -d, -0.5f, 0.5f, -d, -0.5f, 0.5f, -d, 0.5f, -0.5f, -d, 0.5f, 0, 1, 0);
       mPortalBox = upload(v, idx); }
+    {   // an arrow (path marking): a flat chevron pointing along -Z, 1 long, a little thick
+        std::vector<float> v; std::vector<unsigned> idx;
+        const float pts[4][2] = {{0, -0.5f}, {0.4f, 0.35f}, {0, 0.12f}, {-0.4f, 0.35f}};
+        const float h = 0.06f;
+        for (int top = 0; top < 2; ++top) {
+            const unsigned b = (unsigned)(v.size() / 8);
+            for (auto& q : pts) addV(v, q[0], top ? h : 0, q[1], 0, top ? 1.0f : -1.0f, 0, q[0] + 0.5f, q[1] + 0.5f);
+            idx.insert(idx.end(), {b, b + 1, b + 2, b, b + 2, b + 3});
+        }
+        for (int i = 0; i < 4; ++i) {   // the sides
+            const float* a = pts[i]; const float* c = pts[(i + 1) % 4];
+            float nx = c[1] - a[1], nz = -(c[0] - a[0]); const float l = std::sqrt(nx * nx + nz * nz); nx /= l; nz /= l;
+            const unsigned b = (unsigned)(v.size() / 8);
+            addV(v, a[0], 0, a[1], nx, 0, nz, 0, 0); addV(v, c[0], 0, c[1], nx, 0, nz, 1, 0); addV(v, c[0], h, c[1], nx, 0, nz, 1, 1); addV(v, a[0], h, a[1], nx, 0, nz, 0, 1);
+            idx.insert(idx.end(), {b, b + 1, b + 2, b, b + 2, b + 3});
+        }
+        mArrow = upload(v, idx);
+    }
 }
 
 // ---------- textures and models, by file ----------
@@ -363,7 +382,38 @@ static const Tex& words(const std::string& text) {
 static GLuint rayTex = 0, markerTex = 0, deskTex = 0, whiteTex = 0, dotTex = 0;
 static int markerW = 1, markerH = 1;
 static int anchorMode = 0; static float headAt[3] = {0, 0, -0.6f};
-void setAnchorMode(int mode, const float head[3]) { anchorMode = mode; if (head) memcpy(headAt, head, sizeof headAt); }
+// Surfaces (anchor mode 3): a room to try things in, like AR Foundation's simulation: a floor, a table, a wall
+struct SimPlane { M4 pose; ArNav::Polygon poly; bool vertical; Mesh fill, dots; std::vector<float> edge; };
+static std::vector<SimPlane> simPlanes;
+static void makeSimPlanes() {
+    if (!simPlanes.empty()) return;
+    auto add = [](const M4& pose, ArNav::Polygon poly, bool vertical) {
+        SimPlane sp; sp.pose = pose; sp.poly = poly; sp.vertical = vertical;
+        std::vector<float> v; std::vector<unsigned> idx;
+        for (const auto& q : poly) addV(v, q.first, 0, q.second, 0, 1, 0, 0, 0);
+        idx = ArNav::fan(poly);
+        sp.fill = upload(v, idx);
+        v.clear(); idx.clear();
+        const float r = 0.012f;
+        for (const auto& d : ArNav::dots(poly, 0.15f)) {
+            const unsigned b = (unsigned)(v.size() / 8);
+            addV(v, d.first - r, 0.002f, d.second - r, 0, 1, 0, 0, 0); addV(v, d.first + r, 0.002f, d.second - r, 0, 1, 0, 1, 0);
+            addV(v, d.first + r, 0.002f, d.second + r, 0, 1, 0, 1, 1); addV(v, d.first - r, 0.002f, d.second + r, 0, 1, 0, 0, 1);
+            idx.insert(idx.end(), {b, b + 1, b + 2, b, b + 2, b + 3});
+        }
+        sp.dots = upload(v, idx);
+        simPlanes.push_back(sp);
+    };
+    add(ident(), {{-1.6f, -2.3f}, {1.2f, -2.4f}, {2.3f, -1.0f}, {2.2f, 1.3f}, {0.6f, 2.2f}, {-1.4f, 2.0f}, {-2.3f, 0.4f}}, false);   // the floor
+    add(translate(1.45f, 0.751f, -1.2f), {{-0.48f, -0.3f}, {0.48f, -0.3f}, {0.48f, 0.3f}, {-0.48f, 0.3f}}, false);             // the table's top
+    add(mul(translate(0, 1.2f, -2.59f), rotX(1.5707963f)), {{-2.0f, -1.1f}, {2.0f, -1.1f}, {2.0f, 1.1f}, {-2.0f, 1.1f}}, true); // the wall
+}
+void frameMarker();
+void setAnchorMode(int mode, const float head[3]) {
+    const bool room = (mode == 3) != (anchorMode == 3);   // into or out of the room: a view that fits it
+    anchorMode = mode; if (head) memcpy(headAt, head, sizeof headAt);
+    if (room) frameMarker();
+}
 void setMarkerPicture(const std::vector<unsigned char>& rgba, int w, int h) {
     if (markerTex) glDeleteTextures(1, &markerTex);
     markerTex = rgba.empty() ? 0 : texUpload(rgba.data(), w, h);
@@ -423,7 +473,10 @@ bool init(const std::string& dir) {
 
 // ---------- the camera ----------
 static float yaw = 0.0f, pitch = 0.75f, dist = 2.6f, target[3] = {0, 0.15f, 0};
-void frameMarker() { yaw = 0; pitch = 0.75f; dist = 2.6f; target[0] = 0; target[1] = 0.15f; target[2] = 0; }
+void frameMarker() {
+    if (anchorMode == 3) { yaw = 0.35f; pitch = 0.55f; dist = 6.5f; target[0] = 0.2f; target[1] = 0.4f; target[2] = -0.6f; return; }   // the room
+    yaw = 0; pitch = 0.75f; dist = 2.6f; target[0] = 0; target[1] = 0.15f; target[2] = 0;
+}
 
 static GLuint fbo = 0, fboTex = 0, fboDepth = 0; static int fbW = 0, fbH = 0;
 static void ensureTarget(int w, int h) {
@@ -481,6 +534,7 @@ static M4 facing(const M4& w, float sx, float sy) {
 static float lengthCol(const M4& w, int c) { return std::sqrt(w.m[c * 4] * w.m[c * 4] + w.m[c * 4 + 1] * w.m[c * 4 + 1] + w.m[c * 4 + 2] * w.m[c * 4 + 2]); }
 
 static void drawExtras(const Draw& d, float t);
+static void segment(const float* a, const float* b, float width, const float* col);
 static void drawObject(const Draw& d, float t) {
     if (d.part == 1) { drawExtras(d, t); return; }
     const Object& o = *d.o;
@@ -624,6 +678,23 @@ static void drawExtras(const Draw& d, float t) {
         glDepthMask(GL_TRUE);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
+    if (o.hasPath && o.pathOn) {   // path marking: arrows every so far, and the route itself
+        const auto pts = ArNav::fromFlat(o.pathPoints);
+        const float c[4] = {o.pathColour[0], o.pathColour[1], o.pathColour[2], o.pathColour[3]};
+        for (const auto& a : ArNav::arrows(pts, o.arrowSpacing, o.pathLoop)) {
+            const M4 w = mul(d.world, mul(mul(translate(a.p.x, a.p.y + 0.01f, a.p.z), rotY(a.yaw)), scale(o.arrowSize, o.arrowSize, o.arrowSize)));
+            setCommon(w, c, 0, true); draw(mArrow);
+        }
+        if (o.pathLine) {
+            const float lc[4] = {c[0], c[1], c[2], c[3] * 0.45f};
+            for (size_t i = 0; i + 1 < pts.size() + (o.pathLoop && pts.size() > 2 ? 1 : 0); ++i) {
+                const ArNav::V3& p0 = pts[i]; const ArNav::V3& p1 = pts[(i + 1) % pts.size()];
+                const float a0[3] = {p0.x, p0.y + 0.004f, p0.z}, a1[3] = {p1.x, p1.y + 0.004f, p1.z};
+                float w0[3], w1[3]; apply(d.world, a0, w0); apply(d.world, a1, w1);
+                segment(w0, w1, 0.02f, lc);
+            }
+        }
+    }
     if (o.hasLine && o.lineOn) {
         const size_t np = o.linePoints.size() / 3;
         for (size_t i = 0; i + 1 < np + (o.lineLoop ? 1 : 0); ++i) {
@@ -721,7 +792,34 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
         glStencilFunc(GL_NOTEQUAL, 1, 0xff); glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
     }
     // the desk and the printed marker (the marker's black square is 1 across; the print has a white margin)
-    if (lk.desk && anchorMode != 2) {
+    if (anchorMode == 3) {   // Surfaces: the room, then what the phone would find in it
+        makeSimPlanes();
+        const float floorC[4] = {0.42f, 0.4f, 0.38f, 1}, tableC[4] = {0.36f, 0.25f, 0.17f, 1}, wallC[4] = {0.55f, 0.55f, 0.57f, 1};
+        if (lk.desk) {
+            setCommon(mul(translate(0, -0.003f, 0), scale(0.6f, 1, 0.6f)), floorC, 0, true); draw(mPlane);
+            setCommon(mul(translate(1.45f, 0.37f, -1.2f), scale(1.0f, 0.76f, 0.64f)), tableC, 0, true); draw(mCube);
+            setCommon(mul(translate(0, 1.4f, -2.65f), scale(6.0f, 2.8f, 0.1f)), wallC, 0, true); draw(mCube);
+        }
+        if (m && m->showPlanes) {
+            glDepthMask(GL_FALSE);
+            for (const auto& sp : simPlanes) {
+                if ((m->planeDetect == 0 && sp.vertical) || (m->planeDetect == 1 && !sp.vertical)) continue;
+                const float* pc = m->planeColour;
+                const float fill[4] = {pc[0], pc[1], pc[2], pc[3] * 0.45f}, dot[4] = {pc[0], pc[1], pc[2], std::min(1.0f, pc[3] * 2.2f)};
+                const M4 lift = mul(sp.pose, translate(0, 0.004f, 0));
+                setCommon(lift, fill, 0, false); draw(sp.fill);
+                setCommon(lift, dot, 0, false); draw(sp.dots);
+                for (size_t i = 0; i < sp.poly.size(); ++i) {   // its edge
+                    const auto& q0 = sp.poly[i]; const auto& q1 = sp.poly[(i + 1) % sp.poly.size()];
+                    const float a[3] = {q0.first, 0.006f, q0.second}, b[3] = {q1.first, 0.006f, q1.second};
+                    float wa[3], wb[3]; apply(sp.pose, a, wa); apply(sp.pose, b, wb);
+                    segment(wa, wb, 0.012f, dot);
+                }
+            }
+            glDepthMask(GL_TRUE);
+        }
+    }
+    if (lk.desk && anchorMode != 2 && anchorMode != 3) {
         const float c[4] = {1, 1, 1, 1};
         setCommon(mul(translate(0, -0.002f, 0), scale(1.2f, 1, 1.2f)), c, deskTex, true); draw(mPlane);
     }
@@ -730,7 +828,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
         setCommon(mul(translate(headAt[0], headAt[1], headAt[2]), scale(1.0f, 1.3f, 1.15f)), c, 0, true); draw(mSphere);
         const float n[4] = {0.55f, 0.53f, 0.53f, 1};   // a nose, so it's clear which way it faces
         setCommon(mul(translate(headAt[0], headAt[1] + 0.02f, headAt[2] + 0.6f), scale(0.14f, 0.22f, 0.18f)), n, 0, true); draw(mSphere);
-    } else if (markerTex) {
+    } else if (markerTex && anchorMode != 3) {
         const float c[4] = {1, 1, 1, 1};
         // a printed marker has its white margin round the black square (1 across); a picture is just itself, 1 wide
         const float sx = anchorMode == 1 ? 1.0f : 1.25f, sz = anchorMode == 1 ? (float)markerH / std::max(1, markerW) : 1.25f;
@@ -755,12 +853,21 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
             M4 parent = ident();
             if (o.parent != -1) { auto it = worldOf.find(o.parent); if (it == worldOf.end()) continue; parent = it->second; parentOn = true; }
             if (!parentOn) continue;
-            const M4 world = mul(parent, localOf(o, t, nullptr));
+            M4 world = mul(parent, localOf(o, t, nullptr));
+            if (o.hasFollower && o.followerOn) {   // path following: on its path, facing the way it goes
+                for (const Object& q : m->objects) if (q.hasPath && q.active && q.pathName == o.followPath) {
+                    const auto pts = ArNav::fromFlat(q.pathPoints);
+                    const ArNav::Pose pose = ArNav::at(pts, o.followOnStart ? o.followSpeed * t : 0, o.followLoop);
+                    const M4 own = localOf(o, t, nullptr);   // its own Position: an offset from the path (e.g. up off the floor)
+                    world = mul(mul(worldAt(*m, q, t), mul(translate(pose.p.x, pose.p.y, pose.p.z), rotY(pose.yaw))), own);
+                    break;
+                }
+            }
             worldOf[o.id] = world;
             lastWorld[o.id] = {world, parent};
             const float c[3] = {world.m[12], world.m[13], world.m[14]};
             const float vz = viewM.m[2] * c[0] + viewM.m[6] * c[1] + viewM.m[10] * c[2] + viewM.m[14];
-            const bool extras = (o.hasParticles && o.particlesOn) || (o.hasLine && o.lineOn) || (o.hasTrail && o.trailOn);
+            const bool extras = (o.hasParticles && o.particlesOn) || (o.hasLine && o.lineOn) || (o.hasTrail && o.trailOn) || (o.hasPath && o.pathOn);
             if (extras) draws.push_back({world, &o, vz, portal && c[1] < -0.01f, true, 1});
             if (o.hasLight && o.lightOn && nl < 8) {   // its light, for the shader
                 const float fwd[3] = {-world.m[8], -world.m[9], -world.m[10]};
