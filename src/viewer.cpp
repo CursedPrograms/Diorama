@@ -501,7 +501,7 @@ static void drawObject(const Draw& d, float t) {
     case PICTURE: {
         const Tex& tx = texture(o.file);
         const float aspect = tx.w > 0 ? (float)tx.h / tx.w : 1;
-        if (o.billboard) { setCommon(mul(facing(d.world, lengthCol(d.world, 0), lengthCol(d.world, 0) * aspect), rotX(-1.5707963f)), col, tx.id, o.lit); }
+        if (o.billboard) { setCommon(mul(facing(d.world, lengthCol(d.world, 0), lengthCol(d.world, 0) * aspect), rotX(1.5707963f)), col, tx.id, o.lit); }
         else setCommon(mul(d.world, scale(1, 1, aspect)), col, tx.id, o.lit);
         draw(mPicture);
         break;
@@ -542,7 +542,7 @@ static void drawObject(const Draw& d, float t) {
             const float flap = o.flap > 0 ? 0.25f + 0.75f * std::fabs(std::cos(t * 9.0f * o.flap + ph * 3)) : 1;
             const float sz = o.spriteSize * (0.7f + 0.6f * hash(i, 5));
             M4 w = facing(translate(wp[0], wp[1], wp[2]), sz * flap, sz * aspect);
-            setCommon(mul(w, rotX(-1.5707963f)), col, tx.id, false);
+            setCommon(mul(w, rotX(1.5707963f)), col, tx.id, false);
             draw(mPicture);
         }
         glDepthMask(GL_TRUE);
@@ -618,7 +618,7 @@ static void drawExtras(const Draw& d, float t) {
             float wp[3]; apply(d.world, lp, wp);
             float c[4]; for (int q = 0; q < 4; ++q) c[q] = o.pColourStart[q] + (o.pColourEnd[q] - o.pColourStart[q]) * u;
             const float sz = o.pSizeStart + (o.pSizeEnd - o.pSizeStart) * u;
-            setCommon(mul(facing(translate(wp[0], wp[1], wp[2]), sz, sz), rotX(-1.5707963f)), c, tx, false);
+            setCommon(mul(facing(translate(wp[0], wp[1], wp[2]), sz, sz), rotX(1.5707963f)), c, tx, false);
             draw(mPicture);
         }
         glDepthMask(GL_TRUE);
