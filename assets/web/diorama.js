@@ -780,7 +780,10 @@
       case 'transform': return this.transform;
       case 'animate': return o.hasAnim ? { get on() { return o.animOn; }, set on(v) { o.animOn = !!v; }, get does() { return o.anim; }, set does(v) { o.anim = v; },
                                             get speed() { return o.animSpeed; }, set speed(v) { o.animSpeed = +v; }, get amount() { return o.animAmount; }, set amount(v) { o.animAmount = +v; } } : null;
-      case 'material': return { colour: vec(o.colour, function () { node.traverse(function (c) { if (c.material && c.material.color && !c.material.userData.isPathLook) c.material.color.copy(rgb(o.colour)); }); }), get opacity() { return o.colour[3]; }, set opacity(v) { o.colour[3] = +v; node.traverse(function (c) { if (c.material) { c.material.userData.base = +v; } }); } };
+      case 'material': return { colour: vec(o.colour, function () { node.traverse(function (c) { if (c.material && c.material.color && !c.material.userData.isPathLook) c.material.color.copy(rgb(o.colour)); }); }), get metallic() { return o.metallic || 0; }, set metallic(v) { o.metallic = +v; node.traverse(function (c) { if (c.material && 'metalness' in c.material) c.material.metalness = +v; }); },
+        get roughness() { return o.roughness === undefined ? 0.6 : o.roughness; }, set roughness(v) { o.roughness = +v; node.traverse(function (c) { if (c.material && 'roughness' in c.material) c.material.roughness = +v; }); },
+        get emissiveStrength() { return o.emissiveStrength || 0; }, set emissiveStrength(v) { o.emissiveStrength = +v; node.traverse(function (c) { if (c.material && c.material.emissive) { c.material.emissive.copy(rgb(o.emissive || [1, 1, 1])); c.material.emissiveIntensity = +v; } }); },
+        get opacity() { return o.colour[3]; }, set opacity(v) { o.colour[3] = +v; node.traverse(function (c) { if (c.material) { c.material.userData.base = +v; } }); } };
       case 'words': return o.kind === 'Words' ? { get text() { return o.text; }, set text(v) { o.text = String(v); rebuild(this.go); }, go: this } : null;
       case 'model': return o.kind === 'Model' ? { get clip() { return o.clip; }, play: function (name) { o.clip = name; rebuild(this.go); }, go: this } : null;
       case 'canvas': return o.hasCanvas ? { get visible() { return node.visible; }, set visible(v) { node.visible = !!v; }, element: node.userData.el } : null;

@@ -61,6 +61,9 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
   4444 / PNG, GIF; or a green screen), Particle System, Line Renderer, Trail Renderer, Occluder, Animate, **AR Path**
   (route marking with arrows) and **AR Path Follower** (a guide that walks it), **Canvas UI** (Text, Button, Slider,
   Toggle, Image, Panel as real HTML/CSS), **Scripts**.
+- **Lighting:** PBR materials (Metallic, Roughness, Emissive), up to 16 lights, soft shadows from the sun and spot
+  lights (and onto the real paper, table or floor in the game), HDR with bloom, PBR Neutral or ACES tone mapping and
+  exposure: Build Settings > Graphics, the same in the editor's view and the game.
 - **Scenes** (Window > Scenes): scene 0 is the game's `index.html`; `loadScene()` moves between them.
 - **Build Settings** (Ctrl+Shift+B): **Web** (a static website), **Windows** (`<Game>.exe`), **Linux**, **Raspberry Pi**
   (kiosk, starts with the Pi) and **Android** (`.apk`, `com.cursedentertainment.<game>`); a splash screen with intro
@@ -210,7 +213,7 @@ Console.
 
 | `getComponent(...)` | Gives |
 |---|---|
-| `"Material"` | `colour` (`.set(r, g, b)`, 0..1), `opacity` |
+| `"Material"` | `colour` (`.set(r, g, b)`, 0..1), `opacity`, `metallic`, `roughness`, `emissiveStrength` |
 | `"Animate"` | `on`, `does` ("Float", "Spin", "Sway", "Pulse", "Still"), `speed`, `amount` |
 | `"Words"` | `text` |
 | `"Model"` | `clip`, `play("Clip name")` |
