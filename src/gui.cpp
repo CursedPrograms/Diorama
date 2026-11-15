@@ -322,10 +322,56 @@ static std::string lastFile() {   // remembers the project that was open last
 }
 static bool autosaveFolders = true;   // off for --capture / --build runs
 static void rememberProject() { if (!folder.empty() && autosaveFolders) std::ofstream(fs::u8path(lastFile())) << folder; }
+// the Plane detection demo's script: a tap on a plane puts a cube there (written beside the projects, then saved into the project)
+static std::string projectsHome();
+static void attachPlaceCubes() {
+    const fs::path d = fs::u8path(projectsHome()) / "scripts";
+    std::error_code ec; fs::create_directories(d, ec);
+    const fs::path f = d / "PlaceCubes.js";
+    std::ofstream(f, std::ios::binary) << R"JS(// PlaceCubes: tap a plane (the dotted surfaces) and a cube lands there.
+// planes.raycast(x, y): where a tap meets the planes found ([] when it misses them); spawn("Cube", { worldPosition }) copies the Cube.
+var cubes = [];
+
+function start() {
+  find("Cube").active = false;            // the cube to copy, hidden itself
+  var self = this;
+  this.clear = function () {               // the Clear button: find('Spawner').clear()
+    cubes.forEach(function (c) { destroy(c); });
+    cubes = [];
+    self.show();
+  };
+  this.show = function () {
+    var t = find("Canvas/Count");
+    if (t) t.getComponent("Text").text = cubes.length ? "Cubes: " + cubes.length : "Tap a plane to place a cube";
+  };
+  this.show();
+}
+
+function update(dt) {
+  if (!input.tapped) return;
+  var hits = planes.raycast(input.x, input.y);
+  if (!hits.length) return;                // not on a plane
+  var size = 0.1, p = hits[0].position;
+  var c = spawn("Cube", { worldPosition: { x: p.x, y: p.y + size / 2, z: p.z } });
+  if (!c) return;
+  c.active = true;
+  c.rotation.y = Math.random() * 360;
+  c.getComponent("Material").colour.set(0.2 + Math.random() * 0.8, 0.2 + Math.random() * 0.8, 0.2 + Math.random() * 0.8);
+  cubes.push(c);
+  this.show();
+}
+
+function onPlanesChanged(e) {
+  if (e.added.length) log("planes found:", e.added.map(function (p) { return p.alignment; }).join(", "));
+}
+)JS";
+    for (auto& m : proj.markers) for (auto& o : m.objects) if (o.name == "Spawner") o.scripts.push_back({f.u8string(), true});
+}
 static void newFromTemplate(int which) {
     const std::string dir = (fs::u8path(exeDir) / "templates" / "gallery").u8string() + "/";
-    proj = which == 2 ? navigationTemplate() : which == 1 ? galleryTemplate(dir) : basicTemplate();
+    proj = which == 3 ? planeDemoTemplate() : which == 2 ? navigationTemplate() : which == 1 ? galleryTemplate(dir) : basicTemplate();
     folder.clear(); selMarker = 0; selObject = -1; shownMarker = -1;
+    if (which == 3) attachPlaceCubes();
     Viewer::frameMarker();
     if (!autosaveFolders) return;
     // its own folder at once (Documents/Diorama/<title>), like a Unity project: the Project window needs one
@@ -1846,6 +1892,7 @@ static void menuBar() {
         if (ImGui::BeginMenu("New from template")) {
             if (ImGui::MenuItem("Art gallery")) newFromTemplate(1);
             if (ImGui::MenuItem("Indoor navigation (surfaces)")) newFromTemplate(2);
+            if (ImGui::MenuItem("Plane detection demo (tap to place cubes)")) newFromTemplate(3);
             if (ImGui::MenuItem("A cube on Hiro")) newFromTemplate(0);
             ImGui::EndMenu();
         }
@@ -3185,7 +3232,7 @@ int main(int argc, char** argv) {
     if (autosaveFolders && openArg.empty()) { std::ifstream lf(fs::u8path(lastFile())); std::getline(lf, last); }
     if (!openArg.empty()) openProject(openArg);
     else if (!last.empty() && fs::exists(fs::u8path(last) / "project.diorama")) openProject(last);
-    else newFromTemplate(tmpl == "basic" ? 0 : tmpl == "navigation" ? 2 : 1);
+    else newFromTemplate(tmpl == "basic" ? 0 : tmpl == "navigation" ? 2 : tmpl == "planes" ? 3 : 1);
     if (!addVideoArg.empty() && !proj.markers.empty()) dropAsset(proj.markers[0], 0, -1, addVideoArg);
     if (!buildArg.empty()) { std::string err, apk; const bool ok = buildFor == "android" ? buildAndroid(buildArg, err, apk) : buildFor == "linux" ? buildLinux(buildArg, false, err) : buildFor == "pi" ? buildLinux(buildArg, true, err) : (buildWin || buildFor == "windows") ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;

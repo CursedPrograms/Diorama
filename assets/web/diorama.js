@@ -725,7 +725,7 @@
       case 'transform': return this.transform;
       case 'animate': return o.hasAnim ? { get on() { return o.animOn; }, set on(v) { o.animOn = !!v; }, get does() { return o.anim; }, set does(v) { o.anim = v; },
                                             get speed() { return o.animSpeed; }, set speed(v) { o.animSpeed = +v; }, get amount() { return o.animAmount; }, set amount(v) { o.animAmount = +v; } } : null;
-      case 'material': return { colour: vec(o.colour), get opacity() { return o.colour[3]; }, set opacity(v) { o.colour[3] = +v; node.traverse(function (c) { if (c.material) { c.material.userData.base = +v; } }); } };
+      case 'material': return { colour: vec(o.colour, function () { node.traverse(function (c) { if (c.material && c.material.color && !c.material.userData.isPathLook) c.material.color.setRGB(o.colour[0], o.colour[1], o.colour[2]); }); }), get opacity() { return o.colour[3]; }, set opacity(v) { o.colour[3] = +v; node.traverse(function (c) { if (c.material) { c.material.userData.base = +v; } }); } };
       case 'words': return o.kind === 'Words' ? { get text() { return o.text; }, set text(v) { o.text = String(v); rebuild(this.go); }, go: this } : null;
       case 'model': return o.kind === 'Model' ? { get clip() { return o.clip; }, play: function (name) { o.clip = name; rebuild(this.go); }, go: this } : null;
       case 'canvas': return o.hasCanvas ? { get visible() { return node.visible; }, set visible(v) { node.visible = !!v; }, element: node.userData.el } : null;
@@ -865,6 +865,11 @@
         if (i === 0) first = wrap(n);
       });
       if (first && at && at.position) first.position.set(at.position.x, at.position.y, at.position.z);
+      if (first && at && at.worldPosition) {   // a place in the world (a hit on a plane): into its parent's space
+        var wv = new THREE.Vector3(at.worldPosition.x, at.worldPosition.y, at.worldPosition.z);
+        if (first.node.parent) { first.node.parent.updateWorldMatrix(true, false); first.node.parent.worldToLocal(wv); }
+        first.position.set(wv.x, wv.y, wv.z);
+      }
       return first;
     }
     function destroy(go) {
@@ -933,7 +938,9 @@
       if (!R.camera || !PLANES.look) return [];
       var rc = new THREE.Raycaster(); rc.setFromCamera({ x: x, y: y }, R.camera);
       var meshes = []; PLANES.list.forEach(function (p) { p.node.updateMatrixWorld(true); p.node.children.forEach(function (c) { if (c.isMesh && !c.isInstancedMesh) { c.userData.plane = p; meshes.push(c); } }); });
-      return rc.intersectObjects(meshes, false).map(function (h) { return { position: { x: h.point.x, y: h.point.y, z: h.point.z }, distance: h.distance, plane: h.object.userData.plane.id }; });
+      var hits = rc.intersectObjects(meshes, false).map(function (h) { return { position: { x: h.point.x, y: h.point.y, z: h.point.z }, distance: h.distance, plane: h.object.userData.plane.id }; });
+      if (!hits.length && R.input.hit) hits.push({ position: R.input.hit, distance: 0, plane: 'hit-test' });   // a phone without plane detection: its hit test
+      return hits;
     };
     R.input = { tapped: false, x: 0, y: 0 };
     R.cameraApi = { get position() { var p = new THREE.Vector3(); if (R.camera) R.camera.getWorldPosition(p); return { x: p.x, y: p.y, z: p.z }; } };
@@ -943,8 +950,10 @@
         R.camera = camera; R.dom = dom;
         if (listener && !listener.parent) camera.add(listener);
         var ray = new THREE.Raycaster();
+        var down = null;
         var tap = function (ev) {
-          var r = dom.getBoundingClientRect(), pt = ev.touches ? ev.touches[0] : ev;
+          var r = dom.getBoundingClientRect(), pt = ev.changedTouches ? ev.changedTouches[0] : ev;
+          if (!down || Math.hypot(pt.clientX - down.x, pt.clientY - down.y) > 8) return;   // a drag, not a tap
           var x = ((pt.clientX - r.left) / r.width) * 2 - 1, y = -((pt.clientY - r.top) / r.height) * 2 + 1;
           R.input.tapped = true; R.input.x = x; R.input.y = y;
           unlockMedia();
@@ -963,8 +972,11 @@
             if (n && n.userData.go && n.userData.go.scripts.some(function (s) { return s.fns.onTap; })) { var g = n.userData.go; g.scripts.forEach(function (s) { call(g, s, 'onTap'); }); break; }
           }
         };
-        dom.addEventListener('mousedown', tap); dom.addEventListener('touchstart', tap, { passive: true });
+        dom.addEventListener('pointerdown', function (ev) { down = { x: ev.clientX, y: ev.clientY }; });
+        dom.addEventListener('pointerup', tap);
       },
+      consumeTap: function () { R.input.tapped = false; R.input.hit = null; },   // a tap that did something else (locking)
+      tapAt: function (x, y, hit) { R.input.tapped = true; R.input.x = x; R.input.y = y; R.input.hit = hit || null; unlockMedia(); },   // WebXR's select
       anchor: function (name, root, objects) { R.roots[name] = root; root.userData.objects = objects; },
       seen: function (name, on) {   // an anchor found or lost: its objects' onFound / onLost
         var root = R.roots[name]; if (!root) return;
@@ -980,7 +992,7 @@
           var v = g.velocity; if (v.x || v.y || v.z) { var p = g.data.position; p[0] += v.x * dt; p[1] += v.y * dt; p[2] += v.z * dt; }
         });
         R.objects = R.objects.filter(function (g) { return !g.dead; });
-        R.input.tapped = false;
+        R.input.tapped = false; R.input.hit = null;
       }
     };
 
@@ -1265,7 +1277,6 @@
       };
       var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 200);
       scene.add(camera);
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, THREE.SRGBColorSpace ? Math.PI * 0.6 : 0.6));
       var first = proj.markers[0] || {};
       C.planes.settings = { planeDetect: first.planeDetect === undefined ? 2 : first.planeDetect, showPlanes: first.showPlanes !== false,
         planeColour: first.planeColour || [0.25, 0.95, 0.55, 0.35], planePrefab: first.planePrefab,
@@ -1357,13 +1368,14 @@
           };
           video.addEventListener('loadedmetadata', fit); window.addEventListener('resize', fit);
           var tracker = null, lostAt = 0, F = new THREE.Matrix4().makeScale(1, -1, -1), M = new THREE.Matrix4();
-          var poly = [[-0.6, -0.6], [0.6, -0.6], [0.6, 0.6], [-0.6, 0.6]];
+          var poly = [[-1.5, -1.5], [1.5, -1.5], [1.5, 1.5], [-1.5, 1.5]];
           var relock = document.createElement('button'); relock.textContent = 'Re-lock';
           relock.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:40;padding:8px 16px;font:inherit;border:0;border-radius:6px;background:#007bb7;color:#fff;display:none';
           document.body.appendChild(relock);
           var lock = function () {
             if (!tracker) return;
             if (gravityTilt !== null) tracker.s.tiltDeg = gravityTilt;
+            C.runtime.consumeTap();   // the tap that locks only locks
             if (!tracker.lock(video)) { say('Not enough to see there: point at a table or floor with some pattern, in good light, then tap.'); return; }
             var P = window.SurfaceTrack.lockPose(tracker.s);
             show(P);
@@ -1430,6 +1442,7 @@
             session.addEventListener('select', function () {
               if (!ring.visible) return;
               var pos = new THREE.Vector3().setFromMatrixPosition(ring.matrix);
+              C.runtime.tapAt(0, 0, { x: pos.x, y: pos.y, z: pos.z });   // scripts: a tap at the middle (the reticle)
               anchors.forEach(function (a) { if (a.m.placement === 0) place(a, pos); });
             });
             session.addEventListener('end', function () { say('AR ended'); });

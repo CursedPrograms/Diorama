@@ -307,6 +307,27 @@ bool load(Project& p, const std::string& folder, std::string& err) {
 }
 
 // ---------- templates ----------
+// plane detection: the planes found shown, a tap on one puts a cube there (the gui adds PlaceCubes.js to the Spawner)
+Project planeDemoTemplate() {
+    Project p;
+    p.title = "Plane detection demo";
+    p.tracking = TRACK_SURFACES;
+    p.intro = "Move the camera slowly over the floor or a table until the dots show the planes found.\nThen tap a plane: a cube lands there.";
+    Marker k; k.id = newId(p); k.name = "Room"; k.preset.clear(); k.placement = 1; k.planeDetect = 2;
+    Object cube = make(p, CUBE, -1); cube.name = "Cube"; cube.scl[0] = cube.scl[1] = cube.scl[2] = 0.1f; cube.pos[1] = 0.05f;
+    cube.colour[0] = 0; cube.colour[1] = 0.48f; cube.colour[2] = 0.72f;
+    Object spawner = make(p, EMPTY, -1); spawner.name = "Spawner";
+    Object canvas = make(p, EMPTY, -1); canvas.name = "Canvas"; canvas.hasCanvas = true;
+    k.objects = {cube, spawner, canvas};
+    Object count = make(p, EMPTY, canvas.id); count.name = "Count"; count.ui = UI_TEXT; count.uiText = "Tap a plane to place a cube";
+    count.uiAnchor = 1; count.uiRect[1] = 24; count.uiRect[2] = 360; count.uiRect[3] = 40; count.uiFont = 20;
+    Object clear = make(p, EMPTY, canvas.id); clear.name = "Clear"; clear.ui = UI_BUTTON; clear.uiText = "Clear"; clear.uiFont = 16;
+    clear.uiAnchor = 2; clear.uiRect[0] = -12; clear.uiRect[1] = 16; clear.uiRect[2] = 110; clear.uiRect[3] = 38;
+    clear.uiOnClick = "find('Spawner').clear()";
+    k.objects.push_back(count); k.objects.push_back(clear);
+    p.markers.push_back(k);
+    return p;
+}
 // AR indoor navigation, as in "Augmented Reality in Indoor Navigation" (IJSREM, 2023): planes found, a route marked with
 // arrows, a guide that walks it; buttons to save and follow paths (the game records walked paths too)
 Project navigationTemplate() {

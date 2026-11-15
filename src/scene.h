@@ -205,6 +205,7 @@ int duplicate(Project& p, Marker& m, int id);          // with its children; ret
 // the art gallery: a frame on the Kanji marker, a forest under it, a person in it, butterflies, light rays
 Project galleryTemplate(const std::string& assetsDir);
 Project basicTemplate();
-Project navigationTemplate();   // Surfaces: indoor navigation (plane detection, path marking, path following)
+Project navigationTemplate();
+Project planeDemoTemplate();    // Surfaces: planes found, tap one to place a cube (its script: PlaceCubes.js)   // Surfaces: indoor navigation (plane detection, path marking, path following)
 
 }
