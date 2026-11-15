@@ -117,6 +117,7 @@ static std::string markersJson(const std::vector<Marker>& list) {
         w.key("ambient"); w.out += arr(k.ambient, 3);
         w.key("sun"); w.out += arr(k.sun, 3);
         w.key("portalSize"); w.out += arr(k.portalSize, 2);
+        w.b("sunShadows", k.sunShadows).b("shadowCatcher", k.shadowCatcher);
         w.i("planeDetect", k.planeDetect).b("showPlanes", k.showPlanes).s("planePrefab", k.planePrefab).i("placement", k.placement);
         w.f("webcamTilt", k.webcamTilt).f("webcamHeight", k.webcamHeight).f("webcamFov", k.webcamFov).i("webcamSurface", k.webcamSurface);
         w.key("planeColour"); w.out += arr(k.planeColour, 4);
@@ -129,6 +130,8 @@ static std::string markersJson(const std::vector<Marker>& list) {
               .f("animSpeed", o.animSpeed).f("animAmount", o.animAmount).i("count", o.count).f("spriteSize", o.spriteSize).f("flap", o.flap)
               .i("rays", o.rays).s("text", o.text).s("clip", o.clip).f("clipSpeed", o.clipSpeed).b("clipLoop", o.clipLoop)
               .b("lookOn", o.lookOn).b("hasAnim", o.hasAnim).b("animOn", o.animOn).s("prefab", o.prefab);
+            ow.f("metallic", o.metallic).f("roughness", o.roughness).f("emissiveStrength", o.emissiveStrength).b("castShadows", o.castShadows).b("receiveShadows", o.receiveShadows).b("lightShadows", o.lightShadows);
+            ow.key("emissive"); ow.out += arr(o.emissive, 3);
             ow.b("occluder", o.occluder)
               .b("hasLight", o.hasLight).b("lightOn", o.lightOn).i("lightType", o.lightType).f("lightIntensity", o.lightIntensity).f("lightRange", o.lightRange).f("spotAngle", o.spotAngle)
               .b("hasAudio", o.hasAudio).b("audioOn", o.audioOn).s("audioFile", o.audioFile).f("volume", o.volume).b("audioLoop", o.audioLoop).b("playOnStart", o.playOnStart)
@@ -182,7 +185,8 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
     k.portal = readBool(mv, "portal", k.portal); k.expanded = readBool(mv, "expanded", true);
     readArr(mv, "ambient", k.ambient, 3); readArr(mv, "sun", k.sun, 3); readArr(mv, "portalSize", k.portalSize, 2);
     k.webcamTilt = (float)mv.num("webcamTilt", k.webcamTilt); k.webcamHeight = (float)mv.num("webcamHeight", k.webcamHeight); k.webcamFov = (float)mv.num("webcamFov", k.webcamFov); k.webcamSurface = (int)mv.num("webcamSurface", 0);
-    k.planeDetect = (int)mv.num("planeDetect", 2); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
+    k.planeDetect = (int)mv.num("planeDetect", 2);
+    k.sunShadows = readBool(mv, "sunShadows", true); k.shadowCatcher = readBool(mv, "shadowCatcher", true); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
     readArr(mv, "planeColour", k.planeColour, 4);
     if (const Json::Value* os = mv.get("objects"))
         for (const Json::Value& ov : os->a) {
@@ -197,6 +201,9 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
             o.lookOn = readBool(ov, "lookOn", true); o.animOn = readBool(ov, "animOn", true);
             o.prefab = ov.str("prefab");
             o.occluder = readBool(ov, "occluder", false);
+                o.metallic = (float)ov.num("metallic", 0); o.roughness = (float)ov.num("roughness", 0.6); o.emissiveStrength = (float)ov.num("emissiveStrength", 0);
+                readArr(ov, "emissive", o.emissive, 3);
+                o.castShadows = readBool(ov, "castShadows", true); o.receiveShadows = readBool(ov, "receiveShadows", true); o.lightShadows = readBool(ov, "lightShadows", false);
             o.hasLight = readBool(ov, "hasLight", false); o.lightOn = readBool(ov, "lightOn", true); o.lightType = (int)ov.num("lightType", 0);
             o.lightIntensity = (float)ov.num("lightIntensity", o.lightIntensity); o.lightRange = (float)ov.num("lightRange", o.lightRange); o.spotAngle = (float)ov.num("spotAngle", o.spotAngle);
             o.hasAudio = readBool(ov, "hasAudio", false); o.audioOn = readBool(ov, "audioOn", true); o.audioFile = ov.str("audioFile"); o.volume = (float)ov.num("volume", 1);
@@ -248,6 +255,9 @@ std::string toJson(const Project& p) {
                       "\",\n  \"gps\": " + (p.gps ? "true" : "false") + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"scene\": " + Json::quote(p.scene) + ",\n  \"scenes\": [";
     for (size_t i = 0; i < p.scenes.size(); ++i) out += (i ? ", " : "") + Json::quote(p.scenes[i]);
     out += "],\n  \"platform\": " + Json::quote(p.platform) + ", \"windowsRuntime\": " + std::to_string(p.windowsRuntime) + ", \"renderer\": " + std::to_string(p.renderer) +
+           ",\n  \"shadows\": " + (p.shadows ? "true" : "false") + ", \"shadowQuality\": " + std::to_string(p.shadowQuality) +
+           ", \"bloom\": " + (p.bloom ? "true" : "false") + ", \"bloomStrength\": " + fnum(p.bloomStrength) + ", \"bloomThreshold\": " + fnum(p.bloomThreshold) +
+           ", \"toneMapping\": " + std::to_string(p.toneMapping) + ", \"exposure\": " + fnum(p.exposure) +
            ",\n  \"company\": " + Json::quote(p.company) + ", \"version\": " + Json::quote(p.version) + ", \"packageId\": " + Json::quote(p.packageId) +
            ",\n  \"icon\": " + Json::quote(p.icon) + ", \"splash\": " + Json::quote(p.splash) + ", \"intro\": " + Json::quote(p.intro) +
            ",\n  \"skipSplash\": " + (p.skipSplash ? "true" : "false") + ", \"fullscreen\": " + (p.fullscreen ? "true" : "false") +
@@ -275,6 +285,10 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
     }
     p.scene = v.str("scene", p.scenes[0]);
     p.platform = v.str("platform", "web"); p.windowsRuntime = (int)v.num("windowsRuntime", 0); p.renderer = (int)v.num("renderer", 0);
+    { const Json::Value* b = v.get("shadows"); p.shadows = !b || b->type != Json::Value::BOOL || b->b; }
+    { const Json::Value* b = v.get("bloom"); p.bloom = !b || b->type != Json::Value::BOOL || b->b; }
+    p.shadowQuality = (int)v.num("shadowQuality", 1); p.bloomStrength = (float)v.num("bloomStrength", 0.6); p.bloomThreshold = (float)v.num("bloomThreshold", 0.9);
+    p.toneMapping = (int)v.num("toneMapping", 1); p.exposure = (float)v.num("exposure", 1);
     p.company = v.str("company", p.company); p.version = v.str("version", p.version); p.packageId = v.str("packageId");
     p.icon = v.str("icon"); p.splash = v.str("splash"); p.intro = v.str("intro");
     { const Json::Value* b = v.get("skipSplash"); p.skipSplash = b && b->type == Json::Value::BOOL && b->b; }

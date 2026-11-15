@@ -39,6 +39,7 @@ GLF(void, glUniformMatrix4fv, (GLint, GLsizei, GLboolean, const GLfloat*))
 GLF(void, glUniform1i, (GLint, GLint))
 GLF(void, glUniform1f, (GLint, GLfloat))
 GLF(void, glUniform3f, (GLint, GLfloat, GLfloat, GLfloat))
+GLF(void, glUniform2f, (GLint, GLfloat, GLfloat))
 GLF(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat))
 GLF(void, glUniform4fv, (GLint, GLsizei, const GLfloat*))
 GLF(void, glGenVertexArrays, (GLsizei, GLuint*))
@@ -129,7 +130,7 @@ static void apply(const M4& m, const float* p, float* o) { for (int r = 0; r < 3
 static bool loadGL() {
 #define L(name) name##_ = (PFN_##name)SDL_GL_GetProcAddress(#name); if (!name##_) return false;
     L(glCreateShader) L(glShaderSource) L(glCompileShader) L(glCreateProgram) L(glAttachShader) L(glLinkProgram) L(glUseProgram)
-    L(glGetUniformLocation) L(glUniformMatrix4fv) L(glUniform1i) L(glUniform1f) L(glUniform3f) L(glUniform4f) L(glUniform4fv) L(glGenVertexArrays)
+    L(glGetUniformLocation) L(glUniformMatrix4fv) L(glUniform1i) L(glUniform1f) L(glUniform2f) L(glUniform3f) L(glUniform4f) L(glUniform4fv) L(glGenVertexArrays)
     L(glBindVertexArray) L(glGenBuffers) L(glBindBuffer) L(glBufferData) L(glEnableVertexAttribArray) L(glVertexAttribPointer)
     L(glGenFramebuffers) L(glBindFramebuffer) L(glFramebufferTexture2D) L(glGenRenderbuffers) L(glBindRenderbuffer)
     L(glRenderbufferStorage) L(glFramebufferRenderbuffer) L(glGenerateMipmap) L(glActiveTexture)
@@ -146,6 +147,40 @@ static GLuint program(const char* vs, const char* fs) {
 
 static GLuint prog = 0, progLine = 0;
 static GLint uClip, uPick, uPickCol, uNL, uLPos, uLCol, uLDir; static GLint uMVP, uModel, uColour, uUseTex, uLit, uSunDir, uSun, uAmbient, uTex, uLineMVP, uLineColour;
+// PBR, shadows, HDR
+static GLint uCamPos, uMetallic, uRough, uEmissive, uDepthOnly, uReceive, uSunShadow, uSunVP, uSunShadowOn, uSpotShadow[2], uSpotVP[2], uSpotIdx[2];
+static GLuint progBright = 0, progBlur = 0, progFinal = 0, emptyVao = 0;
+static GLint uBrightSrc, uBrightThr, uBlurSrc, uBlurDir, uFinalHdr, uFinalBloom, uFinalStrength, uFinalExposure, uFinalTone;
+#ifndef GL_RGBA16F
+#define GL_RGBA16F 0x881A
+#endif
+#ifndef GL_HALF_FLOAT
+#define GL_HALF_FLOAT 0x140B
+#endif
+#ifndef GL_DEPTH_COMPONENT24
+#define GL_DEPTH_COMPONENT24 0x81A6
+#endif
+#ifndef GL_DEPTH_ATTACHMENT
+#define GL_DEPTH_ATTACHMENT 0x8D00
+#endif
+#ifndef GL_TEXTURE_COMPARE_MODE
+#define GL_TEXTURE_COMPARE_MODE 0x884C
+#endif
+#ifndef GL_COMPARE_REF_TO_TEXTURE
+#define GL_COMPARE_REF_TO_TEXTURE 0x884E
+#endif
+#ifndef GL_TEXTURE_COMPARE_FUNC
+#define GL_TEXTURE_COMPARE_FUNC 0x884D
+#endif
+#ifndef GL_TEXTURE1
+#define GL_TEXTURE1 0x84C1
+#endif
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+// the material of what's drawn next (setCommon passes it on): Diorama's PBR
+struct Mat { float metallic = 0, roughness = 0.6f, emissive[3] = {0, 0, 0}; bool receive = true; };
+static Mat curMat;
 
 struct Mesh { GLuint vao = 0, vbo = 0, ibo = 0; int count = 0; };   // interleaved pos 3, normal 3, uv 2
 static Mesh upload(const std::vector<float>& v, const std::vector<unsigned>& idx, bool dynamic = false) {
@@ -429,24 +464,77 @@ bool init(const std::string& dir) {
         "void main(){ gl_Position = mvp * vec4(p,1); N = mat3(model) * n; T = t; W = (model * vec4(p,1)).xyz; gl_ClipDistance[0] = dot(model * vec4(p,1), clipPlane); }",
         "#version 330\nin vec3 N; in vec2 T; in vec3 W; uniform sampler2D tex; uniform vec4 colour; uniform int useTex, lit;\n"
         "uniform vec3 sunDir, sun, ambient; uniform int pick; uniform vec3 pickCol; out vec4 o;\n"
-        "uniform int nLights; uniform vec4 lPos[8], lCol[8], lDir[8];   // xyz + type; rgb + range; direction + cos(cone)\n"
+        "uniform int nLights; uniform vec4 lPos[16], lCol[16], lDir[16];   // xyz + type; rgb (linear, with intensity) + range; direction + cos(cone)\n"
+        "uniform vec3 camPos; uniform float metallic, roughness; uniform vec3 emissive; uniform int depthOnly, receive;\n"
+        "uniform sampler2DShadow sunShadow, spotShadow0, spotShadow1; uniform mat4 sunVP, spotVP0, spotVP1; uniform int sunShadowOn, spotIdx0, spotIdx1;\n"
+        "vec3 lin(vec3 c){ return pow(max(c, vec3(0.0)), vec3(2.2)); }\n"
+        "float shadowAt(sampler2DShadow sm, mat4 vp, vec3 w, float bias){\n"
+        "  vec4 q = vp * vec4(w, 1.0); q.xyz /= q.w; q.xyz = q.xyz * 0.5 + 0.5;\n"
+        "  if (q.x <= 0.0 || q.x >= 1.0 || q.y <= 0.0 || q.y >= 1.0 || q.z >= 1.0) return 1.0;\n"
+        "  vec2 ts = 1.0 / vec2(textureSize(sm, 0)); float sh = 0.0;\n"
+        "  for (int x = -1; x <= 1; ++x) for (int y = -1; y <= 1; ++y) sh += texture(sm, vec3(q.xy + vec2(x, y) * ts * 1.25, q.z - bias));\n"
+        "  return sh / 9.0; }\n"
+        "vec3 brdf(vec3 n, vec3 v, vec3 l, vec3 albedo, vec3 F0, float r, float m){\n"
+        "  vec3 h = normalize(v + l); float NdL = max(dot(n, l), 0.0), NdV = max(dot(n, v), 1e-4), NdH = max(dot(n, h), 0.0), VdH = max(dot(v, h), 0.0);\n"
+        "  float a = r * r, a2 = a * a, d = NdH * NdH * (a2 - 1.0) + 1.0, D = a2 / (3.14159 * d * d);\n"
+        "  float k = (r + 1.0) * (r + 1.0) / 8.0, G = (NdV / (NdV * (1.0 - k) + k)) * (NdL / (NdL * (1.0 - k) + k));\n"
+        "  vec3 F = F0 + (1.0 - F0) * pow(1.0 - VdH, 5.0);\n"
+        "  vec3 spec = D * G * F / max(4.0 * NdV * NdL, 1e-4) * 3.14159;\n"
+        "  return ((1.0 - F) * (1.0 - m) * albedo + spec) * NdL; }\n"
         "void main(){ vec4 c = colour; if (useTex == 1) c *= texture(tex, T); if (c.a < 0.01) discard;\n"
+        "  if (depthOnly == 1) { if (c.a < 0.5) discard; o = vec4(0.0); return; }\n"
         "  if (pick == 1) { if (c.a < 0.35) discard; o = vec4(pickCol, 1); return; }\n"
-        "  if (lit == 1) { vec3 n = normalize(N); if (!gl_FrontFacing) n = -n; vec3 l = ambient + sun * max(dot(n, sunDir), 0.0);\n"
+        "  vec3 base = lin(c.rgb), rgb = base;\n"
+        "  if (lit == 1) { vec3 n = normalize(N); if (!gl_FrontFacing) n = -n; vec3 v = normalize(camPos - W);\n"
+        "    float r = clamp(roughness, 0.04, 1.0); vec3 F0 = mix(vec3(0.04), base, metallic);\n"
+        "    vec3 Fa = F0 + (max(vec3(1.0 - r), F0) - F0) * pow(1.0 - max(dot(n, v), 0.0), 5.0);   // what the surroundings give back (brighter from above)\n"
+        "    vec3 acc = ambient * base * (1.0 - metallic) * (0.8 + 0.2 * n.y) + ambient * Fa * (1.4 + 0.9 * reflect(-v, n).y);\n"
+        "    float s = (sunShadowOn == 1 && receive == 1) ? shadowAt(sunShadow, sunVP, W, 0.0012) : 1.0;\n"
+        "    acc += sun * brdf(n, v, normalize(sunDir), base, F0, r, metallic) * s;\n"
         "    for (int i = 0; i < nLights; ++i) {\n"
         "      vec3 L; float a = 1.0;\n"
         "      if (lPos[i].w > 1.5) L = -lDir[i].xyz; else { vec3 d = lPos[i].xyz - W; float dist = length(d); L = d / max(dist, 1e-4);\n"
         "        a = pow(clamp(1.0 - dist / max(lCol[i].w, 1e-3), 0.0, 1.0), 2.0);\n"
         "        if (lPos[i].w > 0.5) a *= smoothstep(lDir[i].w, lDir[i].w + 0.08, dot(-L, lDir[i].xyz)); }\n"
-        "      l += lCol[i].rgb * a * max(dot(n, L), 0.0); }\n"
-        "    c.rgb *= l; }\n"
-        "  o = c; }");
+        "      if (receive == 1 && i == spotIdx0) a *= shadowAt(spotShadow0, spotVP0, W, 0.002);\n"
+        "      if (receive == 1 && i == spotIdx1) a *= shadowAt(spotShadow1, spotVP1, W, 0.002);\n"
+        "      acc += lCol[i].rgb * a * brdf(n, v, L, base, F0, r, metallic); }\n"
+        "    rgb = acc; }\n"
+        "  rgb += emissive;\n"
+        "  o = vec4(rgb, c.a); }");
     uMVP = glGetUniformLocation_(prog, "mvp"); uModel = glGetUniformLocation_(prog, "model"); uColour = glGetUniformLocation_(prog, "colour");
     uUseTex = glGetUniformLocation_(prog, "useTex"); uLit = glGetUniformLocation_(prog, "lit"); uSunDir = glGetUniformLocation_(prog, "sunDir");
     uSun = glGetUniformLocation_(prog, "sun"); uAmbient = glGetUniformLocation_(prog, "ambient"); uTex = glGetUniformLocation_(prog, "tex"); uClip = glGetUniformLocation_(prog, "clipPlane"); uNL = glGetUniformLocation_(prog, "nLights"); uLPos = glGetUniformLocation_(prog, "lPos"); uLCol = glGetUniformLocation_(prog, "lCol"); uLDir = glGetUniformLocation_(prog, "lDir"); uPick = glGetUniformLocation_(prog, "pick"); uPickCol = glGetUniformLocation_(prog, "pickCol");
+    uCamPos = glGetUniformLocation_(prog, "camPos"); uMetallic = glGetUniformLocation_(prog, "metallic"); uRough = glGetUniformLocation_(prog, "roughness");
+    uEmissive = glGetUniformLocation_(prog, "emissive"); uDepthOnly = glGetUniformLocation_(prog, "depthOnly"); uReceive = glGetUniformLocation_(prog, "receive");
+    uSunShadow = glGetUniformLocation_(prog, "sunShadow"); uSunVP = glGetUniformLocation_(prog, "sunVP"); uSunShadowOn = glGetUniformLocation_(prog, "sunShadowOn");
+    uSpotShadow[0] = glGetUniformLocation_(prog, "spotShadow0"); uSpotShadow[1] = glGetUniformLocation_(prog, "spotShadow1");
+    uSpotVP[0] = glGetUniformLocation_(prog, "spotVP0"); uSpotVP[1] = glGetUniformLocation_(prog, "spotVP1");
+    uSpotIdx[0] = glGetUniformLocation_(prog, "spotIdx0"); uSpotIdx[1] = glGetUniformLocation_(prog, "spotIdx1");
+    // the post pass: the bright parts, blurred (bloom), then exposure, tone mapping and gamma
+    const char* fsq = "#version 330\nout vec2 uv; void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); uv = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }";
+    progBright = program(fsq, "#version 330\nin vec2 uv; uniform sampler2D src; uniform float thr; out vec4 o;\n"
+        "void main(){ vec3 c = texture(src, uv).rgb; float b = max(c.r, max(c.g, c.b)); float k = clamp((b - thr) / max(b, 1e-4), 0.0, 1.0); o = vec4(c * k, 1.0); }");
+    progBlur = program(fsq, "#version 330\nin vec2 uv; uniform sampler2D src; uniform vec2 dir; out vec4 o;\n"
+        "void main(){ float w[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216); vec3 c = texture(src, uv).rgb * w[0];\n"
+        "  for (int i = 1; i < 5; ++i) { c += texture(src, uv + dir * float(i)).rgb * w[i]; c += texture(src, uv - dir * float(i)).rgb * w[i]; } o = vec4(c, 1.0); }");
+    progFinal = program(fsq, "#version 330\nin vec2 uv; uniform sampler2D hdr, bloom; uniform float strength, exposure; uniform int tone; out vec4 o;\n"
+        "vec3 neutral(vec3 color){ const float sc = 0.8 - 0.04; const float desat = 0.15; float x = min(color.r, min(color.g, color.b));\n"
+        "  float off = x < 0.08 ? x - 6.25 * x * x : 0.04; color -= off; float peak = max(color.r, max(color.g, color.b)); if (peak < sc) return color;\n"
+        "  const float d = 1.0 - sc; float np = 1.0 - d * d / (peak + d - sc); color *= np / peak; float g = 1.0 - 1.0 / (desat * (peak - np) + 1.0);\n"
+        "  return mix(color, vec3(np), g); }\n"
+        "vec3 aces(vec3 x){ return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }\n"
+        "void main(){ vec3 c = texture(hdr, uv).rgb + texture(bloom, uv).rgb * strength; c *= exposure;\n"
+        "  c = tone == 1 ? neutral(c) : tone == 2 ? aces(c) : clamp(c, 0.0, 1.0);\n"
+        "  o = vec4(pow(c, vec3(1.0 / 2.2)), 1.0); }");
+    uBrightSrc = glGetUniformLocation_(progBright, "src"); uBrightThr = glGetUniformLocation_(progBright, "thr");
+    uBlurSrc = glGetUniformLocation_(progBlur, "src"); uBlurDir = glGetUniformLocation_(progBlur, "dir");
+    uFinalHdr = glGetUniformLocation_(progFinal, "hdr"); uFinalBloom = glGetUniformLocation_(progFinal, "bloom"); uFinalStrength = glGetUniformLocation_(progFinal, "strength");
+    uFinalExposure = glGetUniformLocation_(progFinal, "exposure"); uFinalTone = glGetUniformLocation_(progFinal, "tone");
+    glGenVertexArrays_(1, &emptyVao);
     progLine = program(
         "#version 330\nlayout(location=0) in vec3 p; uniform mat4 mvp; void main(){ gl_Position = mvp * vec4(p,1); }",
-        "#version 330\nuniform vec4 colour; out vec4 o; void main(){ o = colour; }");
+        "#version 330\nuniform vec4 colour; out vec4 o; void main(){ o = vec4(pow(colour.rgb, vec3(2.2)), colour.a); }");
     uLineMVP = glGetUniformLocation_(progLine, "mvp"); uLineColour = glGetUniformLocation_(progLine, "colour");
     makePrimitives();
     // a light ray: bright down the middle, soft at the sides, fading downwards
@@ -479,8 +567,40 @@ void frameMarker() {
 }
 
 static GLuint fbo = 0, fboTex = 0, fboDepth = 0; static int fbW = 0, fbH = 0;
+static GLuint hdrFbo = 0, hdrTex = 0, hdrDepth = 0, bloomFbo[2] = {0, 0}, bloomTex[2] = {0, 0};
+static GLuint shadowFbo = 0, shadowTex[3] = {0, 0, 0}; static int shadowSize = 0;   // 0 the sun, 1 and 2 spot lights
+static void ensureShadows(int size) {
+    if (shadowFbo && size == shadowSize) return;
+    if (!shadowFbo) { glGenFramebuffers_(1, &shadowFbo); glGenTextures(3, shadowTex); }
+    shadowSize = size;
+    for (GLuint t : shadowTex) {
+        glBindTexture(GL_TEXTURE_2D, t);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, size, size, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+    }
+}
+static void hdrTexture(GLuint t, int w, int h) {
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+}
 static void ensureTarget(int w, int h) {
     if (fbo && w == fbW && h == fbH) return;
+    if (!hdrFbo) { glGenFramebuffers_(1, &hdrFbo); glGenTextures(1, &hdrTex); glGenRenderbuffers_(1, &hdrDepth); glGenFramebuffers_(2, bloomFbo); glGenTextures(2, bloomTex); }
+    hdrTexture(hdrTex, w, h);
+    glBindRenderbuffer_(GL_RENDERBUFFER, hdrDepth);
+    glRenderbufferStorage_(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+    glBindFramebuffer_(GL_FRAMEBUFFER, hdrFbo);
+    glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, hdrTex, 0);
+    glFramebufferRenderbuffer_(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, hdrDepth);
+    for (int i = 0; i < 2; ++i) {
+        hdrTexture(bloomTex[i], std::max(1, w / 2), std::max(1, h / 2));
+        glBindFramebuffer_(GL_FRAMEBUFFER, bloomFbo[i]);
+        glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, bloomTex[i], 0);
+    }
     if (!fbo) { glGenFramebuffers_(1, &fbo); glGenTextures(1, &fboTex); glGenRenderbuffers_(1, &fboDepth); }
     fbW = w; fbH = h;
     glBindTexture(GL_TEXTURE_2D, fboTex);
@@ -504,6 +624,8 @@ static void setCommon(const M4& world, const float* colour, GLuint tex, bool lit
     glUniformMatrix4fv_(uMVP, 1, GL_FALSE, mvp.m); glUniformMatrix4fv_(uModel, 1, GL_FALSE, world.m);
     glUniform4f_(uColour, colour[0], colour[1], colour[2], colour[3]);
     glUniform1i_(uUseTex, tex ? 1 : 0); glUniform1i_(uLit, lit ? 1 : 0);
+    glUniform1f_(uMetallic, curMat.metallic); glUniform1f_(uRough, curMat.roughness);
+    glUniform3f_(uEmissive, curMat.emissive[0], curMat.emissive[1], curMat.emissive[2]); glUniform1i_(uReceive, curMat.receive ? 1 : 0);
     glActiveTexture_(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex ? tex : whiteTex);
 }
 
@@ -564,7 +686,7 @@ static void drawObject(const Draw& d, float t) {
         const Tex& tx = words(o.text);
         const float aspect = tx.w > 0 ? (float)tx.h / tx.w : 0.3f;
         const M4 w = o.billboard ? facing(d.world, lengthCol(d.world, 0), lengthCol(d.world, 0) * aspect) : mul(d.world, scale(1, aspect, 1));
-        setCommon(mul(w, rotY(3.14159265f)), col, tx.id, false);
+        setCommon(w, col, tx.id, false);   // readable from the front (+Z), as in the game
         draw(mQuad);
         break;
     }
@@ -739,6 +861,40 @@ static bool redrawing = false;          // drawing the picture again after a pic
 static std::map<int, std::pair<M4, M4>> lastWorld;   // id -> (world, parent world), as last drawn
 static std::vector<std::pair<int, std::pair<float, float>>> screenCentres;   // id, its centre on screen (for clicks)
 
+// the HDR picture into the one shown: the bright parts blurred and added (bloom), exposure, tone mapping, gamma
+static void finish(const Project& p, int w, int h) {
+    glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_STENCIL_TEST);
+    glBindVertexArray_(emptyVao);
+    const int bw = std::max(1, w / 2), bh = std::max(1, h / 2);
+    const bool bloom = p.bloom && p.bloomStrength > 0;
+    if (bloom) {
+        glViewport(0, 0, bw, bh);
+        glBindFramebuffer_(GL_FRAMEBUFFER, bloomFbo[0]);
+        glUseProgram_(progBright); glUniform1i_(uBrightSrc, 0); glUniform1f_(uBrightThr, p.bloomThreshold);
+        glActiveTexture_(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, hdrTex);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        glUseProgram_(progBlur); glUniform1i_(uBlurSrc, 0);
+        for (int it = 0; it < 4; ++it) for (int pass = 0; pass < 2; ++pass) {
+            glBindFramebuffer_(GL_FRAMEBUFFER, bloomFbo[1 - pass]);
+            glBindTexture(GL_TEXTURE_2D, bloomTex[pass]);
+            const float spread = 1.0f + it;
+            glUniform2f_(uBlurDir, pass == 0 ? spread / bw : 0.0f, pass == 0 ? 0.0f : spread / bh);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+        }
+    }
+    glBindFramebuffer_(GL_FRAMEBUFFER, fbo);
+    glViewport(0, 0, w, h);
+    glUseProgram_(progFinal);
+    glUniform1i_(uFinalHdr, 0); glUniform1i_(uFinalBloom, 1);
+    glUniform1f_(uFinalStrength, bloom ? p.bloomStrength : 0.0f); glUniform1f_(uFinalExposure, p.exposure); glUniform1i_(uFinalTone, p.toneMapping);
+    glActiveTexture_(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, hdrTex);
+    glActiveTexture_(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, bloomTex[0]);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glActiveTexture_(GL_TEXTURE0);
+    glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_BLEND);
+    glUseProgram_(prog);
+}
 unsigned render(const Project& p, int mi, int selected, int w, int h, bool hovered, int& picked) {
     picked = -1;
     if (w < 8 || h < 8) return 0;
@@ -760,7 +916,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     const float t = lk.time;
 
     ensureTarget(w, h);
-    glBindFramebuffer_(GL_FRAMEBUFFER, fbo);
+    glBindFramebuffer_(GL_FRAMEBUFFER, hdrFbo);
     glViewport(0, 0, w, h);
     glClearColor(0.10f, 0.10f, 0.10f, 1); glClearStencil(0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
@@ -776,12 +932,130 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     glUniform1i_(uTex, 0); glUniform4f_(uClip, 0, 0, 0, 1); glUniform1i_(uPick, 0);
     const float sy = m ? m->sunYaw * D2R : 0.6f, sp = m ? m->sunPitch * D2R : 0.9f;
     glUniform3f_(uSunDir, std::cos(sp) * std::sin(sy), std::sin(sp), std::cos(sp) * std::cos(sy));
-    if (m) { glUniform3f_(uSun, m->sun[0] * m->sunStrength, m->sun[1] * m->sunStrength, m->sun[2] * m->sunStrength); glUniform3f_(uAmbient, m->ambient[0], m->ambient[1], m->ambient[2]); }
-    else { glUniform3f_(uSun, 0.9f, 0.9f, 0.9f); glUniform3f_(uAmbient, 0.5f, 0.5f, 0.5f); }
+    auto lin = [](float c) { return std::pow(std::max(c, 0.0f), 2.2f); };   // colours are picked in sRGB; light is added up linearly
+    if (m) { glUniform3f_(uSun, lin(m->sun[0]) * m->sunStrength, lin(m->sun[1]) * m->sunStrength, lin(m->sun[2]) * m->sunStrength); glUniform3f_(uAmbient, lin(m->ambient[0]), lin(m->ambient[1]), lin(m->ambient[2])); }
+    else { glUniform3f_(uSun, 0.8f, 0.8f, 0.8f); glUniform3f_(uAmbient, 0.21f, 0.21f, 0.21f); }
+    glUniform3f_(uCamPos, eye[0], eye[1], eye[2]);
+    glUniform1i_(uDepthOnly, 0); glUniform1i_(uSunShadowOn, 0); glUniform1i_(uSpotIdx[0], -1); glUniform1i_(uSpotIdx[1], -1);
+    glUniform1i_(uSunShadow, 1); glUniform1i_(uSpotShadow[0], 2); glUniform1i_(uSpotShadow[1], 3);
+    curMat = Mat();
 
     // the window into the paper: its opening marked in the stencil first, so the desk leaves it open
     const bool portal = m && m->portal && anchorMode != 2;
     const M4 portalM = portal ? scale(m->portalSize[0], 1, m->portalSize[1]) : ident();
+    // the objects: world matrices down the hierarchy; opaque first, then see-through ones far to near
+    std::vector<Draw> draws;
+    screenCentres.clear();
+    lastWorld.clear();
+    float lp[64] = {0}, lc[64] = {0}, ld[64] = {0}; int nl = 0; int spotOf[2] = {-1, -1}; M4 spotVPm[2]; int nSpots = 0;
+    // where the phone would be (the Main Camera, in the editor): above the marker, before the face, standing in the room
+    const bool cameraSel = mi == -2;
+    if (cameraSel && !m && !p.markers.empty()) m = &p.markers[0];
+    M4 camWorld;
+    {
+        const float eyeP[3] = {0, anchorMode == 2 ? 0.0f : anchorMode == 3 ? 1.45f : 0.85f, anchorMode == 2 ? 2.0f : anchorMode == 3 ? 2.6f : 1.0f};
+        const float at[3] = {0, anchorMode == 3 ? 0.55f : 0.0f, anchorMode == 2 ? headAt[2] : anchorMode == 3 ? -0.6f : 0.0f};
+        float f[3] = {at[0] - eyeP[0], at[1] - eyeP[1], at[2] - eyeP[2]}; float fl = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]); for (auto& v : f) v /= fl;
+        float r[3] = {-f[2], 0, f[0]}; float rl = std::sqrt(r[0] * r[0] + r[2] * r[2]); if (rl < 1e-5f) { r[0] = 1; rl = 1; } for (auto& v : r) v /= rl;
+        const float u[3] = {r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]};
+        camWorld = ident();
+        for (int k = 0; k < 3; ++k) { camWorld.m[k] = r[k]; camWorld.m[4 + k] = u[k]; camWorld.m[8 + k] = -f[k]; camWorld.m[12 + k] = eyeP[k]; }
+    }
+    auto placeAll = [&](const Marker& mk, const M4& base) {
+        std::map<int, M4> worldOf;
+        for (const Object& o : mk.objects) {
+            if (!o.active) continue;
+            bool parentOn = o.parent == -1;
+            M4 parent = base;
+            if (o.parent != -1) { auto it = worldOf.find(o.parent); if (it == worldOf.end()) continue; parent = it->second; parentOn = true; }
+            if (!parentOn) continue;
+            M4 world = mul(parent, localOf(o, t, nullptr));
+            if (o.hasFollower && o.followerOn) {   // path following: on its path, facing the way it goes
+                for (const Object& q : mk.objects) if (q.hasPath && q.active && q.pathName == o.followPath) {
+                    const auto pts = ArNav::fromFlat(q.pathPoints);
+                    const ArNav::Pose pose = ArNav::at(pts, o.followOnStart ? o.followSpeed * t : 0, o.followLoop);
+                    const M4 own = localOf(o, t, nullptr);   // its own Position: an offset from the path (e.g. up off the floor)
+                    world = mul(mul(mul(base, worldAt(mk, q, t)), mul(translate(pose.p.x, pose.p.y, pose.p.z), rotY(pose.yaw))), own);
+                    break;
+                }
+            }
+            worldOf[o.id] = world;
+            lastWorld[o.id] = {world, parent};
+            const float c[3] = {world.m[12], world.m[13], world.m[14]};
+            const float vz = viewM.m[2] * c[0] + viewM.m[6] * c[1] + viewM.m[10] * c[2] + viewM.m[14];
+            const bool extras = (o.hasParticles && o.particlesOn) || (o.hasLine && o.lineOn) || (o.hasTrail && o.trailOn) || (o.hasPath && o.pathOn);
+            if (extras) draws.push_back({world, &o, vz, portal && c[1] < -0.01f, true, 1});
+            if (o.hasLight && o.lightOn && nl < 16) {   // its light, for the shader
+                const float fwd[3] = {-world.m[8], -world.m[9], -world.m[10]};
+                const float fl = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]) + 1e-6f;
+                float* P = &lp[nl * 4]; float* C = &lc[nl * 4]; float* Dd = &ld[nl * 4];
+                P[0] = world.m[12]; P[1] = world.m[13]; P[2] = world.m[14]; P[3] = (float)o.lightType;
+                for (int k = 0; k < 3; ++k) { C[k] = std::pow(std::max(o.lightColour[k], 0.0f), 2.2f) * o.lightIntensity; Dd[k] = fwd[k] / fl; }
+                C[3] = o.lightRange; Dd[3] = std::cos(o.spotAngle * 0.5f * D2R);
+                if (o.lightType == 1 && o.lightShadows && nSpots < 2 && p.shadows) {   // a spot light's shadows: a view from it
+                    const float at[3] = {P[0] + Dd[0], P[1] + Dd[1], P[2] + Dd[2]};
+                    float upAt[3] = {at[0], at[1], at[2]}; if (std::fabs(Dd[1]) > 0.99f) upAt[2] += 0.01f;
+                    spotVPm[nSpots] = mul(perspective(std::min(3.0f, o.spotAngle * D2R + 0.2f), 1, 0.02f, std::max(0.1f, o.lightRange * 1.2f)), lookAt(P, upAt));
+                    spotOf[nSpots++] = nl;
+                }
+                ++nl;
+            }
+            if (!o.lookOn || o.kind == EMPTY) continue;   // (its children are placed already)
+            const bool blend = !o.occluder && (o.kind == PICTURE || o.kind == SPRITES || o.kind == RAYS || o.kind == WORDS || o.colour[3] < 0.999f || o.glow || (o.hasVideo && o.videoAlpha));
+            draws.push_back({world, &o, vz, portal && c[1] < -0.01f, blend, 0});
+            // where it is on screen (for clicking it)
+            const float cc[4] = {c[0], c[1], c[2], 1};
+            float clip[4] = {0, 0, 0, 0};
+            for (int r = 0; r < 4; ++r) clip[r] = viewProj.m[r] * cc[0] + viewProj.m[4 + r] * cc[1] + viewProj.m[8 + r] * cc[2] + viewProj.m[12 + r];
+            if (clip[3] > 0) screenCentres.push_back({o.id, {(clip[0] / clip[3] * 0.5f + 0.5f) * w, (1 - (clip[1] / clip[3] * 0.5f + 0.5f)) * h}});
+        }
+    };
+    if (m) placeAll(*m, ident());
+    placeAll(p.camera, camWorld);   // what rides with the phone
+
+    // shadows: the sun's view (and spot lights') of what casts them, into depth maps first
+    bool sunShadow = false;
+    ensureShadows(p.shadows ? (p.shadowQuality == 0 ? 1024 : p.shadowQuality == 2 ? 4096 : 2048) : (shadowSize ? shadowSize : 1024));
+    if (p.shadows) {
+        const M4 keepVP = viewProj;
+        glBindFramebuffer_(GL_FRAMEBUFFER, shadowFbo);
+        glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);
+        glViewport(0, 0, shadowSize, shadowSize);
+        glUniform1i_(uDepthOnly, 1);
+        glDisable(GL_BLEND); glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(1.5f, 3.0f);
+        auto pass = [&](GLuint depth, const M4& vp) {
+            glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
+            glClear(GL_DEPTH_BUFFER_BIT);
+            viewProj = vp;
+            for (const Draw& d : draws) if (d.part == 0 && d.o->castShadows && !d.o->glow && !d.o->occluder && d.o->kind != RAYS) drawObject(d, t);
+        };
+        M4 sunVPm = ident();
+        if (!m || m->sunShadows) {
+            const float R = anchorMode == 3 ? 4.0f : anchorMode == 2 ? 1.6f : 1.6f;
+            const float c[3] = {0, anchorMode == 3 ? 0.5f : 0.0f, anchorMode == 3 ? -0.6f : 0.0f};
+            const float sy = m ? m->sunYaw * D2R : 0.6f, sp = m ? m->sunPitch * D2R : 0.9f;
+            const float sd[3] = {std::cos(sp) * std::sin(sy), std::sin(sp), std::cos(sp) * std::cos(sy)};
+            float sunEye[3] = {c[0] + sd[0] * R * 2.5f, c[1] + sd[1] * R * 2.5f, c[2] + sd[2] * R * 2.5f};
+            if (std::fabs(sd[1]) > 0.995f) sunEye[2] += 0.02f;
+            M4 orth = ident(); orth.m[0] = 1 / R; orth.m[5] = 1 / R; orth.m[10] = -2 / (R * 5.0f); orth.m[14] = -1;   // near 0, far 5R
+            sunVPm = mul(orth, lookAt(sunEye, c));
+            pass(shadowTex[0], sunVPm);
+            sunShadow = true;
+        }
+        for (int i = 0; i < nSpots; ++i) pass(shadowTex[1 + i], spotVPm[i]);
+        glDisable(GL_POLYGON_OFFSET_FILL);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE); glEnable(GL_BLEND);
+        glUniform1i_(uDepthOnly, 0);
+        viewProj = keepVP;
+        glBindFramebuffer_(GL_FRAMEBUFFER, hdrFbo);
+        glViewport(0, 0, w, h);
+        glUniformMatrix4fv_(uSunVP, 1, GL_FALSE, sunVPm.m); glUniform1i_(uSunShadowOn, sunShadow ? 1 : 0);
+        for (int i = 0; i < 2; ++i) { glUniformMatrix4fv_(uSpotVP[i], 1, GL_FALSE, spotVPm[i].m); glUniform1i_(uSpotIdx[i], i < nSpots ? spotOf[i] : -1); }
+    }
+    for (int i = 0; i < 3; ++i) { glActiveTexture_(GL_TEXTURE1 + i); glBindTexture(GL_TEXTURE_2D, shadowTex[i]); }   // always: shadow samplers want depth maps
+    glActiveTexture_(GL_TEXTURE0);
+
     if (portal) {
         glEnable(GL_STENCIL_TEST);
         glStencilFunc(GL_ALWAYS, 1, 0xff); glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
@@ -840,69 +1114,6 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
         setCommon(mul(portalM, scale(1, 1.5f, 1)), c, 0, true); draw(mPortalBox);
     }
 
-    // the objects: world matrices down the hierarchy; opaque first, then see-through ones far to near
-    std::vector<Draw> draws;
-    screenCentres.clear();
-    lastWorld.clear();
-    float lp[32] = {0}, lc[32] = {0}, ld[32] = {0}; int nl = 0;
-    // where the phone would be (the Main Camera, in the editor): above the marker, before the face, standing in the room
-    const bool cameraSel = mi == -2;
-    if (cameraSel && !m && !p.markers.empty()) m = &p.markers[0];
-    M4 camWorld;
-    {
-        const float eyeP[3] = {0, anchorMode == 2 ? 0.0f : anchorMode == 3 ? 1.45f : 0.85f, anchorMode == 2 ? 2.0f : anchorMode == 3 ? 2.6f : 1.0f};
-        const float at[3] = {0, anchorMode == 3 ? 0.55f : 0.0f, anchorMode == 2 ? headAt[2] : anchorMode == 3 ? -0.6f : 0.0f};
-        float f[3] = {at[0] - eyeP[0], at[1] - eyeP[1], at[2] - eyeP[2]}; float fl = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]); for (auto& v : f) v /= fl;
-        float r[3] = {-f[2], 0, f[0]}; float rl = std::sqrt(r[0] * r[0] + r[2] * r[2]); if (rl < 1e-5f) { r[0] = 1; rl = 1; } for (auto& v : r) v /= rl;
-        const float u[3] = {r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]};
-        camWorld = ident();
-        for (int k = 0; k < 3; ++k) { camWorld.m[k] = r[k]; camWorld.m[4 + k] = u[k]; camWorld.m[8 + k] = -f[k]; camWorld.m[12 + k] = eyeP[k]; }
-    }
-    auto placeAll = [&](const Marker& mk, const M4& base) {
-        std::map<int, M4> worldOf;
-        for (const Object& o : mk.objects) {
-            if (!o.active) continue;
-            bool parentOn = o.parent == -1;
-            M4 parent = base;
-            if (o.parent != -1) { auto it = worldOf.find(o.parent); if (it == worldOf.end()) continue; parent = it->second; parentOn = true; }
-            if (!parentOn) continue;
-            M4 world = mul(parent, localOf(o, t, nullptr));
-            if (o.hasFollower && o.followerOn) {   // path following: on its path, facing the way it goes
-                for (const Object& q : mk.objects) if (q.hasPath && q.active && q.pathName == o.followPath) {
-                    const auto pts = ArNav::fromFlat(q.pathPoints);
-                    const ArNav::Pose pose = ArNav::at(pts, o.followOnStart ? o.followSpeed * t : 0, o.followLoop);
-                    const M4 own = localOf(o, t, nullptr);   // its own Position: an offset from the path (e.g. up off the floor)
-                    world = mul(mul(mul(base, worldAt(mk, q, t)), mul(translate(pose.p.x, pose.p.y, pose.p.z), rotY(pose.yaw))), own);
-                    break;
-                }
-            }
-            worldOf[o.id] = world;
-            lastWorld[o.id] = {world, parent};
-            const float c[3] = {world.m[12], world.m[13], world.m[14]};
-            const float vz = viewM.m[2] * c[0] + viewM.m[6] * c[1] + viewM.m[10] * c[2] + viewM.m[14];
-            const bool extras = (o.hasParticles && o.particlesOn) || (o.hasLine && o.lineOn) || (o.hasTrail && o.trailOn) || (o.hasPath && o.pathOn);
-            if (extras) draws.push_back({world, &o, vz, portal && c[1] < -0.01f, true, 1});
-            if (o.hasLight && o.lightOn && nl < 8) {   // its light, for the shader
-                const float fwd[3] = {-world.m[8], -world.m[9], -world.m[10]};
-                const float fl = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]) + 1e-6f;
-                float* P = &lp[nl * 4]; float* C = &lc[nl * 4]; float* Dd = &ld[nl * 4];
-                P[0] = world.m[12]; P[1] = world.m[13]; P[2] = world.m[14]; P[3] = (float)o.lightType;
-                for (int k = 0; k < 3; ++k) { C[k] = o.lightColour[k] * o.lightIntensity; Dd[k] = fwd[k] / fl; }
-                C[3] = o.lightRange; Dd[3] = std::cos(o.spotAngle * 0.5f * D2R);
-                ++nl;
-            }
-            if (!o.lookOn || o.kind == EMPTY) continue;   // (its children are placed already)
-            const bool blend = !o.occluder && (o.kind == PICTURE || o.kind == SPRITES || o.kind == RAYS || o.kind == WORDS || o.colour[3] < 0.999f || o.glow || (o.hasVideo && o.videoAlpha));
-            draws.push_back({world, &o, vz, portal && c[1] < -0.01f, blend, 0});
-            // where it is on screen (for clicking it)
-            const float cc[4] = {c[0], c[1], c[2], 1};
-            float clip[4] = {0, 0, 0, 0};
-            for (int r = 0; r < 4; ++r) clip[r] = viewProj.m[r] * cc[0] + viewProj.m[4 + r] * cc[1] + viewProj.m[8 + r] * cc[2] + viewProj.m[12 + r];
-            if (clip[3] > 0) screenCentres.push_back({o.id, {(clip[0] / clip[3] * 0.5f + 0.5f) * w, (1 - (clip[1] / clip[3] * 0.5f + 0.5f)) * h}});
-        }
-    };
-    if (m) placeAll(*m, ident());
-    placeAll(p.camera, camWorld);   // what rides with the phone
     std::stable_sort(draws.begin(), draws.end(), [](const Draw& a, const Draw& b) {
         if (a.blend != b.blend) return !a.blend;
         if (!a.blend && a.o->occluder != b.o->occluder) return a.o->occluder;   // occluders first: they hide what's behind
@@ -912,11 +1123,15 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     // with a window into the paper, each object is cut at the paper: below it only shows through the opening
     if (portal) glEnable(GL_CLIP_DISTANCE0);
     for (const Draw& d : draws) {
+        const Object& o = *d.o;   // its material
+        curMat.metallic = o.metallic; curMat.roughness = o.roughness; curMat.receive = o.receiveShadows;
+        for (int k = 0; k < 3; ++k) curMat.emissive[k] = std::pow(std::max(o.emissive[k], 0.0f), 2.2f) * o.emissiveStrength;
         if (portal) {
             glStencilFunc(GL_EQUAL, 1, 0xff); glUniform4f_(uClip, 0, -1, 0, 0); drawObject(d, t);
             glStencilFunc(GL_ALWAYS, 0, 0xff); glUniform4f_(uClip, 0, 1, 0, 0); drawObject(d, t);
         } else drawObject(d, t);
     }
+    curMat = Mat();
     glDisable(GL_CLIP_DISTANCE0); glUniform4f_(uClip, 0, 0, 0, 1);
     glDisable(GL_STENCIL_TEST);
     if (lk.gizmo) {   // the Main Camera: a phone's view (portrait), from where it'd be held
@@ -986,7 +1201,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
             glEnable(GL_DEPTH_TEST);
         }
     }
-    glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+    finish(p, w, h);
     (void)lastPicked;
     return fboTex;
 }

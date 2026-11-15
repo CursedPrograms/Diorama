@@ -37,11 +37,16 @@ struct Object {
     std::vector<Script> scripts;
     std::string prefab;                // the prefab it was placed from ("" none)
     bool occluder = false;             // material: invisible, but hides what's behind it (a real thing's stand-in)
+    // PBR material (lit things): metal or not, rough or shiny, and light of its own; shadows
+    float metallic = 0, roughness = 0.6f;
+    float emissive[3] = {1, 1, 1}; float emissiveStrength = 0;
+    bool castShadows = true, receiveShadows = true;
     // Light
     bool hasLight = false, lightOn = true;
     int lightType = 0;                 // 0 point, 1 spot, 2 directional (along the object's -Z... its forward)
     float lightColour[3] = {1, 0.95f, 0.85f};
     float lightIntensity = 1.5f, lightRange = 1.5f, spotAngle = 40;
+    bool lightShadows = false;         // spot and directional lights can cast shadows
     // Audio Source
     bool hasAudio = false, audioOn = true;
     std::string audioFile;
@@ -144,6 +149,8 @@ struct Marker {
     // a window into the marker: what's under the paper only shows through this opening
     bool portal = false;
     float portalSize[2] = {0.9f, 0.9f};
+    bool sunShadows = true;            // the sun casts shadows
+    bool shadowCatcher = true;         // shadows fall on the real paper, table or floor (an invisible plane that only shows them)
     // Surfaces: AR Foundation's AR Plane Manager (and where this anchor's things go). In metres: 1 = 1 m.
     int planeDetect = 2;               // 0 horizontal (floors, tables), 1 vertical (walls), 2 both
     bool showPlanes = true;            // the dotted look on what's found
@@ -177,6 +184,10 @@ struct Project {
     std::string platform = "web";      // web, windows, linux, pi, android
     int windowsRuntime = 0;            // 0 JavaScript (WebView2), 1 C++ (Diorama's native player)
     int renderer = 0;                  // the JavaScript runtime's drawing: 0 WebGL 2, 1 WebGPU (WebGL 2 where there's none)
+    // Graphics (the editor's view shows them too)
+    bool shadows = true; int shadowQuality = 1;        // 0 1024, 1 2048, 2 4096
+    bool bloom = true; float bloomStrength = 0.6f, bloomThreshold = 0.9f;
+    int toneMapping = 1; float exposure = 1;          // 0 none, 1 PBR Neutral (colours kept), 2 ACES (filmic)
     // Player Settings
     std::string company = "Cursed Entertainment", version = "1.0";
     std::string packageId;             // Android; "" = com.cursedentertainment.<game>

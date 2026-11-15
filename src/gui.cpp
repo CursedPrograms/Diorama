@@ -1387,6 +1387,17 @@ static void buildSettings() {
             : "Markers draw with the one picked (three.js r172).");
         ImGui::PopTextWrapPos();
     }
+    {
+        ImGui::Checkbox("Shadows", &proj.shadows); ImGui::SameLine(160);
+        const char* qs[] = {"1024", "2048", "4096"}; ImGui::SetNextItemWidth(110); ImGui::Combo("##sq", &proj.shadowQuality, qs, 3); tip("The shadow map's size: sharper, slower");
+        ImGui::Checkbox("Bloom", &proj.bloom); tip("Bright and glowing things bleed light");
+        if (proj.bloom) { ImGui::SameLine(160); ImGui::SetNextItemWidth(160); ImGui::SliderFloat("##bs", &proj.bloomStrength, 0, 2, "strength %.2f");
+                          ImGui::SameLine(); ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##bt", &proj.bloomThreshold, 0, 2, "from %.2f"); }
+        const char* tms[] = {"None", "PBR Neutral (colours kept)", "ACES (filmic)"};
+        labelled("Tone mapping"); ImGui::Combo("##tm", &proj.toneMapping, tms, 3);
+        labelled("Exposure"); ImGui::SliderFloat("##exp", &proj.exposure, 0.2f, 3, "%.2f");
+        ImGui::TextDisabled("The editor's view shows these too. AR on phones (WebXR) and MindAR have no bloom.");
+    }
     ImGui::SeparatorText("Player Settings");
     { char b[128]; snprintf(b, sizeof b, "%s", proj.title.c_str()); labelled("Game name"); if (ImGui::InputText("##gname", b, sizeof b) && b[0]) proj.title = b; }
     text("Company", proj.company);
@@ -2241,6 +2252,8 @@ static void markerInspector(Scene::Marker& m) {
         labelled("Strength"); ImGui::SliderFloat("##str", &m.sunStrength, 0, 2, "%.2f");
         labelled("Direction"); ImGui::SliderFloat("##yaw", &m.sunYaw, -180, 180, "%.0f\xc2\xb0 round");
         labelled("Height"); ImGui::SliderFloat("##pitch", &m.sunPitch, 5, 90, "%.0f\xc2\xb0 up");
+        ImGui::Checkbox("The sun casts shadows", &m.sunShadows);
+        ImGui::Checkbox("Shadows on the real world", &m.shadowCatcher); tip("An invisible floor that only shows shadows: they fall on the printed paper, the table or the floor");
     }
     if ((proj.tracking == TRACK_MARKERS || proj.tracking == TRACK_IMAGES) && section("Window into the marker")) {
         ImGui::Checkbox("Show what's under the paper only through an opening", &m.portal);
@@ -2533,6 +2546,13 @@ static void objectInspector(Scene::Marker& m, Object& o) {
                 ImGui::Checkbox("Lit", &o.lit); tip("Shaded by the marker's lights");
                 ImGui::SameLine(); ImGui::Checkbox("Glow", &o.glow); tip("Added on as light (god rays, sparks)");
                 if (o.kind == QUAD || o.kind == PICTURE || o.kind == WORDS) { ImGui::SameLine(); ImGui::Checkbox("Faces the phone", &o.billboard); }
+                if (o.lit && !o.glow) {   // PBR: how it takes the light
+                    labelled("Metallic"); ImGui::SliderFloat("##met", &o.metallic, 0, 1, "%.2f"); tip("0: paint, plastic, wood; 1: metal (it takes the lights' colour)");
+                    labelled("Roughness"); ImGui::SliderFloat("##rough", &o.roughness, 0.02f, 1, "%.2f"); tip("0: a mirror shine; 1: chalk");
+                }
+                labelled("Emissive"); ImGui::ColorEdit3("##emc", o.emissive, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+                ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##ems", &o.emissiveStrength, 0, 10, "light %.2f"); tip("Light of its own (it glows; bloom makes it bleed)");
+                ImGui::Checkbox("Casts shadows", &o.castShadows); ImGui::SameLine(); ImGui::Checkbox("Gets shadows", &o.receiveShadows);
                 ImGui::Checkbox("Occluder", &o.occluder); tip("Invisible in the game, but hides what's behind it:\na stand-in for a real thing (a box, a wall) so the AR goes behind it");
             }
         }
@@ -2638,8 +2658,8 @@ static void objectInspector(Scene::Marker& m, Object& o) {
                 labelled("Intensity"); ImGui::SliderFloat("##li", &o.lightIntensity, 0, 5, "%.2f");
                 if (o.lightType != 2) { labelled("Range"); ImGui::SliderFloat("##lr", &o.lightRange, 0.05f, 10, "%.2f"); }
                 if (o.lightType == 1) { labelled("Spot angle"); ImGui::SliderFloat("##sa", &o.spotAngle, 1, 170, "%.0f\xc2\xb0"); }
-                if (o.lightType != 0) ImGui::TextDisabled("It shines along the object's forward (-Z).");
-                ImGui::TextDisabled("Lights the Lit things on its marker (up to 8 lights).");
+                if (o.lightType != 0) { ImGui::Checkbox("Casts shadows", &o.lightShadows); ImGui::TextDisabled("It shines along the object's forward (-Z)."); }
+                ImGui::TextDisabled("Lights the Lit things on its anchor (up to 16 lights).");
             }
         }
     }
