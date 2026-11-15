@@ -39,6 +39,7 @@ GLF(void, glUniform1i, (GLint, GLint))
 GLF(void, glUniform1f, (GLint, GLfloat))
 GLF(void, glUniform3f, (GLint, GLfloat, GLfloat, GLfloat))
 GLF(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat))
+GLF(void, glUniform4fv, (GLint, GLsizei, const GLfloat*))
 GLF(void, glGenVertexArrays, (GLsizei, GLuint*))
 GLF(void, glBindVertexArray, (GLuint))
 GLF(void, glGenBuffers, (GLsizei, GLuint*))
@@ -127,7 +128,7 @@ static void apply(const M4& m, const float* p, float* o) { for (int r = 0; r < 3
 static bool loadGL() {
 #define L(name) name##_ = (PFN_##name)SDL_GL_GetProcAddress(#name); if (!name##_) return false;
     L(glCreateShader) L(glShaderSource) L(glCompileShader) L(glCreateProgram) L(glAttachShader) L(glLinkProgram) L(glUseProgram)
-    L(glGetUniformLocation) L(glUniformMatrix4fv) L(glUniform1i) L(glUniform1f) L(glUniform3f) L(glUniform4f) L(glGenVertexArrays)
+    L(glGetUniformLocation) L(glUniformMatrix4fv) L(glUniform1i) L(glUniform1f) L(glUniform3f) L(glUniform4f) L(glUniform4fv) L(glGenVertexArrays)
     L(glBindVertexArray) L(glGenBuffers) L(glBindBuffer) L(glBufferData) L(glEnableVertexAttribArray) L(glVertexAttribPointer)
     L(glGenFramebuffers) L(glBindFramebuffer) L(glFramebufferTexture2D) L(glGenRenderbuffers) L(glBindRenderbuffer)
     L(glRenderbufferStorage) L(glFramebufferRenderbuffer) L(glGenerateMipmap) L(glActiveTexture)
@@ -143,7 +144,7 @@ static GLuint program(const char* vs, const char* fs) {
 }
 
 static GLuint prog = 0, progLine = 0;
-static GLint uClip, uPick, uPickCol; static GLint uMVP, uModel, uColour, uUseTex, uLit, uSunDir, uSun, uAmbient, uTex, uLineMVP, uLineColour;
+static GLint uClip, uPick, uPickCol, uNL, uLPos, uLCol, uLDir; static GLint uMVP, uModel, uColour, uUseTex, uLit, uSunDir, uSun, uAmbient, uTex, uLineMVP, uLineColour;
 
 struct Mesh { GLuint vao = 0, vbo = 0, ibo = 0; int count = 0; };   // interleaved pos 3, normal 3, uv 2
 static Mesh upload(const std::vector<float>& v, const std::vector<unsigned>& idx, bool dynamic = false) {
@@ -355,7 +356,7 @@ static const Tex& words(const std::string& text) {
     return wordTex[text] = t;
 }
 
-static GLuint rayTex = 0, markerTex = 0, deskTex = 0, whiteTex = 0;
+static GLuint rayTex = 0, markerTex = 0, deskTex = 0, whiteTex = 0, dotTex = 0;
 static int markerW = 1, markerH = 1;
 static int anchorMode = 0; static float headAt[3] = {0, 0, -0.6f};
 void setAnchorMode(int mode, const float head[3]) { anchorMode = mode; if (head) memcpy(headAt, head, sizeof headAt); }
@@ -370,17 +371,25 @@ bool init(const std::string& dir) {
     if (!loadGL()) return false;
     prog = program(
         "#version 330\nlayout(location=0) in vec3 p; layout(location=1) in vec3 n; layout(location=2) in vec2 t;\n"
-        "uniform mat4 mvp, model; uniform vec4 clipPlane; out vec3 N; out vec2 T;\n"
-        "void main(){ gl_Position = mvp * vec4(p,1); N = mat3(model) * n; T = t; gl_ClipDistance[0] = dot(model * vec4(p,1), clipPlane); }",
-        "#version 330\nin vec3 N; in vec2 T; uniform sampler2D tex; uniform vec4 colour; uniform int useTex, lit;\n"
+        "uniform mat4 mvp, model; uniform vec4 clipPlane; out vec3 N; out vec2 T; out vec3 W;\n"
+        "void main(){ gl_Position = mvp * vec4(p,1); N = mat3(model) * n; T = t; W = (model * vec4(p,1)).xyz; gl_ClipDistance[0] = dot(model * vec4(p,1), clipPlane); }",
+        "#version 330\nin vec3 N; in vec2 T; in vec3 W; uniform sampler2D tex; uniform vec4 colour; uniform int useTex, lit;\n"
         "uniform vec3 sunDir, sun, ambient; uniform int pick; uniform vec3 pickCol; out vec4 o;\n"
+        "uniform int nLights; uniform vec4 lPos[8], lCol[8], lDir[8];   // xyz + type; rgb + range; direction + cos(cone)\n"
         "void main(){ vec4 c = colour; if (useTex == 1) c *= texture(tex, T); if (c.a < 0.01) discard;\n"
         "  if (pick == 1) { if (c.a < 0.35) discard; o = vec4(pickCol, 1); return; }\n"
-        "  if (lit == 1) { vec3 n = normalize(N); if (!gl_FrontFacing) n = -n; c.rgb *= ambient + sun * max(dot(n, sunDir), 0.0); }\n"
+        "  if (lit == 1) { vec3 n = normalize(N); if (!gl_FrontFacing) n = -n; vec3 l = ambient + sun * max(dot(n, sunDir), 0.0);\n"
+        "    for (int i = 0; i < nLights; ++i) {\n"
+        "      vec3 L; float a = 1.0;\n"
+        "      if (lPos[i].w > 1.5) L = -lDir[i].xyz; else { vec3 d = lPos[i].xyz - W; float dist = length(d); L = d / max(dist, 1e-4);\n"
+        "        a = pow(clamp(1.0 - dist / max(lCol[i].w, 1e-3), 0.0, 1.0), 2.0);\n"
+        "        if (lPos[i].w > 0.5) a *= smoothstep(lDir[i].w, lDir[i].w + 0.08, dot(-L, lDir[i].xyz)); }\n"
+        "      l += lCol[i].rgb * a * max(dot(n, L), 0.0); }\n"
+        "    c.rgb *= l; }\n"
         "  o = c; }");
     uMVP = glGetUniformLocation_(prog, "mvp"); uModel = glGetUniformLocation_(prog, "model"); uColour = glGetUniformLocation_(prog, "colour");
     uUseTex = glGetUniformLocation_(prog, "useTex"); uLit = glGetUniformLocation_(prog, "lit"); uSunDir = glGetUniformLocation_(prog, "sunDir");
-    uSun = glGetUniformLocation_(prog, "sun"); uAmbient = glGetUniformLocation_(prog, "ambient"); uTex = glGetUniformLocation_(prog, "tex"); uClip = glGetUniformLocation_(prog, "clipPlane"); uPick = glGetUniformLocation_(prog, "pick"); uPickCol = glGetUniformLocation_(prog, "pickCol");
+    uSun = glGetUniformLocation_(prog, "sun"); uAmbient = glGetUniformLocation_(prog, "ambient"); uTex = glGetUniformLocation_(prog, "tex"); uClip = glGetUniformLocation_(prog, "clipPlane"); uNL = glGetUniformLocation_(prog, "nLights"); uLPos = glGetUniformLocation_(prog, "lPos"); uLCol = glGetUniformLocation_(prog, "lCol"); uLDir = glGetUniformLocation_(prog, "lDir"); uPick = glGetUniformLocation_(prog, "pick"); uPickCol = glGetUniformLocation_(prog, "pickCol");
     progLine = program(
         "#version 330\nlayout(location=0) in vec3 p; uniform mat4 mvp; void main(){ gl_Position = mvp * vec4(p,1); }",
         "#version 330\nuniform vec4 colour; out vec4 o; void main(){ o = colour; }");
@@ -394,6 +403,11 @@ bool init(const std::string& dir) {
           unsigned char* p = &r[(y * 64 + x) * 4]; p[0] = p[1] = p[2] = 255; p[3] = (unsigned char)(a * 255); }
       rayTex = texUpload(r.data(), 64, 64); }
     { const unsigned char w[4] = {255, 255, 255, 255}; whiteTex = texUpload(w, 1, 1, false); }
+    { std::vector<unsigned char> d(64 * 64 * 4);
+      for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) {
+          const float r = std::sqrt((x - 31.5f) * (x - 31.5f) + (y - 31.5f) * (y - 31.5f)) / 31.5f;
+          unsigned char* q = &d[(y * 64 + x) * 4]; q[0] = q[1] = q[2] = 255; q[3] = (unsigned char)(255 * std::pow(std::max(0.0f, 1 - r), 1.6f)); }
+      dotTex = texUpload(d.data(), 64, 64); }
     // a plain desk: mid grey with a faint grain
     { std::vector<unsigned char> d(256 * 256 * 4);
       for (int y = 0; y < 256; ++y) for (int x = 0; x < 256; ++x) {
@@ -423,7 +437,7 @@ static void ensureTarget(int w, int h) {
 }
 
 // ---------- drawing ----------
-struct Draw { M4 world; const Object* o; float depth; bool inside; bool blend; };
+struct Draw { M4 world; const Object* o; float depth; bool inside; bool blend; int part = 0; };
 static M4 viewProj, viewM;
 static float eye[3];
 static const Marker* curMarker = nullptr;
@@ -462,12 +476,17 @@ static M4 facing(const M4& w, float sx, float sy) {
 }
 static float lengthCol(const M4& w, int c) { return std::sqrt(w.m[c * 4] * w.m[c * 4] + w.m[c * 4 + 1] * w.m[c * 4 + 1] + w.m[c * 4 + 2] * w.m[c * 4 + 2]); }
 
+static void drawExtras(const Draw& d, float t);
 static void drawObject(const Draw& d, float t) {
+    if (d.part == 1) { drawExtras(d, t); return; }
     const Object& o = *d.o;
+    if (o.occluder) glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     float om = 1; localOf(o, t, &om);
     float col[4] = {o.colour[0], o.colour[1], o.colour[2], o.colour[3] * om};
     if (o.glow) glBlendFunc(GL_SRC_ALPHA, GL_ONE); else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    const GLuint tex = o.file.empty() ? 0 : texture(o.file).id;
+    // a Video Player shows its first frame (made by ffmpeg beside the video) where the look has no texture
+    const GLuint tex = !o.file.empty() ? texture(o.file).id
+                     : o.hasVideo && o.videoOn && !o.videoFile.empty() ? texture(o.videoFile + ".poster.jpg").id : 0;
     switch (o.kind) {
     case PLANE: setCommon(d.world, col, tex, o.lit); draw(mPlane); break;
     case CUBE: setCommon(d.world, col, tex, o.lit); draw(mCube); break;
@@ -541,6 +560,88 @@ static void drawObject(const Draw& d, float t) {
     default: break;
     }
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (o.occluder) glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+}
+
+
+// an object's world at another time (its trail): its own animation and its parents', walked up
+static M4 worldAt(const Marker& m, const Object& o, float t) {
+    M4 w = localOf(o, t, nullptr);
+    for (int pid = o.parent; pid != -1;) {
+        const int i = indexOfId(m, pid);
+        if (i < 0) break;
+        w = mul(localOf(m.objects[i], t, nullptr), w);
+        pid = m.objects[i].parent;
+    }
+    return w;
+}
+// a thin box from a to b (lines and trails), width across
+static void segment(const float* a, const float* b, float width, const float* col) {
+    float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (len < 1e-5f) return;
+    for (auto& v : d) v /= len;
+    // a basis with y along the segment
+    float x[3] = {d[1], -d[0], 0}; if (std::fabs(d[2]) < 0.9f) { x[0] = -d[1]; x[1] = d[0]; x[2] = 0; } else { x[0] = 0; x[1] = d[2]; x[2] = -d[1]; }
+    float xl = std::sqrt(x[0] * x[0] + x[1] * x[1] + x[2] * x[2]); for (auto& v : x) v /= xl;
+    const float z[3] = {x[1] * d[2] - x[2] * d[1], x[2] * d[0] - x[0] * d[2], x[0] * d[1] - x[1] * d[0]};
+    M4 m = ident();
+    for (int k = 0; k < 3; ++k) { m.m[k] = x[k] * width; m.m[4 + k] = d[k] * len; m.m[8 + k] = z[k] * width; m.m[12 + k] = (a[k] + b[k]) / 2; }
+    setCommon(m, col, 0, false); draw(mCube);
+}
+static void drawExtras(const Draw& d, float t) {
+    const Object& o = *d.o;
+    if (o.hasParticles && o.particlesOn) {
+        // each slot k is born at k / rate and lives pLife, then again: a function of time, the same in the game
+        const int n = std::min(600, std::max(1, (int)std::ceil(o.pRate * o.pLife)));
+        const float T = n / std::max(0.01f, o.pRate);
+        const GLuint tx = o.particleFile.empty() ? dotTex : texture(o.particleFile).id;
+        glDepthMask(GL_FALSE);
+        glBlendFunc(GL_SRC_ALPHA, o.pGlow ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+        const float spread = o.pSpread * D2R;
+        for (int k = 0; k < n; ++k) {
+            const float since = t - k / o.pRate;
+            if (since < 0) continue;
+            const int cycle = (int)std::floor(since / T);
+            const float age = since - cycle * T;
+            if (age > o.pLife) continue;
+            const float u = age / std::max(0.001f, o.pLife);
+            const int seed = k * 131 + cycle * 7919;
+            const float az = hash(seed, 1) * 6.2831853f, el = spread * std::sqrt(hash(seed, 2));
+            const float dir[3] = {std::sin(el) * std::cos(az), std::cos(el), std::sin(el) * std::sin(az)};
+            const float sp = o.pSpeed * (0.7f + 0.6f * hash(seed, 3));
+            const float lp[3] = {dir[0] * sp * age, dir[1] * sp * age - 0.5f * o.pGravity * age * age, dir[2] * sp * age};
+            float wp[3]; apply(d.world, lp, wp);
+            float c[4]; for (int q = 0; q < 4; ++q) c[q] = o.pColourStart[q] + (o.pColourEnd[q] - o.pColourStart[q]) * u;
+            const float sz = o.pSizeStart + (o.pSizeEnd - o.pSizeStart) * u;
+            setCommon(mul(facing(translate(wp[0], wp[1], wp[2]), sz, sz), rotX(-1.5707963f)), c, tx, false);
+            draw(mPicture);
+        }
+        glDepthMask(GL_TRUE);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+    if (o.hasLine && o.lineOn) {
+        const size_t np = o.linePoints.size() / 3;
+        for (size_t i = 0; i + 1 < np + (o.lineLoop ? 1 : 0); ++i) {
+            float a[3], b[3];
+            apply(d.world, &o.linePoints[i * 3], a); apply(d.world, &o.linePoints[((i + 1) % np) * 3], b);
+            segment(a, b, o.lineWidth, o.lineColour);
+        }
+    }
+    if (o.hasTrail && o.trailOn && curMarker) {
+        const int steps = 20;
+        float prev[3] = {0, 0, 0};
+        for (int i = 0; i <= steps; ++i) {
+            const float tt = t - o.trailTime * i / steps;
+            const M4 w = worldAt(*curMarker, o, tt);
+            const float cur[3] = {w.m[12], w.m[13], w.m[14]};
+            if (i) {
+                float c[4] = {o.trailColour[0], o.trailColour[1], o.trailColour[2], o.trailColour[3] * (1 - (float)i / steps)};
+                segment(prev, cur, o.trailWidth * (1 - 0.8f * i / steps), c);
+            }
+            memcpy(prev, cur, sizeof prev);
+        }
+    }
 }
 
 static void lines(const std::vector<float>& pts, const float* colour, const M4& world) {
@@ -641,6 +742,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     std::vector<Draw> draws;
     screenCentres.clear();
     lastWorld.clear();
+    float lp[32] = {0}, lc[32] = {0}, ld[32] = {0}; int nl = 0;
     if (m) {
         std::map<int, M4> worldOf;
         for (const Object& o : m->objects) {
@@ -654,9 +756,20 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
             lastWorld[o.id] = {world, parent};
             const float c[3] = {world.m[12], world.m[13], world.m[14]};
             const float vz = viewM.m[2] * c[0] + viewM.m[6] * c[1] + viewM.m[10] * c[2] + viewM.m[14];
+            const bool extras = (o.hasParticles && o.particlesOn) || (o.hasLine && o.lineOn) || (o.hasTrail && o.trailOn);
+            if (extras) draws.push_back({world, &o, vz, portal && c[1] < -0.01f, true, 1});
+            if (o.hasLight && o.lightOn && nl < 8) {   // its light, for the shader
+                const float fwd[3] = {-world.m[8], -world.m[9], -world.m[10]};
+                const float fl = std::sqrt(fwd[0] * fwd[0] + fwd[1] * fwd[1] + fwd[2] * fwd[2]) + 1e-6f;
+                float* P = &lp[nl * 4]; float* C = &lc[nl * 4]; float* Dd = &ld[nl * 4];
+                P[0] = world.m[12]; P[1] = world.m[13]; P[2] = world.m[14]; P[3] = (float)o.lightType;
+                for (int k = 0; k < 3; ++k) { C[k] = o.lightColour[k] * o.lightIntensity; Dd[k] = fwd[k] / fl; }
+                C[3] = o.lightRange; Dd[3] = std::cos(o.spotAngle * 0.5f * D2R);
+                ++nl;
+            }
             if (!o.lookOn || o.kind == EMPTY) continue;   // (its children are placed already)
-            const bool blend = o.kind == PICTURE || o.kind == SPRITES || o.kind == RAYS || o.kind == WORDS || o.colour[3] < 0.999f || o.glow;
-            draws.push_back({world, &o, vz, portal && c[1] < -0.01f, blend});
+            const bool blend = !o.occluder && (o.kind == PICTURE || o.kind == SPRITES || o.kind == RAYS || o.kind == WORDS || o.colour[3] < 0.999f || o.glow);
+            draws.push_back({world, &o, vz, portal && c[1] < -0.01f, blend, 0});
             // where it is on screen (for clicking it)
             const float cc[4] = {c[0], c[1], c[2], 1};
             float clip[4] = {0, 0, 0, 0};
@@ -666,8 +779,10 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     }
     std::stable_sort(draws.begin(), draws.end(), [](const Draw& a, const Draw& b) {
         if (a.blend != b.blend) return !a.blend;
+        if (!a.blend && a.o->occluder != b.o->occluder) return a.o->occluder;   // occluders first: they hide what's behind
         return a.blend ? a.depth < b.depth : false;
     });
+    glUniform1i_(uNL, nl); if (nl) { glUniform4fv_(uLPos, nl, lp); glUniform4fv_(uLCol, nl, lc); glUniform4fv_(uLDir, nl, ld); }
     // with a window into the paper, each object is cut at the paper: below it only shows through the opening
     if (portal) glEnable(GL_CLIP_DISTANCE0);
     for (const Draw& d : draws) {

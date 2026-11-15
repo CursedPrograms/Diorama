@@ -36,6 +36,38 @@ struct Object {
     bool animOn = true, hasAnim = false;   // the Animate component: there, and its tick
     std::vector<Script> scripts;
     std::string prefab;                // the prefab it was placed from ("" none)
+    bool occluder = false;             // material: invisible, but hides what's behind it (a real thing's stand-in)
+    // Light
+    bool hasLight = false, lightOn = true;
+    int lightType = 0;                 // 0 point, 1 spot, 2 directional (along the object's -Z... its forward)
+    float lightColour[3] = {1, 0.95f, 0.85f};
+    float lightIntensity = 1.5f, lightRange = 1.5f, spotAngle = 40;
+    // Audio Source
+    bool hasAudio = false, audioOn = true;
+    std::string audioFile;
+    float volume = 1;
+    bool audioLoop = false, playOnStart = true, spatial = true;   // spatial: quieter with distance from the phone
+    float audioNear = 0.5f, audioFar = 6;
+    // Particle System (the same maths in the editor and the game: a particle's life is a function of time)
+    bool hasParticles = false, particlesOn = true;
+    std::string particleFile;          // its picture ("" a soft dot)
+    float pRate = 20, pLife = 1.5f, pSpeed = 0.4f, pSpread = 25, pSizeStart = 0.06f, pSizeEnd = 0.01f, pGravity = 0;
+    float pColourStart[4] = {1, 0.9f, 0.6f, 1}, pColourEnd[4] = {1, 0.4f, 0.1f, 0};
+    bool pGlow = true;
+    // Line Renderer: points in the object's space
+    bool hasLine = false, lineOn = true, lineLoop = false;
+    std::vector<float> linePoints = {0, 0, 0, 0, 0.5f, 0};
+    float lineWidth = 0.02f;
+    float lineColour[4] = {1, 1, 1, 1};
+    // Video Player: plays on the object's own surface (its look's material)
+    bool hasVideo = false, videoOn = true;
+    std::string videoFile;
+    bool videoLoop = true, videoPlayOnStart = true, videoMuted = false;
+    float videoVolume = 1, videoSpeed = 1;
+    // Trail Renderer: where it's been
+    bool hasTrail = false, trailOn = true;
+    float trailTime = 0.5f, trailWidth = 0.03f;
+    float trailColour[4] = {0.2f, 0.66f, 0.89f, 1};
     bool expanded = true;              // open in the hierarchy
     // Transform
     float pos[3] = {0, 0, 0};

@@ -124,6 +124,22 @@ std::string toJson(const Project& p) {
               .f("animSpeed", o.animSpeed).f("animAmount", o.animAmount).i("count", o.count).f("spriteSize", o.spriteSize).f("flap", o.flap)
               .i("rays", o.rays).s("text", o.text).s("clip", o.clip).f("clipSpeed", o.clipSpeed).b("clipLoop", o.clipLoop)
               .b("lookOn", o.lookOn).b("hasAnim", o.hasAnim).b("animOn", o.animOn).s("prefab", o.prefab);
+            ow.b("occluder", o.occluder)
+              .b("hasLight", o.hasLight).b("lightOn", o.lightOn).i("lightType", o.lightType).f("lightIntensity", o.lightIntensity).f("lightRange", o.lightRange).f("spotAngle", o.spotAngle)
+              .b("hasAudio", o.hasAudio).b("audioOn", o.audioOn).s("audioFile", o.audioFile).f("volume", o.volume).b("audioLoop", o.audioLoop).b("playOnStart", o.playOnStart)
+              .b("spatial", o.spatial).f("audioNear", o.audioNear).f("audioFar", o.audioFar)
+              .b("hasVideo", o.hasVideo).b("videoOn", o.videoOn).s("videoFile", o.videoFile).b("videoLoop", o.videoLoop).b("videoPlayOnStart", o.videoPlayOnStart)
+              .b("videoMuted", o.videoMuted).f("videoVolume", o.videoVolume).f("videoSpeed", o.videoSpeed)
+              .b("hasParticles", o.hasParticles).b("particlesOn", o.particlesOn).s("particleFile", o.particleFile).f("pRate", o.pRate).f("pLife", o.pLife).f("pSpeed", o.pSpeed)
+              .f("pSpread", o.pSpread).f("pSizeStart", o.pSizeStart).f("pSizeEnd", o.pSizeEnd).f("pGravity", o.pGravity).b("pGlow", o.pGlow)
+              .b("hasLine", o.hasLine).b("lineOn", o.lineOn).b("lineLoop", o.lineLoop).f("lineWidth", o.lineWidth)
+              .b("hasTrail", o.hasTrail).b("trailOn", o.trailOn).f("trailTime", o.trailTime).f("trailWidth", o.trailWidth);
+            ow.key("lightColour"); ow.out += arr(o.lightColour, 3);
+            ow.key("pColourStart"); ow.out += arr(o.pColourStart, 4);
+            ow.key("pColourEnd"); ow.out += arr(o.pColourEnd, 4);
+            ow.key("lineColour"); ow.out += arr(o.lineColour, 4);
+            ow.key("trailColour"); ow.out += arr(o.trailColour, 4);
+            ow.key("linePoints"); ow.out += arr(o.linePoints.data(), (int)o.linePoints.size());
             ow.key("scripts"); ow.out += "[";
             for (size_t si = 0; si < o.scripts.size(); ++si) ow.out += std::string(si ? "," : "") + "{\"file\":" + Json::quote(o.scripts[si].file) + ",\"on\":" + (o.scripts[si].on ? "true" : "false") + "}";
             ow.out += "]";
@@ -169,6 +185,26 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
                 o.clip = ov.str("clip"); o.clipSpeed = (float)ov.num("clipSpeed", 1); o.clipLoop = readBool(ov, "clipLoop", true);
                 o.lookOn = readBool(ov, "lookOn", true); o.animOn = readBool(ov, "animOn", true);
                 o.prefab = ov.str("prefab");
+                o.occluder = readBool(ov, "occluder", false);
+                o.hasLight = readBool(ov, "hasLight", false); o.lightOn = readBool(ov, "lightOn", true); o.lightType = (int)ov.num("lightType", 0);
+                o.lightIntensity = (float)ov.num("lightIntensity", o.lightIntensity); o.lightRange = (float)ov.num("lightRange", o.lightRange); o.spotAngle = (float)ov.num("spotAngle", o.spotAngle);
+                o.hasAudio = readBool(ov, "hasAudio", false); o.audioOn = readBool(ov, "audioOn", true); o.audioFile = ov.str("audioFile"); o.volume = (float)ov.num("volume", 1);
+                o.audioLoop = readBool(ov, "audioLoop", false); o.playOnStart = readBool(ov, "playOnStart", true); o.spatial = readBool(ov, "spatial", true);
+                o.audioNear = (float)ov.num("audioNear", o.audioNear); o.audioFar = (float)ov.num("audioFar", o.audioFar);
+                o.hasVideo = readBool(ov, "hasVideo", false); o.videoOn = readBool(ov, "videoOn", true); o.videoFile = ov.str("videoFile");
+                o.videoLoop = readBool(ov, "videoLoop", true); o.videoPlayOnStart = readBool(ov, "videoPlayOnStart", true); o.videoMuted = readBool(ov, "videoMuted", false);
+                o.videoVolume = (float)ov.num("videoVolume", 1); o.videoSpeed = (float)ov.num("videoSpeed", 1);
+                o.hasParticles = readBool(ov, "hasParticles", false); o.particlesOn = readBool(ov, "particlesOn", true); o.particleFile = ov.str("particleFile");
+                o.pRate = (float)ov.num("pRate", o.pRate); o.pLife = (float)ov.num("pLife", o.pLife); o.pSpeed = (float)ov.num("pSpeed", o.pSpeed); o.pSpread = (float)ov.num("pSpread", o.pSpread);
+                o.pSizeStart = (float)ov.num("pSizeStart", o.pSizeStart); o.pSizeEnd = (float)ov.num("pSizeEnd", o.pSizeEnd); o.pGravity = (float)ov.num("pGravity", o.pGravity); o.pGlow = readBool(ov, "pGlow", true);
+                o.hasLine = readBool(ov, "hasLine", false); o.lineOn = readBool(ov, "lineOn", true); o.lineLoop = readBool(ov, "lineLoop", false); o.lineWidth = (float)ov.num("lineWidth", o.lineWidth);
+                o.hasTrail = readBool(ov, "hasTrail", false); o.trailOn = readBool(ov, "trailOn", true); o.trailTime = (float)ov.num("trailTime", o.trailTime); o.trailWidth = (float)ov.num("trailWidth", o.trailWidth);
+                readArr(ov, "lightColour", o.lightColour, 3); readArr(ov, "pColourStart", o.pColourStart, 4); readArr(ov, "pColourEnd", o.pColourEnd, 4);
+                readArr(ov, "lineColour", o.lineColour, 4); readArr(ov, "trailColour", o.trailColour, 4);
+                if (const Json::Value* lp = ov.get("linePoints")) if (lp->type == Json::Value::ARR && lp->a.size() >= 6) {
+                    o.linePoints.clear(); for (const auto& v : lp->a) o.linePoints.push_back((float)v.n);
+                    o.linePoints.resize(o.linePoints.size() / 3 * 3);
+                }
                 o.hasAnim = readBool(ov, "hasAnim", o.anim != A_STILL);
                 if (const Json::Value* ss = ov.get("scripts"))
                     for (const Json::Value& sv : ss->a) { Script sc; sc.file = sv.str("file"); sc.on = readBool(sv, "on", true); if (!sc.file.empty()) o.scripts.push_back(sc); }

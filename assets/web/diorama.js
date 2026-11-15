@@ -97,6 +97,7 @@
       if (look && o.kind === 'Model' && file) {
         new GLTFLoader().load(file, function (g) {
           node.add(g.scene);
+          if (o.occluder) { occlude(g.scene); return; }
           g.scene.traverse(function (c) {
             if (c.isMesh && c.material) {
               var ms = Array.isArray(c.material) ? c.material : [c.material];
@@ -138,8 +139,162 @@
           node.userData.rays.push(rm); node.add(rm);
         }
       }
+      components(o, node);
       node.userData.o = o;
       return node;
+    }
+
+    // ---------- components: Occluder, Light, Audio Source, Video Player, Particle System, Line and Trail Renderer ----------
+    var K = THREE.SRGBColorSpace ? Math.PI : 1;   // three's newer lights are in physical units
+    var dotTex = canvasTexture(function (g, w, h) {   // a soft dot: particles with no picture
+      var gr = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, w / 2);
+      gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.4, 'rgba(255,255,255,0.6)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    }, 64, 64);
+    var media = [];   // sounds and videos: phones start them only after a tap
+    var listener = null;
+    function getListener() { if (!listener) { listener = new THREE.AudioListener(); if (R.camera) R.camera.add(listener); } return listener; }
+    function occlude(obj) {   // invisible, but hides what's behind it
+      obj.traverse(function (c) { if (c.isMesh || c.isSprite) { c.material = new THREE.MeshBasicMaterial({ colorWrite: false, side: THREE.DoubleSide }); c.renderOrder = -1; } });
+    }
+    function segmentMesh() { return new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false })); }
+    var UP = new THREE.Vector3(0, 1, 0);
+    function placeSegment(mesh, a, b, width) {   // a thin box from a to b
+      var d = new THREE.Vector3().subVectors(b, a), len = d.length();
+      mesh.visible = len > 1e-5; if (!mesh.visible) return;
+      mesh.position.addVectors(a, b).multiplyScalar(0.5);
+      mesh.quaternion.setFromUnitVectors(UP, d.divideScalar(len));
+      mesh.scale.set(width, len, width);
+    }
+    function components(o, node) {
+      if (o.occluder) occlude(node);
+      if (o.hasLight) {
+        var col = new THREE.Color(o.lightColour[0], o.lightColour[1], o.lightColour[2]), li;
+        if (o.lightType === 1) li = new THREE.SpotLight(col, o.lightIntensity * K, o.lightRange, o.spotAngle * D2R / 2, 0.15, 2);
+        else if (o.lightType === 2) li = new THREE.DirectionalLight(col, o.lightIntensity * K);
+        else li = new THREE.PointLight(col, o.lightIntensity * K, o.lightRange, 2);
+        if (li.target) { var tg = new THREE.Object3D(); tg.position.set(0, 0, -1); node.add(tg); li.target = tg; }
+        li.visible = o.lightOn !== false;
+        node.add(li); node.userData.light = li;
+      }
+      if (o.hasAudio && o.audioFile) {
+        var snd = o.spatial ? new THREE.PositionalAudio(getListener()) : new THREE.Audio(getListener());
+        if (o.spatial) { snd.setRefDistance(o.audioNear); snd.setMaxDistance(o.audioFar); snd.setDistanceModel('linear'); }
+        snd.setLoop(!!o.audioLoop); snd.setVolume(o.volume);
+        new THREE.AudioLoader().load(o.audioFile, function (buf) { snd.setBuffer(buf); if (snd.userData.want) tryPlay(snd); });
+        snd.userData = { kind: 'audio', auto: o.playOnStart && o.audioOn !== false };
+        node.add(snd); node.userData.audio = snd; media.push(snd);
+      }
+      if (o.hasVideo && o.videoFile) {
+        var v = document.createElement('video');
+        v.src = o.videoFile; v.loop = !!o.videoLoop; v.muted = !!o.videoMuted; v.volume = o.videoVolume; v.playbackRate = o.videoSpeed || 1;
+        v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', ''); v.crossOrigin = 'anonymous'; v.preload = 'auto';
+        var vt = srgb(new THREE.VideoTexture(v));
+        node.traverse(function (c) { if ((c.isMesh || c.isSprite) && c.material && !o.occluder) { c.material.map = vt; c.material.needsUpdate = true; } });
+        v.userData = { kind: 'video', auto: o.playOnStart !== false && o.videoPlayOnStart !== false && o.videoOn !== false };
+        node.userData.video = v; media.push(v);
+      }
+      if (o.hasParticles) {
+        var n = Math.min(600, Math.max(1, Math.ceil(o.pRate * o.pLife)));
+        var map = o.particleFile ? texture(o.particleFile) : dotTex, ps = [];
+        for (var i = 0; i < n; ++i) {
+          var sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: map, transparent: true, depthWrite: false,
+            blending: o.pGlow ? THREE.AdditiveBlending : THREE.NormalBlending }));
+          sp.visible = false; ps.push(sp); node.add(sp);
+        }
+        node.userData.particles = ps;
+      }
+      if (o.hasLine && o.linePoints && o.linePoints.length >= 6) {
+        var segs = [], np = o.linePoints.length / 3;
+        for (var k = 0; k + 1 < np + (o.lineLoop ? 1 : 0); ++k) { var m = segmentMesh(); segs.push(m); node.add(m); }
+        node.userData.line = segs;
+      }
+      if (o.hasTrail) node.userData.trail = { segs: [], past: [] };
+    }
+    function tryPlay(m) {
+      m.userData.want = true;
+      if (m.userData.kind === 'video') { var pr = m.play(); if (pr && pr.catch) pr.catch(function () {}); return; }
+      if (!m.buffer || m.isPlaying) return;
+      if (m.context.state !== 'running') { m.context.resume(); }
+      try { m.play(); } catch (e) {}
+    }
+    function stopMedia(m, rewind) {
+      m.userData.want = false;
+      if (m.userData.kind === 'video') { m.pause(); if (rewind) m.currentTime = 0; }
+      else if (m.isPlaying) { if (rewind) m.stop(); else m.pause(); }
+    }
+    function startMediaUnder(root) {   // an anchor found: what plays on start starts (once)
+      root.traverse(function (c) {
+        [c.userData.audio, c.userData.video].forEach(function (m) { if (m && m.userData.auto && !m.userData.started) { m.userData.started = true; tryPlay(m); } });
+      });
+    }
+    function unlockMedia() {   // the first tap: what wanted to play (and was refused) plays
+      if (listener && listener.context.state !== 'running') listener.context.resume();
+      media.forEach(function (m) {
+        if (!m.userData.want) return;
+        if (m.userData.kind === 'video') { if (m.paused) tryPlay(m); } else if (!m.isPlaying) tryPlay(m);
+      });
+    }
+    function anchorOf(node) { var n = node; while (n.parent && n.parent.userData && n.parent.userData.o) n = n.parent; return n.parent || n; }
+    var tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3();
+    function animateComponents(node, t) {
+      var o = node.userData.o;
+      if (node.userData.light) node.userData.light.visible = o.lightOn !== false;
+      var ps = node.userData.particles;
+      if (ps) {   // each slot k is born at k / rate and lives pLife, then again: the editor's maths
+        var n = ps.length, T = n / Math.max(0.01, o.pRate), spread = o.pSpread * D2R;
+        var sx = Math.max(1e-6, o.scale[0]), sy = Math.max(1e-6, o.scale[1]);
+        for (var k = 0; k < n; ++k) {
+          var sp = ps[k], since = t - k / o.pRate;
+          if (o.particlesOn === false || since < 0) { sp.visible = false; continue; }
+          var cycle = Math.floor(since / T), age = since - cycle * T;
+          if (age > o.pLife) { sp.visible = false; continue; }
+          var u = age / Math.max(0.001, o.pLife), seed = k * 131 + cycle * 7919;
+          var az = hash(seed, 1) * 6.2831853, el = spread * Math.sqrt(hash(seed, 2));
+          var spd = o.pSpeed * (0.7 + 0.6 * hash(seed, 3));
+          sp.position.set(Math.sin(el) * Math.cos(az) * spd * age, Math.cos(el) * spd * age - 0.5 * o.pGravity * age * age, Math.sin(el) * Math.sin(az) * spd * age);
+          var a = o.pColourStart, b = o.pColourEnd;
+          sp.material.color.setRGB(a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u);
+          sp.material.opacity = a[3] + (b[3] - a[3]) * u;
+          var sz = o.pSizeStart + (o.pSizeEnd - o.pSizeStart) * u;
+          sp.scale.set(sz / sx, sz / sy, 1); sp.visible = true;
+        }
+      }
+      var segs = node.userData.line;
+      if (segs) {
+        var lp = o.linePoints, np = lp.length / 3, avg = Math.max(1e-6, (o.scale[0] + o.scale[1] + o.scale[2]) / 3);
+        segs.forEach(function (m, i) {
+          var j = (i + 1) % np;
+          m.visible = o.lineOn !== false;
+          m.material.color.setRGB(o.lineColour[0], o.lineColour[1], o.lineColour[2]); m.material.opacity = o.lineColour[3];
+          if (m.visible) placeSegment(m, tmpA.set(lp[i * 3], lp[i * 3 + 1], lp[i * 3 + 2]), tmpB.set(lp[j * 3], lp[j * 3 + 1], lp[j * 3 + 2]), o.lineWidth / avg);
+        });
+      }
+      var tr = node.userData.trail;
+      if (tr) {   // where it really was (scripts move things too), in its anchor's space
+        var root = anchorOf(node);
+        node.updateMatrixWorld(true);
+        var here = root.worldToLocal(node.getWorldPosition(new THREE.Vector3()));
+        tr.past.unshift({ t: t, p: here });
+        while (tr.past.length > 2 && t - tr.past[tr.past.length - 1].t > o.trailTime) tr.past.pop();
+        var steps = 20;
+        while (tr.segs.length < steps) { var m = segmentMesh(); root.add(m); tr.segs.push(m); }
+        var at = function (tt) {   // its place at time tt, between the samples
+          for (var q = 0; q + 1 < tr.past.length; ++q) if (tr.past[q + 1].t <= tt) {
+            var A = tr.past[q], B = tr.past[q + 1], f = (A.t - tt) / Math.max(1e-6, A.t - B.t);
+            return new THREE.Vector3().lerpVectors(A.p, B.p, f);
+          }
+          return tr.past[tr.past.length - 1].p.clone();
+        };
+        var prev = here;
+        for (var i = 1; i <= steps; ++i) {
+          var cur = at(t - o.trailTime * i / steps), m2 = tr.segs[i - 1];
+          m2.visible = o.trailOn !== false && node.visible;
+          m2.material.color.setRGB(o.trailColour[0], o.trailColour[1], o.trailColour[2]); m2.material.opacity = o.trailColour[3] * (1 - i / steps);
+          if (m2.visible) placeSegment(m2, prev, cur, o.trailWidth * (1 - 0.8 * i / steps));
+          prev = cur;
+        }
+      }
     }
 
     // the transform and what it does by itself (the same as the editor's)
@@ -156,7 +311,8 @@
       else if (anim === 'Sway') node.rotation.z += Math.sin(ph) * o.animAmount * Math.PI / 2;
       else if (anim === 'Pulse') fade = 1 - o.animAmount * (0.5 + 0.5 * Math.sin(ph));
       node.children.forEach(function (c) {
-        if (!c.material || node.userData.rays) return;
+        if (!c.material || node.userData.rays || c.isLight || (node.userData.particles && c.isSprite && node.userData.particles.indexOf(c) >= 0)) return;
+        if (node.userData.line && node.userData.line.indexOf(c) >= 0) return;
         if (c.material.userData.base === undefined) c.material.userData.base = c.material.opacity;
         c.material.opacity = c.material.userData.base * fade;
       });
@@ -169,6 +325,7 @@
         var sz = o.spriteSize * (0.7 + 0.6 * hash(i, 5));
         sp.scale.set(sz * flap / Math.max(1e-6, o.scale[0]), sz / Math.max(1e-6, o.scale[1]), 1);   // sized in the world
       });
+      animateComponents(node, t);
       if (node.userData.rays) node.userData.rays.forEach(function (rm, i) {
         var n = node.userData.rays.length;
         rm.rotation.z = (i - (n - 1) / 2) * 0.22 + 0.05 * Math.sin(t * 0.7 + i);
@@ -238,6 +395,30 @@
       case 'material': return { colour: vec(o.colour), get opacity() { return o.colour[3]; }, set opacity(v) { o.colour[3] = +v; node.traverse(function (c) { if (c.material) { c.material.userData.base = +v; } }); } };
       case 'words': return o.kind === 'Words' ? { get text() { return o.text; }, set text(v) { o.text = String(v); rebuild(this.go); }, go: this } : null;
       case 'model': return o.kind === 'Model' ? { get clip() { return o.clip; }, play: function (name) { o.clip = name; rebuild(this.go); }, go: this } : null;
+      case 'light': var li = node.userData.light; return li ? { get on() { return o.lightOn !== false; }, set on(v) { o.lightOn = !!v; },
+          colour: vec(o.lightColour, function () { li.color.setRGB(o.lightColour[0], o.lightColour[1], o.lightColour[2]); }),
+          get intensity() { return o.lightIntensity; }, set intensity(v) { o.lightIntensity = +v; li.intensity = +v * K; },
+          get range() { return o.lightRange; }, set range(v) { o.lightRange = +v; li.distance = +v; } } : null;
+      case 'audio': case 'audiosource': var au = node.userData.audio; return au ? { play: function () { tryPlay(au); }, pause: function () { stopMedia(au, false); },
+          stop: function () { stopMedia(au, true); }, get playing() { return !!au.isPlaying; },
+          get volume() { return o.volume; }, set volume(v) { o.volume = +v; au.setVolume(+v); },
+          get loop() { return !!o.audioLoop; }, set loop(v) { o.audioLoop = !!v; au.setLoop(!!v); } } : null;
+      case 'video': case 'videoplayer': var vi = node.userData.video; return vi ? { play: function () { tryPlay(vi); }, pause: function () { stopMedia(vi, false); },
+          stop: function () { stopMedia(vi, true); }, get playing() { return !vi.paused; }, get time() { return vi.currentTime; }, set time(v) { vi.currentTime = +v; },
+          get duration() { return vi.duration || 0; }, get speed() { return vi.playbackRate; }, set speed(v) { vi.playbackRate = +v; },
+          get volume() { return vi.volume; }, set volume(v) { vi.volume = +v; }, get muted() { return vi.muted; }, set muted(v) { vi.muted = !!v; }, element: vi } : null;
+      case 'particles': case 'particlesystem': return o.hasParticles ? { get on() { return o.particlesOn !== false; }, set on(v) { o.particlesOn = !!v; },
+          get speed() { return o.pSpeed; }, set speed(v) { o.pSpeed = +v; }, get gravity() { return o.pGravity; }, set gravity(v) { o.pGravity = +v; },
+          colourStart: vec(o.pColourStart), colourEnd: vec(o.pColourEnd) } : null;
+      case 'line': case 'linerenderer': return o.hasLine ? { get on() { return o.lineOn !== false; }, set on(v) { o.lineOn = !!v; },
+          get width() { return o.lineWidth; }, set width(v) { o.lineWidth = +v; }, colour: vec(o.lineColour),
+          point: function (i) { var lp = o.linePoints, view = {};   // point i's x, y, z, bound to the line
+            [0, 1, 2].forEach(function (k) { Object.defineProperty(view, k, { get: function () { return lp[i * 3 + k]; }, set: function (v) { lp[i * 3 + k] = v; } }); });
+            return vec(view); },
+          get count() { return o.linePoints.length / 3; } } : null;
+      case 'trail': case 'trailrenderer': return o.hasTrail ? { get on() { return o.trailOn !== false; }, set on(v) { o.trailOn = !!v; },
+          get time() { return o.trailTime; }, set time(v) { o.trailTime = +v; }, get width() { return o.trailWidth; }, set width(v) { o.trailWidth = +v; },
+          clear: function () { node.userData.trail.past.length = 0; } } : null;
       }
       for (var i = 0; i < this.scripts.length; ++i) if (this.scripts[i].name.toLowerCase() === String(type).toLowerCase()) return this.scripts[i].self;
       return null;
@@ -265,7 +446,7 @@
       var node = go.node, o = go.data, fresh = build(o, R.players);
       while (node.children.length) { var c = node.children[0]; if (c.userData && c.userData.o) break; node.remove(c); }
       fresh.children.slice().forEach(function (c) { node.add(c); });
-      ['sprites', 'rays'].forEach(function (k) { node.userData[k] = fresh.userData[k]; });
+      ['sprites', 'rays', 'light', 'audio', 'video', 'particles', 'line', 'trail'].forEach(function (k) { node.userData[k] = fresh.userData[k]; });
     }
     function find(path, from) {
       var parts = String(path).split('/'), hit = null;
@@ -340,11 +521,13 @@
       begin: function (nodes, players) { R.nodes = nodes; R.players = players; },
       setCamera: function (camera, dom) {
         R.camera = camera; R.dom = dom;
+        if (listener && !listener.parent) camera.add(listener);
         var ray = new THREE.Raycaster();
         var tap = function (ev) {
           var r = dom.getBoundingClientRect(), pt = ev.touches ? ev.touches[0] : ev;
           var x = ((pt.clientX - r.left) / r.width) * 2 - 1, y = -((pt.clientY - r.top) / r.height) * 2 + 1;
           R.input.tapped = true; R.input.x = x; R.input.y = y;
+          unlockMedia();
           ray.setFromCamera({ x: x, y: y }, camera);
           var targets = []; Object.keys(R.roots).forEach(function (k) { if (R.roots[k].visible !== false) targets.push(R.roots[k]); });
           var hits = ray.intersectObjects(targets, true);
@@ -358,6 +541,7 @@
       anchor: function (name, root, objects) { R.roots[name] = root; root.userData.objects = objects; },
       seen: function (name, on) {   // an anchor found or lost: its objects' onFound / onLost
         var root = R.roots[name]; if (!root) return;
+        if (on) startMediaUnder(root);
         root.traverse(function (c) { var g = c.userData.go; if (g && !g.dead) g.scripts.forEach(function (s) { call(g, s, on ? 'onFound' : 'onLost'); }); });
       },
       update: function (dt, t) {

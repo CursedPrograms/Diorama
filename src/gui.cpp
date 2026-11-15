@@ -37,6 +37,7 @@
 #endif
 #define NOMINMAX
 #include <windows.h>
+#include "stb_image.h"
 #include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -152,6 +153,23 @@ static double now() { return SDL_GetTicks() / 1000.0; }
 static void say(const std::string& s) { toast = s; toastUntil = now() + 6; }
 static bool showAbout = false, showSettings = false;
 static void rememberProject();
+// where projects live: Documents/Diorama, or the home folder's Diorama when Windows guards Documents
+// (Controlled Folder Access refuses unknown apps there, without a word)
+static bool writable(const fs::path& d) {
+    std::error_code ec; fs::create_directories(d, ec);
+    const fs::path probe = d / ".diorama-probe";
+    { std::ofstream f(probe, std::ios::binary); if (!f) return false; f << "ok"; if (!f.good()) return false; }
+    const bool ok = fs::exists(probe, ec); fs::remove(probe, ec); return ok;
+}
+static std::string projectsHome() {
+    static std::string home;
+    if (!home.empty()) return home;
+    const char* up = getenv("USERPROFILE");
+    for (const fs::path& d : {fs::u8path(documents()) / "Diorama", fs::u8path(up ? up : ".") / "Diorama", fs::u8path(exeDir.empty() ? "." : exeDir) / "Projects"})
+        if (writable(d)) { home = d.u8string(); return home; }
+    home = (fs::u8path(documents()) / "Diorama").u8string();
+    return home;
+}
 
 static Marker* curMarker() { return selMarker >= 0 && selMarker < (int)proj.markers.size() ? &proj.markers[selMarker] : nullptr; }
 static Object* curObject() {
@@ -240,14 +258,14 @@ static std::string bring(const std::string& file) {   // a file into the project
     fs::create_directories(assets, ec);
     fs::path dst = assets / src.filename();
     if (!fs::exists(dst, ec)) fs::copy_file(src, dst, ec);
-    return dst.u8string();
+    return fs::exists(dst, ec) ? dst.u8string() : file;   // couldn't copy it: keep using it where it is
 }
 static void forEachFile(Project& p, const std::function<void(std::string&)>& f) {
-    for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); for (auto& sc : o.scripts) f(sc.file); } }
+    for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); for (auto& sc : o.scripts) f(sc.file); } }
 }
 static bool saveProject(bool askFolder) {
     if (folder.empty() || askFolder) {
-        const std::string base = (fs::u8path(documents()) / "Diorama").u8string();
+        const std::string base = (fs::u8path(projectsHome())).u8string();
         std::error_code ec; fs::create_directories(fs::u8path(base), ec);
         const std::string f = saveDialog(L"Diorama project\0*.diorama\0\0", L"diorama", (fs::u8path(base) / (proj.title + ".diorama")).u8string());
         if (f.empty()) return false;
@@ -282,8 +300,8 @@ static std::string lastFile() {   // remembers the project that was open last
     std::error_code ec; fs::create_directories(d, ec);
     return (d / "last.txt").u8string();
 }
-static void rememberProject() { if (!folder.empty()) std::ofstream(fs::u8path(lastFile())) << folder; }
 static bool autosaveFolders = true;   // off for --capture / --build runs
+static void rememberProject() { if (!folder.empty() && autosaveFolders) std::ofstream(fs::u8path(lastFile())) << folder; }
 static void newFromTemplate(int which) {
     const std::string dir = (fs::u8path(exeDir) / "templates" / "gallery").u8string() + "/";
     proj = which == 1 ? galleryTemplate(dir) : basicTemplate();
@@ -292,10 +310,11 @@ static void newFromTemplate(int which) {
     if (!autosaveFolders) return;
     // its own folder at once (Documents/Diorama/<title>), like a Unity project: the Project window needs one
     std::error_code ec;
-    const fs::path base = fs::u8path(documents()) / "Diorama";
+    const fs::path base = fs::u8path(projectsHome());
     fs::path f = base / fs::u8path(proj.title);
     for (int k = 2; fs::exists(f, ec); ++k) f = base / fs::u8path(proj.title + " " + std::to_string(k));
     fs::create_directories(f / "assets" / "scripts", ec);
+    if (!fs::is_directory(f / "assets", ec)) { say("Couldn't make the project's folder in " + base.u8string()); return; }
     folder = f.u8string();
     saveProject(false);
     rememberProject();
@@ -492,12 +511,13 @@ static const char* assetKind(const fs::path& p) {
     if (e == ".glb" || e == ".gltf") return "Model";
     if (e == ".prefab") return "Prefab";
     if (e == ".mp3" || e == ".ogg" || e == ".wav") return "Audio";
+    if (e == ".mp4" || e == ".webm" || e == ".mov" || e == ".m4v") return "Video";
     if (e == ".patt") return "Marker";
     return "File";
 }
 static const char* assetIcon(const char* kind) {
     return !strcmp(kind, "Script") ? "{ }" : !strcmp(kind, "Picture") ? "\xe2\x96\xa8" : !strcmp(kind, "Model") ? "\xe2\x97\x86" : !strcmp(kind, "Prefab") ? "\xe2\x97\x87"
-         : !strcmp(kind, "Audio") ? "\xe2\x99\xab" : !strcmp(kind, "Marker") ? "\xe2\x96\xa3" : "\xe2\x96\xa1";
+         : !strcmp(kind, "Audio") ? "\xe2\x99\xab" : !strcmp(kind, "Video") ? "\xe2\x96\xb6" : !strcmp(kind, "Marker") ? "\xe2\x96\xa3" : "\xe2\x96\xa1";
 }
 static void importFiles(const std::vector<std::string>& files) {
     if (folder.empty()) return;
@@ -527,7 +547,7 @@ static void projectPanel() {
     ImGui::SameLine(); ImGui::TextDisabled("drag files onto the Hierarchy or an object; an object here makes a prefab; drop files from Explorer to import");
     ImGui::BeginChild("##files", ImVec2(0, 0), true);
     std::vector<fs::directory_entry> items;
-    for (const auto& e : fs::directory_iterator(cur, ec)) items.push_back(e);
+    for (const auto& e : fs::directory_iterator(cur, ec)) { const std::string fn = e.path().filename().u8string(); if (fn.size() > 11 && fn.compare(fn.size() - 11, 11, ".poster.jpg") == 0) continue; items.push_back(e); }   // video posters are the editor's own
     std::sort(items.begin(), items.end(), [](const fs::directory_entry& a, const fs::directory_entry& b) {
         if (a.is_directory() != b.is_directory()) return a.is_directory();
         return a.path().filename().u8string() < b.path().filename().u8string();
@@ -674,7 +694,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     for (size_t i = 0; i < b.markers.size(); ++i) {
         Scene::Marker& m = b.markers[i];
         const std::string slug = slugOf(m.name) + "-" + std::to_string(i + 1);
-        for (auto& ob : m.objects) { take(ob.file); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
+        for (auto& ob : m.objects) { take(ob.file); take(ob.audioFile); take(ob.particleFile); take(ob.videoFile); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
         if (proj.tracking == TRACK_IMAGES) {   // the picture to look for: in the build, and on the sheet to print
             if (m.target.empty()) { err = m.name + " has no picture to look for (its Inspector)"; return false; }
             Markers::Image im;
@@ -718,7 +738,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
                 if (e.path().extension() != ".prefab") continue;
                 std::vector<Object> objs;
                 if (!loadPrefab(e.path().u8string(), objs)) continue;
-                for (auto& o : objs) { take(o.file); for (auto& sc : o.scripts) take(sc.file); }
+                for (auto& o : objs) { take(o.file); take(o.audioFile); take(o.particleFile); take(o.videoFile); for (auto& sc : o.scripts) take(sc.file); }
                 Project tmp; Scene::Marker k; k.objects = objs; tmp.markers.push_back(k);
                 f << (firstP ? "\n  " : ",\n  ") << Json::quote(e.path().stem().u8string()) << ": (" << Scene::toJson(tmp) << ").markers[0].objects";
                 firstP = false;
@@ -744,7 +764,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
         "Start-Process \"http://localhost:$port/\"\r\n"
         "Write-Host \"Playing on http://localhost:$port/  (close this window to stop)\"\r\n"
         "$types = @{ '.html'='text/html'; '.js'='application/javascript'; '.json'='application/json'; '.png'='image/png'; '.jpg'='image/jpeg';\r\n"
-        "  '.jpeg'='image/jpeg'; '.glb'='model/gltf-binary'; '.gltf'='model/gltf+json'; '.wasm'='application/wasm'; '.mp3'='audio/mpeg'; '.ogg'='audio/ogg'; '.wav'='audio/wav' }\r\n"
+        "  '.jpeg'='image/jpeg'; '.glb'='model/gltf-binary'; '.gltf'='model/gltf+json'; '.wasm'='application/wasm'; '.mp3'='audio/mpeg'; '.ogg'='audio/ogg'; '.wav'='audio/wav'; '.mp4'='video/mp4'; '.webm'='video/webm'; '.m4v'='video/mp4'; '.mov'='video/quicktime' }\r\n"
         "while ($true) {\r\n"
         "  $c = $l.AcceptTcpClient(); $s = $c.GetStream(); $r = [System.IO.StreamReader]::new($s)\r\n"
         "  $line = $r.ReadLine(); while (($h = $r.ReadLine()) -ne '' -and $h -ne $null) {}\r\n"
@@ -826,7 +846,7 @@ static void playInBrowser() {
 static void buildDialog(bool run) {
     std::string out = lastBuild;
     if (out.empty() || !run) {
-        const std::string base = folder.empty() ? (fs::u8path(documents()) / "Diorama" / "Builds").u8string() : (fs::u8path(folder) / "Build").u8string();
+        const std::string base = folder.empty() ? (fs::u8path(projectsHome()) / "Builds").u8string() : (fs::u8path(folder) / "Build").u8string();
         std::error_code ec; fs::create_directories(fs::u8path(base), ec);
         if (!run || lastBuild.empty()) {
             const std::string pick = pickFolder();
@@ -911,7 +931,7 @@ static bool savePrefab(const Scene::Marker& m, int rootId, const std::string& di
     const fs::path base = fs::u8path(folder);
     for (auto& o : k.objects) {
         auto rel = [&](std::string& f) { if (f.empty()) return; std::error_code ec; const fs::path r = fs::relative(fs::u8path(f), base, ec); if (!ec && r.u8string().rfind("..", 0) != 0) f = r.generic_u8string(); };
-        rel(o.file); for (auto& sc : o.scripts) rel(sc.file);
+        rel(o.file); rel(o.audioFile); rel(o.particleFile); rel(o.videoFile); for (auto& sc : o.scripts) rel(sc.file);
     }
     tmp.markers.push_back(k);
     std::string name = k.objects[0].name; for (auto& c : name) if (strchr("<>:\"/\\|?*", c)) c = '_';
@@ -928,7 +948,7 @@ static bool loadPrefab(const std::string& file, std::vector<Object>& out) {
     const fs::path base = fs::u8path(folder);
     for (auto& o : out) {
         auto abs = [&](std::string& f) { if (!f.empty() && fs::u8path(f).is_relative()) f = (base / fs::u8path(f)).u8string(); };
-        abs(o.file); for (auto& sc : o.scripts) abs(sc.file);
+        abs(o.file); abs(o.audioFile); abs(o.particleFile); abs(o.videoFile); for (auto& sc : o.scripts) abs(sc.file);
     }
     return !out.empty();
 }
@@ -1198,7 +1218,7 @@ static bool giveLook(Object& o, int kind) {
     return true;
 }
 static std::string scriptsDir() {
-    const fs::path d = folder.empty() ? fs::u8path(documents()) / "Diorama" / "scripts" : fs::u8path(folder) / "assets" / "scripts";
+    const fs::path d = folder.empty() ? fs::u8path(projectsHome()) / "scripts" : fs::u8path(folder) / "assets" / "scripts";
     std::error_code ec; fs::create_directories(d, ec);
     return d.u8string();
 }
@@ -1223,6 +1243,30 @@ static void newScript(Object& o) {
     openScript(f.u8string());
     o.scripts.push_back({f.u8string(), true});
 }
+static const wchar_t* VIDEOS = L"Videos\0*.mp4;*.webm;*.m4v;*.mov\0\0";
+// the first frame of a video, beside it, for the editor's view (ffmpeg, when it's there; the game plays the real thing)
+static void videoPoster(const std::string& video) {
+    if (video.empty()) return;
+    const fs::path out = fs::u8path(video + ".poster.jpg");
+    std::error_code ec; if (fs::exists(out, ec)) return;
+    std::wstring cmd = L"ffmpeg -nostdin -loglevel error -y -ss 0.5 -i \"" + fs::u8path(video).wstring() + L"\" -frames:v 1 -vf scale=640:-2 \"" + out.wstring() + L"\"";
+    STARTUPINFOW si{}; si.cb = sizeof si; PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(0);
+    if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 15000); CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+    }
+}
+// a Video Player, and a screen to play on when the object has no look yet (a Quad the video's shape)
+static void giveVideo(Object& o, const std::string& file) {
+    o.hasVideo = true; o.videoOn = true; o.videoFile = file;
+    videoPoster(file);
+    if (o.kind == EMPTY) {
+        giveLook(o, QUAD);
+        int w = 0, h = 0, n = 0;
+        if (stbi_info((file + ".poster.jpg").c_str(), &w, &h, &n) && w > 0) o.scl[1] = o.scl[0] * h / w;
+        o.colour[0] = o.colour[1] = o.colour[2] = o.colour[3] = 1; o.lit = false;
+    }
+}
 static void addComponentMenu(Object& o) {
     const bool hasLook = o.kind != EMPTY;
     if (ImGui::BeginMenu("Mesh", !hasLook)) {
@@ -1237,6 +1281,30 @@ static void addComponentMenu(Object& o) {
     if (hasLook) ImGui::TextDisabled("(it has a look already: remove it to pick another)");
     ImGui::Separator();
     if (ImGui::MenuItem("Animate", nullptr, false, !o.hasAnim)) { o.hasAnim = true; o.animOn = true; if (o.anim == A_STILL) o.anim = A_FLOAT; }
+    if (ImGui::BeginMenu("Rendering")) {
+        if (ImGui::MenuItem("Light", nullptr, false, !o.hasLight)) { o.hasLight = true; o.lightOn = true; }
+        if (ImGui::MenuItem("Line Renderer", nullptr, false, !o.hasLine)) { o.hasLine = true; o.lineOn = true; }
+        if (ImGui::MenuItem("Trail Renderer", nullptr, false, !o.hasTrail)) { o.hasTrail = true; o.trailOn = true; }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Effects")) {
+        if (ImGui::MenuItem("Particle System", nullptr, false, !o.hasParticles)) { o.hasParticles = true; o.particlesOn = true; }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Audio")) {
+        if (ImGui::MenuItem("Audio Source...", nullptr, false, !o.hasAudio)) {
+            const std::string f = openDialog(L"Sounds\0*.mp3;*.ogg;*.wav;*.m4a\0\0");
+            if (!f.empty()) { o.hasAudio = true; o.audioOn = true; o.audioFile = bring(f); }
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Video")) {
+        if (ImGui::MenuItem("Video Player...", nullptr, false, !o.hasVideo)) {
+            const std::string f = openDialog(VIDEOS);
+            if (!f.empty()) giveVideo(o, bring(f));
+        }
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Script")) {
         if (ImGui::MenuItem("New Script")) newScript(o);
         if (ImGui::MenuItem("Existing Script...")) { const std::string f = openDialog(L"JavaScript\0*.js\0\0"); if (!f.empty()) o.scripts.push_back({bring(f), true}); }
@@ -1296,6 +1364,7 @@ static void objectInspector(Scene::Marker& m, Object& o) {
                 ImGui::Checkbox("Lit", &o.lit); tip("Shaded by the marker's lights");
                 ImGui::SameLine(); ImGui::Checkbox("Glow", &o.glow); tip("Added on as light (god rays, sparks)");
                 if (o.kind == QUAD || o.kind == PICTURE || o.kind == WORDS) { ImGui::SameLine(); ImGui::Checkbox("Faces the phone", &o.billboard); }
+                ImGui::Checkbox("Occluder", &o.occluder); tip("Invisible in the game, but hides what's behind it:\na stand-in for a real thing (a box, a wall) so the AR goes behind it");
             }
         }
     }
@@ -1311,6 +1380,129 @@ static void objectInspector(Scene::Marker& m, Object& o) {
                     labelled("Speed"); ImGui::SliderFloat("##asp", &o.animSpeed, 0, 3, "%.2f");
                     if (o.anim != A_SPIN) { labelled("Amount"); ImGui::SliderFloat("##aam", &o.animAmount, 0, 1, "%.3f"); }
                 }
+            }
+        }
+    }
+    const Object D;   // defaults, for Reset
+    // Light
+    if (o.hasLight) {
+        h = componentHeader("Light", &o.lightOn, true);
+        if ((h & 0xff) == C_REMOVE) o.hasLight = false;
+        else {
+            if ((h & 0xff) == C_RESET) { o.lightType = D.lightType; memcpy(o.lightColour, D.lightColour, sizeof o.lightColour); o.lightIntensity = D.lightIntensity; o.lightRange = D.lightRange; o.spotAngle = D.spotAngle; }
+            if (h & 0x100) {
+                const char* types[] = {"Point", "Spot", "Directional"};
+                labelled("Type"); ImGui::Combo("##lt", &o.lightType, types, 3);
+                labelled("Colour"); ImGui::ColorEdit3("##lc", o.lightColour, ImGuiColorEditFlags_NoInputs);
+                labelled("Intensity"); ImGui::SliderFloat("##li", &o.lightIntensity, 0, 5, "%.2f");
+                if (o.lightType != 2) { labelled("Range"); ImGui::SliderFloat("##lr", &o.lightRange, 0.05f, 10, "%.2f"); }
+                if (o.lightType == 1) { labelled("Spot angle"); ImGui::SliderFloat("##sa", &o.spotAngle, 1, 170, "%.0f\xc2\xb0"); }
+                if (o.lightType != 0) ImGui::TextDisabled("It shines along the object's forward (-Z).");
+                ImGui::TextDisabled("Lights the Lit things on its marker (up to 8 lights).");
+            }
+        }
+    }
+    // Audio Source
+    if (o.hasAudio) {
+        h = componentHeader("Audio Source", &o.audioOn, true);
+        if ((h & 0xff) == C_REMOVE) { o.hasAudio = false; o.audioFile.clear(); }
+        else {
+            if ((h & 0xff) == C_RESET) { o.volume = D.volume; o.audioLoop = D.audioLoop; o.playOnStart = D.playOnStart; o.spatial = D.spatial; o.audioNear = D.audioNear; o.audioFar = D.audioFar; }
+            if (h & 0x100) {
+                fileRow("Sound", o.audioFile, L"Sounds\0*.mp3;*.ogg;*.wav;*.m4a\0\0");
+                labelled("Volume"); ImGui::SliderFloat("##vol", &o.volume, 0, 1, "%.2f");
+                ImGui::Checkbox("Play on start", &o.playOnStart); tip("Starts when its anchor is first found;\nscripts can play() and stop() it too");
+                ImGui::SameLine(); ImGui::Checkbox("Loop", &o.audioLoop);
+                ImGui::Checkbox("3D sound", &o.spatial); tip("Quieter further from the phone, and comes from where it is");
+                if (o.spatial) {
+                    labelled("Full volume"); ImGui::SliderFloat("##an", &o.audioNear, 0.05f, 5, "%.2f"); tip("Closer than this: full volume");
+                    labelled("Silent at"); ImGui::SliderFloat("##af", &o.audioFar, o.audioNear + 0.1f, 30, "%.2f");
+                }
+                ImGui::TextDisabled("Phones only play sound after the first tap.");
+            }
+        }
+    }
+    // Particle System
+    if (o.hasParticles) {
+        h = componentHeader("Particle System", &o.particlesOn, true);
+        if ((h & 0xff) == C_REMOVE) { o.hasParticles = false; o.particleFile.clear(); }
+        else {
+            if ((h & 0xff) == C_RESET) { o.pRate = D.pRate; o.pLife = D.pLife; o.pSpeed = D.pSpeed; o.pSpread = D.pSpread; o.pSizeStart = D.pSizeStart; o.pSizeEnd = D.pSizeEnd; o.pGravity = D.pGravity;
+                memcpy(o.pColourStart, D.pColourStart, sizeof o.pColourStart); memcpy(o.pColourEnd, D.pColourEnd, sizeof o.pColourEnd); o.pGlow = D.pGlow; o.particleFile.clear(); }
+            if (h & 0x100) {
+                fileRow("Picture", o.particleFile, PICS); tip("Empty: a soft dot");
+                labelled("Per second"); ImGui::SliderFloat("##pr", &o.pRate, 0.5f, 200, "%.1f");
+                labelled("Lifetime"); ImGui::SliderFloat("##pl", &o.pLife, 0.1f, 10, "%.2f s");
+                labelled("Speed"); ImGui::SliderFloat("##ps", &o.pSpeed, 0, 5, "%.2f");
+                labelled("Spread"); ImGui::SliderFloat("##pd", &o.pSpread, 0, 180, "%.0f\xc2\xb0"); tip("The cone they leave in, round the object's up (+Y)");
+                labelled("Gravity"); ImGui::SliderFloat("##pg", &o.pGravity, -3, 3, "%.2f");
+                labelled("Size start"); ImGui::SliderFloat("##pss", &o.pSizeStart, 0.001f, 1, "%.3f");
+                labelled("Size end"); ImGui::SliderFloat("##pse", &o.pSizeEnd, 0, 1, "%.3f");
+                labelled("Colour start"); ImGui::ColorEdit4("##pcs", o.pColourStart, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                labelled("Colour end"); ImGui::ColorEdit4("##pce", o.pColourEnd, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                ImGui::Checkbox("Glow", &o.pGlow); tip("Added on as light (fire, sparks, magic)");
+            }
+        }
+    }
+    // Line Renderer
+    if (o.hasLine) {
+        h = componentHeader("Line Renderer", &o.lineOn, true);
+        if ((h & 0xff) == C_REMOVE) o.hasLine = false;
+        else {
+            if ((h & 0xff) == C_RESET) { o.linePoints = D.linePoints; o.lineWidth = D.lineWidth; memcpy(o.lineColour, D.lineColour, sizeof o.lineColour); o.lineLoop = D.lineLoop; }
+            if (h & 0x100) {
+                labelled("Width"); ImGui::SliderFloat("##lw", &o.lineWidth, 0.001f, 0.5f, "%.3f");
+                labelled("Colour"); ImGui::ColorEdit4("##lcol", o.lineColour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                ImGui::Checkbox("Loop", &o.lineLoop); tip("Joins the last point back to the first");
+                const int n = (int)o.linePoints.size() / 3;
+                int del = -1;
+                for (int i = 0; i < n; ++i) {
+                    ImGui::PushID(1000 + i);
+                    char lab[24]; snprintf(lab, sizeof lab, "Point %d", i + 1);
+                    vec3Row(lab, &o.linePoints[i * 3], 0.005f);
+                    if (n > 2 && ImGui::BeginPopupContextItem("pt")) { if (ImGui::MenuItem("Remove point")) del = i; ImGui::EndPopup(); }
+                    ImGui::PopID();
+                }
+                if (del >= 0) o.linePoints.erase(o.linePoints.begin() + del * 3, o.linePoints.begin() + del * 3 + 3);
+                if (ImGui::Button("Add point", ImVec2(-1, 0))) {
+                    const size_t k = o.linePoints.size();
+                    float p[3] = {o.linePoints[k - 3], o.linePoints[k - 2] + 0.2f, o.linePoints[k - 1]};
+                    o.linePoints.insert(o.linePoints.end(), p, p + 3);
+                }
+                ImGui::TextDisabled("Points are in the object's space. Right-click a point to remove it.");
+            }
+        }
+    }
+    // Video Player
+    if (o.hasVideo) {
+        h = componentHeader("Video Player", &o.videoOn, true);
+        if ((h & 0xff) == C_REMOVE) { o.hasVideo = false; o.videoFile.clear(); }
+        else {
+            if ((h & 0xff) == C_RESET) { o.videoLoop = D.videoLoop; o.videoPlayOnStart = D.videoPlayOnStart; o.videoMuted = D.videoMuted; o.videoVolume = D.videoVolume; o.videoSpeed = D.videoSpeed; }
+            if (h & 0x100) {
+                if (fileRow("Video", o.videoFile, VIDEOS)) videoPoster(o.videoFile);
+                ImGui::Checkbox("Play on start", &o.videoPlayOnStart); tip("Starts when its anchor is first found;\nscripts can play(), pause() and stop() it too");
+                ImGui::SameLine(); ImGui::Checkbox("Loop", &o.videoLoop);
+                labelled("Speed"); ImGui::SliderFloat("##vs", &o.videoSpeed, 0.1f, 3, "%.2f");
+                ImGui::Checkbox("Muted", &o.videoMuted);
+                if (!o.videoMuted) { labelled("Volume"); ImGui::SliderFloat("##vv", &o.videoVolume, 0, 1, "%.2f"); }
+                if (o.kind == EMPTY) ImGui::TextDisabled("It needs a look to play on: add a Mesh (a Quad is a screen).");
+                else ImGui::TextDisabled("It plays on the object's surface, in place of its texture.");
+                ImGui::TextDisabled("With sound, phones start it after the first tap.");
+            }
+        }
+    }
+    // Trail Renderer
+    if (o.hasTrail) {
+        h = componentHeader("Trail Renderer", &o.trailOn, true);
+        if ((h & 0xff) == C_REMOVE) o.hasTrail = false;
+        else {
+            if ((h & 0xff) == C_RESET) { o.trailTime = D.trailTime; o.trailWidth = D.trailWidth; memcpy(o.trailColour, D.trailColour, sizeof o.trailColour); }
+            if (h & 0x100) {
+                labelled("Length"); ImGui::SliderFloat("##tt", &o.trailTime, 0.05f, 5, "%.2f s"); tip("How long a piece of trail lasts");
+                labelled("Width"); ImGui::SliderFloat("##tw", &o.trailWidth, 0.001f, 0.5f, "%.3f");
+                labelled("Colour"); ImGui::ColorEdit4("##tc", o.trailColour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+                ImGui::TextDisabled("It fades out towards the end.");
             }
         }
     }
