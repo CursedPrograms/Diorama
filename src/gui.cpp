@@ -1301,9 +1301,7 @@ static void sceneManager() {
             if (ImGui::IsKeyPressed(ImGuiKey_Escape)) renamingScene = -1;
         } else {
             char label[160]; snprintf(label, sizeof label, "%d   %s%s", i, n.c_str(), i == 0 ? "   (index.html)" : "");
-            if (cur) ImGui::PushStyleColor(ImGuiCol_Text, col4(C_BLUE));
             if (ImGui::Selectable(label, cur, ImGuiSelectableFlags_AllowDoubleClick) && ImGui::IsMouseDoubleClicked(0)) open = i;
-            if (cur) ImGui::PopStyleColor();
             if (ImGui::BeginDragDropSource()) { ImGui::SetDragDropPayload("SCENE", &i, sizeof i); ImGui::Text("%s", n.c_str()); ImGui::EndDragDropSource(); }
             if (ImGui::BeginDragDropTarget()) { if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("SCENE")) { moveFrom = *(const int*)pl->Data; moveTo = i; } ImGui::EndDragDropTarget(); }
             if (ImGui::BeginPopupContextItem("ctx")) {
@@ -1727,7 +1725,8 @@ static void newScript(Object& o) {
         "//   \"Words\" | \"Model\" | another script's name), this.toCamera() (direction to the phone, and .distance),\n"
         "//   this.lookAtCamera().\n"
         "// find(\"Name\" or \"Parent/Child\"), spawn(\"Name\" or a prefab, { position }), destroy(obj), time(), log(...),\n"
-        "// camera.position, input.tapped.\n\n"
+        "// camera.position, input.tapped, loadScene(\"Name\" or a number), scene.name / scene.index.\n"
+        "// UI elements: onClick() (Button), onChange(value) (Slider, Toggle).\n\n"
         "function start() {\n  // once, before its first update\n}\n\n"
         "function update(dt) {\n  // every frame; dt: seconds since the last one\n}\n\n"
         "function onTap() {\n  // the player tapped it\n}\n\n"
