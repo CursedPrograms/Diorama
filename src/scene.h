@@ -150,6 +150,9 @@ struct Marker {
     float planeColour[4] = {0.25f, 0.95f, 0.55f, 0.35f};
     std::string planePrefab;           // made on each plane found ("" none)
     int placement = 0;                 // 0 tap to place, 1 on the first floor found, 2 where the phone starts
+    // any camera (a PC's webcam, a phone without ARCore): the surface tracker's guess of how the camera sees the table at the lock
+    // (phones use their gravity for the tilt)
+    float webcamTilt = 50, webcamHeight = 0.6f, webcamFov = 60;
     std::vector<Object> objects;       // parents before their children
     std::string patt;                  // in a build only: its pattern file there
 };

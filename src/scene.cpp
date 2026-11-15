@@ -118,6 +118,7 @@ static std::string markersJson(const std::vector<Marker>& list) {
         w.key("sun"); w.out += arr(k.sun, 3);
         w.key("portalSize"); w.out += arr(k.portalSize, 2);
         w.i("planeDetect", k.planeDetect).b("showPlanes", k.showPlanes).s("planePrefab", k.planePrefab).i("placement", k.placement);
+        w.f("webcamTilt", k.webcamTilt).f("webcamHeight", k.webcamHeight).f("webcamFov", k.webcamFov);
         w.key("planeColour"); w.out += arr(k.planeColour, 4);
         w.key("objects"); w.out += "[";
         for (size_t i = 0; i < k.objects.size(); ++i) {
@@ -180,6 +181,7 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
     k.sunStrength = (float)mv.num("sunStrength", k.sunStrength); k.sunYaw = (float)mv.num("sunYaw", k.sunYaw); k.sunPitch = (float)mv.num("sunPitch", k.sunPitch);
     k.portal = readBool(mv, "portal", k.portal); k.expanded = readBool(mv, "expanded", true);
     readArr(mv, "ambient", k.ambient, 3); readArr(mv, "sun", k.sun, 3); readArr(mv, "portalSize", k.portalSize, 2);
+    k.webcamTilt = (float)mv.num("webcamTilt", k.webcamTilt); k.webcamHeight = (float)mv.num("webcamHeight", k.webcamHeight); k.webcamFov = (float)mv.num("webcamFov", k.webcamFov);
     k.planeDetect = (int)mv.num("planeDetect", 2); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
     readArr(mv, "planeColour", k.planeColour, 4);
     if (const Json::Value* os = mv.get("objects"))

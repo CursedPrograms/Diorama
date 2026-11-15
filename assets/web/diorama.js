@@ -1328,6 +1328,91 @@
         renderer.setAnimationLoop(tick(null));
       };
 
+
+      // any camera (a PC's webcam, a phone without ARCore): the camera's picture, a tap locks the table (surfacetrack.js,
+      // OpenCV.js), then it's followed frame by frame. Its tilt: the phone's gravity, else the AR Plane Manager's setting
+      var webcam = function (why) {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { preview(why); return; }
+        say('Starting the camera...');
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }).then(function (stream) {
+          var video = document.createElement('video');
+          video.playsInline = true; video.muted = true; video.srcObject = stream; video.setAttribute('playsinline', '');
+          video.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;object-fit:cover;z-index:-1';
+          document.body.insertBefore(video, document.body.firstChild);
+          document.documentElement.style.background = '#000';
+          video.play();
+          useRenderer(!!lib.webgpu);
+          if (renderer.setClearColor) renderer.setClearColor(0x000000, 0);
+          var settings = { fovDeg: first.webcamFov || 60, tiltDeg: first.webcamTilt || 50, height: first.webcamHeight || 0.6 };
+          var gravityTilt = null;   // the phone's own: how far it looks down
+          window.addEventListener('deviceorientation', function (e) { if (e.beta !== null && e.beta !== undefined) gravityTilt = Math.max(15, Math.min(89, 90 - Math.abs(e.beta))); });
+          var surface = new THREE.Group(); surface.matrixAutoUpdate = false; surface.visible = false; scene.add(surface);
+          anchors.forEach(function (a) { scene.remove(a.root); surface.add(a.root); });
+          var fit = function () {   // the camera's view, as the picture fills the screen (object-fit: cover)
+            var vw = video.videoWidth || 1280, vh = video.videoHeight || 720, sw = window.innerWidth, sh = window.innerHeight;
+            var hfov = settings.fovDeg * Math.PI / 180, va = vw / vh, scale = Math.max(sw / vw, sh / vh);
+            var vfov = 2 * Math.atan(Math.tan(hfov / 2) / va);            // the video's own, up and down
+            camera.fov = 2 * Math.atan(Math.tan(vfov / 2) * (sh / (vh * scale))) * 180 / Math.PI;
+            camera.aspect = sw / sh; camera.updateProjectionMatrix();
+          };
+          video.addEventListener('loadedmetadata', fit); window.addEventListener('resize', fit);
+          var tracker = null, lostAt = 0, F = new THREE.Matrix4().makeScale(1, -1, -1), M = new THREE.Matrix4();
+          var poly = [[-0.6, -0.6], [0.6, -0.6], [0.6, 0.6], [-0.6, 0.6]];
+          var relock = document.createElement('button'); relock.textContent = 'Re-lock';
+          relock.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:40;padding:8px 16px;font:inherit;border:0;border-radius:6px;background:#007bb7;color:#fff;display:none';
+          document.body.appendChild(relock);
+          var lock = function () {
+            if (!tracker) return;
+            if (gravityTilt !== null) tracker.s.tiltDeg = gravityTilt;
+            if (!tracker.lock(video)) { say('Not enough to see there: point at a table or floor with some pattern, in good light, then tap.'); return; }
+            var P = window.SurfaceTrack.lockPose(tracker.s);
+            show(P);
+            anchors.forEach(function (a) { if (!a.placed) { a.placed = true; a.root.visible = true; C.runtime.seen(a.m.name, true); } });
+            relock.style.display = '';
+            say('Locked. Move slowly; Re-lock to choose another spot.');
+          };
+          var show = function (P) {   // the surface, where the camera sees it (OpenCV's camera turned into three's)
+            var R = P.R, t = P.t;
+            M.set(R[0], R[1], R[2], t[0], R[3], R[4], R[5], t[1], R[6], R[7], R[8], t[2], 0, 0, 0, 1).premultiply(F);
+            camera.updateMatrixWorld();
+            surface.matrix.copy(camera.matrixWorld).multiply(M); surface.matrixWorldNeedsUpdate = true; surface.visible = true;
+            C.planes.set('surface', surface.matrix, poly, 'horizontal');
+          };
+          relock.addEventListener('click', function (e) { e.stopPropagation(); lock(); });
+          renderer.domElement.addEventListener('click', function (e) {
+            if (!tracker) return;
+            if (!tracker.locked()) { lock(); return; }
+            // later taps: tap to place, on the surface
+            var r = renderer.domElement.getBoundingClientRect();
+            var hits = C.planes.raycast(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+            if (hits.length) anchors.forEach(function (a) {
+              if (a.m.placement !== 0) return;
+              var v = new THREE.Vector3(hits[0].position.x, hits[0].position.y, hits[0].position.z); surface.worldToLocal(v);
+              a.root.position.set(v.x, 0, v.z);
+            });
+          });
+          // OpenCV.js: only here (it's big), then the tracker
+          say('Loading the surface finder...');
+          loadScripts(['lib/opencv/opencv.js', 'lib/surfacetrack.js'], function () {
+            var ready = function (cv) { tracker = new window.SurfaceTrack.Tracker(cv, settings); say('Point the camera at a table or the floor (something with a pattern), then tap to lock it.'); };
+            var wait = setInterval(function () {
+              if (typeof window.cv === 'undefined') return;
+              if (window.cv instanceof Promise) { clearInterval(wait); window.cv.then(ready); }
+              else if (window.cv.Mat) { clearInterval(wait); ready(window.cv); }
+            }, 100);
+          });
+          renderer.setAnimationLoop(tick(function () {
+            if (!tracker || !tracker.locked() || video.readyState < 2) return;
+            var r = tracker.track(video);
+            if (r.ok) { lostAt = 0; show({ R: r.R, t: r.t }); }
+            else {
+              if (!lostAt) lostAt = t;
+              if (t - lostAt > 0.6) { surface.visible = false; say('Lost the surface: point back at it (or Re-lock).'); }
+            }
+          }));
+        }).catch(function (e) { preview('No camera (' + (e && (e.message || e.name) || e) + '). ' + why); });
+      };
+
       // the real thing: an immersive-ar session with hit-test and (when the phone has it) plane detection
       var startXR = function () {
         if (!renderer) useRenderer(false);
@@ -1386,7 +1471,7 @@
       };
       if (navigator.xr && navigator.xr.isSessionSupported) {
         navigator.xr.isSessionSupported('immersive-ar').then(function (ok) {
-          if (!ok) { preview('This needs a phone with ARCore (Chrome on Android) for real surfaces. A preview: drag to look round, tap the floor to place.'); return; }
+          if (!ok) { webcam('A preview instead: drag to look round, tap the floor to place.'); return; }
           // the browser lets AR start from a tap only
           var b = document.createElement('button'); b.textContent = 'Start AR';
           b.style.cssText = 'position:fixed;left:50%;bottom:64px;transform:translateX(-50%);z-index:40;padding:14px 36px;font:inherit;font-size:18px;border:0;border-radius:6px;background:#007bb7;color:#fff';
@@ -1394,8 +1479,8 @@
           b.addEventListener('click', function () { b.remove(); startXR(); });
           document.body.appendChild(b);
           say('Tap Start AR, then move the phone slowly over the floor.');
-        }).catch(function () { preview('No AR here: a preview. Drag to look round.'); });
-      } else preview('No AR in this browser (it needs Chrome on an Android phone with ARCore). A preview: drag to look round, tap the floor to place.');
+        }).catch(function () { webcam('A preview instead: drag to look round.'); });
+      } else webcam('A preview instead: drag to look round, tap the floor to place.');
     });
   }
 

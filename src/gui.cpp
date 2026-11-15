@@ -711,6 +711,10 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     if (mind) copied = copyTree(web / "mindar", o / "lib" / "mindar");
     else {
         copied = copyTree(web / "three", o / "lib" / "three");
+        if (surfaces) {   // the surface tracker for cameras without ARCore (OpenCV.js: loaded only when it's needed)
+            std::error_code ce; fs::copy_file(web / "surfacetrack.js", o / "lib" / "surfacetrack.js", fs::copy_options::overwrite_existing, ce); if (ce) copied = false;
+            copied = copied && copyTree(web / "opencv", o / "lib" / "opencv");
+        }
         if (!surfaces) {   // ARToolKit (and its camera data)
             for (const char* f : {"artoolkit.min.js", "artoolkit.three.js", "LICENSE-jsartoolkit5.txt"}) { std::error_code ce; fs::copy_file(web / "lib" / f, o / "lib" / f, fs::copy_options::overwrite_existing, ce); if (ce) copied = false; }
             copied = copied && copyTree(web / "data", o / "data");
@@ -2136,6 +2140,13 @@ static void markerInspector(Scene::Marker& m) {
         labelled("Placement"); ImGui::Combo("##pl", &m.placement, places, 3);
         tip("Where this anchor's things go: where the player taps on a plane, on the first floor found, or round the phone where the game starts");
         ImGui::TextDisabled("Surfaces are in metres: 1 = 1 m. The room here is pretend: a floor,\na table and a wall, like the planes a phone finds.");
+        ImGui::SeparatorText("Any camera (no ARCore)");
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextDisabled("PCs and phones without ARCore: the player points at a table or floor with some pattern and taps; it's followed from there.");
+        ImGui::PopTextWrapPos();
+        labelled("Looks down"); ImGui::SliderFloat("##wt", &m.webcamTilt, 10, 90, "%.0f\xc2\xb0"); tip("How far a webcam looks down at the table (phones use their own gravity)");
+        labelled("Height"); ImGui::SliderFloat("##wh", &m.webcamHeight, 0.1f, 3, "%.2f m"); tip("The camera's height above the surface: sets the scale");
+        labelled("Field of view"); ImGui::SliderFloat("##wf", &m.webcamFov, 30, 110, "%.0f\xc2\xb0"); tip("Across; most webcams 60-80");
     }
     if (proj.tracking == TRACK_MARKERS && section("AR Marker")) {
         labelled("Type");
