@@ -161,6 +161,11 @@ struct Project {
     // each scene is kept in scenes/<name>.scene
     std::vector<std::string> scenes = {"Main"};
     std::string scene = "Main";
+    // the Main Camera (every scene has one, like Unity's): the phone. Its objects ride with it; how it draws
+    Marker camera = [] { Marker c; c.name = "Main Camera"; c.id = -2; c.preset.clear(); return c; }();
+    int camClear = 0;                  // 0 the camera's picture (AR), 1 a solid colour (previews, PCs without AR)
+    float camColour[3] = {0.07f, 0.07f, 0.08f};
+    float camNear = 0.01f, camFar = 100, camFov = 60;
     // Build Settings: the platform it builds for, and its runtime
     std::string platform = "web";      // web, windows, linux, pi, android
     int windowsRuntime = 0;            // 0 JavaScript (WebView2), 1 C++ (Diorama's native player)

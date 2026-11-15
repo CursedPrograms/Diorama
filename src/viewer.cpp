@@ -845,21 +845,34 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     screenCentres.clear();
     lastWorld.clear();
     float lp[32] = {0}, lc[32] = {0}, ld[32] = {0}; int nl = 0;
-    if (m) {
+    // where the phone would be (the Main Camera, in the editor): above the marker, before the face, standing in the room
+    const bool cameraSel = mi == -2;
+    if (cameraSel && !m && !p.markers.empty()) m = &p.markers[0];
+    M4 camWorld;
+    {
+        const float eyeP[3] = {0, anchorMode == 2 ? 0.0f : anchorMode == 3 ? 1.45f : 0.85f, anchorMode == 2 ? 2.0f : anchorMode == 3 ? 2.6f : 1.0f};
+        const float at[3] = {0, anchorMode == 3 ? 0.55f : 0.0f, anchorMode == 2 ? headAt[2] : anchorMode == 3 ? -0.6f : 0.0f};
+        float f[3] = {at[0] - eyeP[0], at[1] - eyeP[1], at[2] - eyeP[2]}; float fl = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]); for (auto& v : f) v /= fl;
+        float r[3] = {-f[2], 0, f[0]}; float rl = std::sqrt(r[0] * r[0] + r[2] * r[2]); if (rl < 1e-5f) { r[0] = 1; rl = 1; } for (auto& v : r) v /= rl;
+        const float u[3] = {r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0]};
+        camWorld = ident();
+        for (int k = 0; k < 3; ++k) { camWorld.m[k] = r[k]; camWorld.m[4 + k] = u[k]; camWorld.m[8 + k] = -f[k]; camWorld.m[12 + k] = eyeP[k]; }
+    }
+    auto placeAll = [&](const Marker& mk, const M4& base) {
         std::map<int, M4> worldOf;
-        for (const Object& o : m->objects) {
+        for (const Object& o : mk.objects) {
             if (!o.active) continue;
             bool parentOn = o.parent == -1;
-            M4 parent = ident();
+            M4 parent = base;
             if (o.parent != -1) { auto it = worldOf.find(o.parent); if (it == worldOf.end()) continue; parent = it->second; parentOn = true; }
             if (!parentOn) continue;
             M4 world = mul(parent, localOf(o, t, nullptr));
             if (o.hasFollower && o.followerOn) {   // path following: on its path, facing the way it goes
-                for (const Object& q : m->objects) if (q.hasPath && q.active && q.pathName == o.followPath) {
+                for (const Object& q : mk.objects) if (q.hasPath && q.active && q.pathName == o.followPath) {
                     const auto pts = ArNav::fromFlat(q.pathPoints);
                     const ArNav::Pose pose = ArNav::at(pts, o.followOnStart ? o.followSpeed * t : 0, o.followLoop);
                     const M4 own = localOf(o, t, nullptr);   // its own Position: an offset from the path (e.g. up off the floor)
-                    world = mul(mul(worldAt(*m, q, t), mul(translate(pose.p.x, pose.p.y, pose.p.z), rotY(pose.yaw))), own);
+                    world = mul(mul(mul(base, worldAt(mk, q, t)), mul(translate(pose.p.x, pose.p.y, pose.p.z), rotY(pose.yaw))), own);
                     break;
                 }
             }
@@ -887,7 +900,9 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
             for (int r = 0; r < 4; ++r) clip[r] = viewProj.m[r] * cc[0] + viewProj.m[4 + r] * cc[1] + viewProj.m[8 + r] * cc[2] + viewProj.m[12 + r];
             if (clip[3] > 0) screenCentres.push_back({o.id, {(clip[0] / clip[3] * 0.5f + 0.5f) * w, (1 - (clip[1] / clip[3] * 0.5f + 0.5f)) * h}});
         }
-    }
+    };
+    if (m) placeAll(*m, ident());
+    placeAll(p.camera, camWorld);   // what rides with the phone
     std::stable_sort(draws.begin(), draws.end(), [](const Draw& a, const Draw& b) {
         if (a.blend != b.blend) return !a.blend;
         if (!a.blend && a.o->occluder != b.o->occluder) return a.o->occluder;   // occluders first: they hide what's behind
@@ -904,6 +919,16 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     }
     glDisable(GL_CLIP_DISTANCE0); glUniform4f_(uClip, 0, 0, 0, 1);
     glDisable(GL_STENCIL_TEST);
+    if (lk.gizmo) {   // the Main Camera: a phone's view (portrait), from where it'd be held
+        const float th = std::tan(p.camFov * 0.5f * D2R), d = 0.22f, hh = th * d, hw = hh * 9.0f / 16.0f;
+        const float c[4] = {cameraSel ? 0.2f : 0.85f, cameraSel ? 0.66f : 0.85f, cameraSel ? 0.89f : 0.85f, 1};
+        const float local[5][3] = {{0, 0, 0}, {-hw, -hh, -d}, {hw, -hh, -d}, {hw, hh, -d}, {-hw, hh, -d}};
+        float wp[5][3]; for (int i = 0; i < 5; ++i) apply(camWorld, local[i], wp[i]);
+        for (int i = 1; i <= 4; ++i) { segment(wp[0], wp[i], 0.006f, c); segment(wp[i], wp[i % 4 + 1], 0.006f, c); }
+        const float up0[3] = {-hw * 0.4f, hh * 1.15f, -d}, up1[3] = {hw * 0.4f, hh * 1.15f, -d}, up2[3] = {0, hh * 1.45f, -d};   // which way is up
+        float a0[3], a1[3], a2[3]; apply(camWorld, up0, a0); apply(camWorld, up1, a1); apply(camWorld, up2, a2);
+        segment(a0, a2, 0.006f, c); segment(a2, a1, 0.006f, c); segment(a1, a0, 0.006f, c);
+    }
 
     // a click: draw again in id colours and read the pixel under the mouse (0: nothing)
     if (clickX >= 0 && clickY >= 0 && clickX < w && clickY < h) {

@@ -157,8 +157,9 @@ static void say(const std::string& s) { toast = s; toastUntil = now() + 6; }
 static bool showAbout = false, showSettings = false;
 static void rememberProject();
 static void sceneToFile(const Project& p, const std::string& name);
-static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out, bool bumpIds = true);
+static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out, bool bumpIds = true, Project* whole = nullptr);
 static std::vector<Scene::Marker> sceneMarkers(const std::string& name);
+static void copyCamera(Project& to, const Project& from);
 // where projects live: Documents/Diorama, or the home folder's Diorama when Windows guards Documents
 // (Controlled Folder Access refuses unknown apps there, without a word)
 static bool writable(const fs::path& d) {
@@ -177,7 +178,15 @@ static std::string projectsHome() {
     return home;
 }
 
-static Marker* curMarker() { return selMarker >= 0 && selMarker < (int)proj.markers.size() ? &proj.markers[selMarker] : nullptr; }
+static Marker* curMarker() {   // the selected anchor; -2: the Main Camera (its objects ride with the phone)
+    if (selMarker == -2) return &proj.camera;
+    return selMarker >= 0 && selMarker < (int)proj.markers.size() ? &proj.markers[selMarker] : nullptr;
+}
+static int ownerOf(int id) {   // which anchor (or -2: the camera) has this object
+    for (const auto& o : proj.camera.objects) if (o.id == id) return -2;
+    for (int i = 0; i < (int)proj.markers.size(); ++i) for (const auto& o : proj.markers[i].objects) if (o.id == id) return i;
+    return selMarker;
+}
 static Object* curObject() {
     Marker* m = curMarker(); if (!m || selObject < 0) return nullptr;
     const int i = indexOfId(*m, selObject); return i >= 0 ? &m->objects[i] : nullptr;
@@ -269,6 +278,7 @@ static std::string bring(const std::string& file) {   // a file into the project
 }
 static void forEachFile(Project& p, const std::function<void(std::string&)>& f) {
     f(p.icon); f(p.splash);
+    for (auto& o : p.camera.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); f(o.uiFile); f(o.canvasCss); for (auto& sc : o.scripts) f(sc.file); }
     for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); f(o.uiFile); f(o.canvasCss); for (auto& sc : o.scripts) f(sc.file); } }
 }
 static bool saveProject(bool askFolder) {
@@ -723,6 +733,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     if (jobCancelled(err)) return false;
     jobSay("Scene " + std::to_string(si) + ": " + proj.scenes[si], 0.1f + 0.5f * si / std::max<size_t>(1, proj.scenes.size()));
     Project b = proj; b.markers = sceneMarkers(proj.scenes[si]);
+    if (proj.scenes[si] != proj.scene) { std::vector<Scene::Marker> ms; Project whole; if (sceneFromFile(proj.scenes[si], ms, false, &whole)) copyCamera(b, whole); }
     const std::string sceneSlug = si == 0 ? "" : slugOf(proj.scenes[si]) + "-";
     const std::string jsName = si == 0 ? "scene.js" : "scene-" + slugOf(proj.scenes[si]) + ".js";
     auto take = [&](std::string& f) {
@@ -737,6 +748,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
         const std::string key = f; f = "assets/" + name; done[key] = f;
     };
     std::string splashFile = proj.splash; if (si == 0) take(splashFile);
+    for (auto& ob : b.camera.objects) { take(ob.file); take(ob.audioFile); take(ob.particleFile); take(ob.videoFile); take(ob.uiFile); take(ob.canvasCss); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
     // the markers: their pattern files (made from their pictures), their printable pictures, a sheet of them all
     for (size_t i = 0; i < b.markers.size(); ++i) {
         Scene::Marker& m = b.markers[i];
@@ -1697,7 +1709,7 @@ static void sceneToFile(const Project& p, const std::string& name) {   // its an
     std::error_code ec; fs::create_directories(fs::u8path(folder) / "scenes", ec);
     std::ofstream(sceneFile(name), std::ios::binary) << Scene::toJson(rel);
 }
-static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out, bool bumpIds) {
+static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out, bool bumpIds, Project* whole) {
     std::ifstream f(sceneFile(name), std::ios::binary); if (!f) return false;
     std::stringstream ss; ss << f.rdbuf();
     Project t; std::string err; if (!Scene::fromJson(ss.str(), t, err)) return false;
@@ -1705,6 +1717,7 @@ static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& o
     forEachFile(t, [&](std::string& s) { if (!s.empty() && fs::u8path(s).is_relative()) s = (base / fs::u8path(s)).u8string(); });
     if (bumpIds) proj.nextId = std::max(proj.nextId, t.nextId);
     out = t.markers;
+    if (whole) *whole = t;
     return true;
 }
 static std::vector<Scene::Marker> sceneMarkers(const std::string& name) {   // a scene's anchors (the open one: as edited)
@@ -1716,11 +1729,17 @@ static std::vector<Scene::Marker> emptyScene() {
     Scene::Marker k; k.id = newId(proj); k.name = proj.tracking == TRACK_MARKERS ? "Hiro" : std::string(anchorWord()) + " 1"; v.push_back(k);
     return v;
 }
+// a scene's Main Camera (its settings and what rides with it)
+static void copyCamera(Project& to, const Project& from) {
+    to.camera = from.camera; to.camClear = from.camClear; memcpy(to.camColour, from.camColour, sizeof to.camColour);
+    to.camNear = from.camNear; to.camFar = from.camFar; to.camFov = from.camFov;
+}
 static void openScene(const std::string& name) {
     if (name == proj.scene) return;
     if (!folder.empty()) saveProject(false);
-    std::vector<Scene::Marker> ms;
-    if (!sceneFromFile(name, ms)) ms = emptyScene();
+    std::vector<Scene::Marker> ms; Project whole;
+    if (!sceneFromFile(name, ms, true, &whole)) { ms = emptyScene(); whole = Project(); }
+    copyCamera(proj, whole);
     proj.markers = ms; proj.scene = name;
     undoStack.clear(); redoStack.clear(); frameStart = proj;
     selMarker = 0; selObject = -1; shownMarker = -1;
@@ -1740,6 +1759,7 @@ static void newScene(bool duplicateOpen) {
     const std::string name = uniqueSceneName(duplicateOpen ? proj.scene : "Scene " + std::to_string(proj.scenes.size() + 1));
     Project t = proj;
     t.markers = duplicateOpen ? proj.markers : emptyScene();
+    if (!duplicateOpen) copyCamera(t, Project());   // a new scene: a new Main Camera
     sceneToFile(t, name);
     proj.scenes.push_back(name);
     openScene(name);
@@ -1852,7 +1872,7 @@ static void menuBar() {
         if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, m && selObject >= 0)) selObject = duplicate(proj, *m, selObject);
         if (ImGui::MenuItem("Delete", "Del", false, m != nullptr)) {
             if (selObject >= 0) { remove(*m, selObject); selObject = -1; }
-            else { proj.markers.erase(proj.markers.begin() + selMarker); selMarker = std::max(0, selMarker - 1); }
+            else if (selMarker >= 0) { proj.markers.erase(proj.markers.begin() + selMarker); selMarker = std::max(0, selMarker - 1); }
         }
         ImGui::EndMenu();
     }
@@ -1991,6 +2011,28 @@ static void hierarchy() {
     if (ImGui::BeginPopup("create")) { gameObjectItems(); ImGui::EndPopup(); }
     ImGui::Separator();
     ImGui::BeginChild("##tree");
+    {   // the Main Camera: every scene has one
+        Scene::Marker& m = proj.camera; const int mi = -2;
+        ImGui::PushID("camera");
+        ImGuiTreeNodeFlags fl = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_FramePadding;
+        if (m.objects.empty()) fl |= ImGuiTreeNodeFlags_Leaf;
+        if (selMarker == mi && selObject < 0) fl |= ImGuiTreeNodeFlags_Selected;
+        ImGui::SetNextItemOpen(m.expanded);
+        const bool open = ImGui::TreeNodeEx("##cam", fl, "\xe2\x97\x89 Main Camera");
+        m.expanded = open;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("The phone (or the webcam). Objects under it ride with it: a torch, a HUD, a held thing");
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) { selMarker = mi; selObject = -1; }
+        int moveId = -1, moveTo = -1;
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("OBJ")) { const int* d = (const int*)pl->Data; if (d[0] == mi) { moveId = d[1]; moveTo = -1; } }
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) dropAsset(m, mi, -1, std::string((const char*)pl->Data));
+            ImGui::EndDragDropTarget();
+        }
+        if (ImGui::BeginPopupContextItem()) { selMarker = mi; selObject = -1; gameObjectItems(); ImGui::EndPopup(); }
+        if (open) { for (int k : childrenOf(m, -1)) objectNode(m, mi, k, moveId, moveTo); ImGui::TreePop(); }
+        if (moveId >= 0) { if (moveTo == -99) { remove(m, moveId); if (selObject == moveId) selObject = -1; } else reparent(m, moveId, moveTo); }
+        ImGui::PopID();
+    }
     for (int mi = 0; mi < (int)proj.markers.size(); ++mi) {
         Scene::Marker& m = proj.markers[mi];
         ImGui::PushID(m.id);
@@ -2642,6 +2684,26 @@ static void objectInspector(Scene::Marker& m, Object& o) {
     (void)m;
 }
 
+// the Main Camera: Unity's Camera component (and its Audio Listener), for the phone or webcam
+static void cameraInspector() {
+    ImGui::PushFont(boldFont); ImGui::TextUnformatted("\xe2\x97\x89 Main Camera"); ImGui::PopFont();
+    ImGui::TextDisabled("Every scene has one: the phone (or the webcam).");
+    int h = componentHeader("Camera", nullptr, false);
+    if ((h & 0xff) == C_RESET) { const Project d; proj.camClear = d.camClear; memcpy(proj.camColour, d.camColour, sizeof proj.camColour); proj.camNear = d.camNear; proj.camFar = d.camFar; proj.camFov = d.camFov; }
+    if (h & 0x100) {
+        const char* clears[] = {"The camera's picture", "A solid colour"};
+        labelled("Background"); ImGui::Combo("##clr", &proj.camClear, clears, 2);
+        tip("AR shows what the camera sees. A solid colour: for previews and PCs (or a game that's all its own world)");
+        if (proj.camClear == 1 || proj.tracking == TRACK_SURFACES) { labelled("Colour"); ImGui::ColorEdit3("##cc", proj.camColour, ImGuiColorEditFlags_NoInputs); }
+        labelled("Field of view"); ImGui::SliderFloat("##fov", &proj.camFov, 20, 110, "%.0f\xc2\xb0"); tip("Up and down. AR uses the real lens; this is for previews and webcams");
+        labelled("Near"); ImGui::DragFloat("##near", &proj.camNear, 0.001f, 0.001f, proj.camFar - 0.01f, "%.3f m");
+        labelled("Far"); ImGui::DragFloat("##far", &proj.camFar, 0.5f, proj.camNear + 0.01f, 10000, "%.1f m");
+        ImGui::TextDisabled("Its Audio Listener hears the Audio Sources (3D sound).");
+    }
+    ImGui::Spacing();
+    ImGui::TextWrapped("Objects under the Main Camera ride with it: a torch, a held thing, a sight in the middle of the view. "
+                       "Make one with the Camera selected (GameObject menu), or drag one onto it.");
+}
 static void inspector() {
     ImGui::PushFont(boldFont); ImGui::TextUnformatted("Inspector"); ImGui::PopFont();
     ImGui::Separator();
@@ -2649,6 +2711,7 @@ static void inspector() {
     ImGui::PushItemWidth(-1);
     Scene::Marker* m = curMarker();
     if (Object* o = curObject()) objectInspector(*m, *o);
+    else if (selMarker == -2) cameraInspector();
     else if (m) markerInspector(*m);
     else ImGui::TextDisabled("Nothing selected.");
     ImGui::PopItemWidth();
@@ -2820,7 +2883,7 @@ static void sceneView() {
     int picked = -1;
     static bool uiHasMouse = false;
     const unsigned tex = Viewer::render(proj, selMarker, selObject, (int)avail.x, (int)avail.y, hov && !handleHasMouse && !uiHasMouse, picked);
-    if (!uiHasMouse) { if (picked >= 0) selObject = picked; else if (picked == -2 && !handleHasMouse) selObject = -1; }
+    if (!uiHasMouse) { if (picked >= 0) { selMarker = ownerOf(picked); selObject = picked; } else if (picked == -2 && !handleHasMouse) selObject = -1; }
     ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)tex, a, ImVec2(a.x + avail.x, a.y + avail.y), ImVec2(0, 1), ImVec2(1, 0));
     const Object* so = curObject();
     handleHasMouse = (so && so->ui != UI_NONE) ? false : handles(a, avail);   // UI elements move on the phone, not in 3D

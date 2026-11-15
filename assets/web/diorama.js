@@ -757,6 +757,8 @@
         });
       };
       var roots = from ? [from] : Object.keys(R.roots).map(function (k) { return R.roots[k]; });
+      // a path may start with an anchor's name ("Main Camera/Torch", "Hiro/Cube"): only under that one
+      if (!from && parts.length > 1 && R.roots[parts[0]]) { roots = [R.roots[parts[0]]]; parts = parts.slice(1); }
       roots.forEach(function (r) { search(r, 0); });
       return hit ? wrap(hit) : null;
     }
@@ -956,7 +958,30 @@
       runtime.anchor(m.name, root, m.objects);
       return root;
     }
-    return { anchorWorld: anchorWorld, animate: animate, runtime: runtime, planes: PLANES, nav: nav, navLoadSaved: navLoadSaved };
+    // the Main Camera's objects: built under the camera itself, so they ride with the phone (find("Main Camera/Torch"))
+    function cameraRig(proj, camera, nodes, players) {
+      var cam = proj.camera; if (!cam || !cam.objects || !cam.objects.length) return null;
+      var rig = new THREE.Group(), byId = {};
+      cam.objects.forEach(function (o) {
+        if (!o.active) return;
+        var parent = o.parent === -1 ? rig : byId[o.parent];
+        if (!parent) return;
+        var n = build(o, players); byId[o.id] = n; parent.add(n); nodes.push(n); attachScripts(n);
+      });
+      camera.add(rig);
+      runtime.begin(nodes, players);
+      runtime.anchor('Main Camera', rig, cam.objects);
+      return rig;
+    }
+    // the Main Camera's settings: the colour behind (when it's not the camera's picture), near, far, field of view
+    function cameraSettings(proj, camera, opts) {
+      var c = proj.camColour || [0.07, 0.07, 0.08];
+      var colour = new THREE.Color(c[0], c[1], c[2]);
+      if (opts && opts.preview) { camera.fov = proj.camFov || 60; }
+      if (opts && opts.ownProjection !== true) { camera.near = proj.camNear || 0.01; camera.far = proj.camFar || 100; if (camera.updateProjectionMatrix && camera.isPerspectiveCamera) camera.updateProjectionMatrix(); }
+      return { solid: proj.camClear === 1, colour: colour };
+    }
+    return { anchorWorld: anchorWorld, animate: animate, runtime: runtime, planes: PLANES, nav: nav, navLoadSaved: navLoadSaved, cameraRig: cameraRig, cameraSettings: cameraSettings };
   }
 
   function fromDisk() {
@@ -1045,9 +1070,12 @@
               else renderer.setSize(window.innerWidth, window.innerWidth / vw * vh);
             };
             fit(); window.addEventListener('resize', fit);
+            var camSet = C.cameraSettings(proj, arScene.camera, { ownProjection: true });   // ARToolKit's lens is the real one
+            if (camSet.solid) { arScene.videoScene.traverse(function (c) { if (c.isMesh) c.visible = false; }); if (renderer.setClearColor) renderer.setClearColor(camSet.colour, 1); }
             document.body.insertBefore(renderer.domElement, document.body.firstChild);
             C.runtime.setCamera(arScene.camera, renderer.domElement);
             var nodes = [], players = [], roots = [];
+            C.cameraRig(proj, arScene.camera, nodes, players);
             proj.markers.forEach(function (m) {
               var root = C.anchorWorld(m, nodes, players);
               root.rotation.x = Math.PI / 2;   // the editor's Y-up, laid on ARToolKit's marker (Z up out of it)
@@ -1105,6 +1133,12 @@
         if (!faces) opts.imageTargetSrc = imageTargetSrc;
         var mind = new lib.MindARThree(opts);
         var renderer = mind.renderer, scene = mind.scene, camera = mind.camera;
+        if (!camera.parent) scene.add(camera);
+        var camSet = C.cameraSettings(proj, camera, { ownProjection: true });
+        if (camSet.solid) {   // the webcam picture hidden: a world of its own
+          document.documentElement.style.background = '#' + camSet.colour.getHexString();
+          var hideVideo = setInterval(function () { var v = document.querySelector('video'); if (v) { v.style.visibility = 'hidden'; clearInterval(hideVideo); } }, 200);
+        }
         C.runtime.setCamera(camera, renderer.domElement);
         var nodes = [], players = [], found = {}, faceAnchors = [];
         // MindAR's face units: about 0.6 of them make a face's width; the editor's face is 1 wide
@@ -1127,6 +1161,7 @@
           a.onTargetLost = function () { delete found[m.name]; C.runtime.seen(m.name, false); };
         });
         var clock = new THREE.Clock(), t = 0, lastLine = '';
+        C.cameraRig(proj, camera, nodes, players);
         mind.start().then(function () {
           renderer.setAnimationLoop(function () {
             var dt = clock.getDelta(); t += dt;
@@ -1190,6 +1225,8 @@
       C.planes.look = new THREE.Group(); scene.add(C.planes.look);
       var nodes = [], players = [];
       var anchors = proj.markers.map(function (m) { var root = C.anchorWorld(m, nodes, players); root.visible = false; scene.add(root); return { m: m, root: root, placed: false }; });
+      C.cameraRig(proj, camera, nodes, players);
+      var camSet = C.cameraSettings(proj, camera, { preview: true });
       C.navLoadSaved();
       window.addEventListener('resize', function () { if (renderer) renderer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); });
       // where an anchor goes: a point on a surface, turned to face the player
@@ -1215,7 +1252,7 @@
       var preview = function (why) {
         say(why);
         useRenderer(!!lib.webgpu);
-        scene.background = new THREE.Color(0x161616);
+        scene.background = camSet.colour;
         var yaw = 0.35, pitch = 0.55, dist = 6.5, tgt = new THREE.Vector3(0.2, 0.4, -0.6);
         var aim = function () { camera.position.set(tgt.x + dist * Math.cos(pitch) * Math.sin(yaw), tgt.y + dist * Math.sin(pitch), tgt.z + dist * Math.cos(pitch) * Math.cos(yaw)); camera.lookAt(tgt); };
         aim();

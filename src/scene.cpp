@@ -102,18 +102,12 @@ static void readArr(const Json::Value& o, const char* k, float* v, int n) {
 static bool readBool(const Json::Value& o, const char* k, bool def) { const Json::Value* v = o.get(k); return v && v->type == Json::Value::BOOL ? v->b : def; }
 static int indexOf(const char* const* names, int n, const std::string& s, int def) { for (int i = 0; i < n; ++i) if (s == names[i]) return i; return def; }
 
-std::string toJson(const Project& p) {
-    std::string out = "{\n  \"diorama\": 1,\n  \"title\": " + Json::quote(p.title) + ",\n  \"tracking\": \"" + TRACKING_NAMES[p.tracking] +
-                      "\",\n  \"gps\": " + (p.gps ? "true" : "false") + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"scene\": " + Json::quote(p.scene) + ",\n  \"scenes\": [";
-    for (size_t i = 0; i < p.scenes.size(); ++i) out += (i ? ", " : "") + Json::quote(p.scenes[i]);
-    out += "],\n  \"platform\": " + Json::quote(p.platform) + ", \"windowsRuntime\": " + std::to_string(p.windowsRuntime) + ", \"renderer\": " + std::to_string(p.renderer) +
-           ",\n  \"company\": " + Json::quote(p.company) + ", \"version\": " + Json::quote(p.version) + ", \"packageId\": " + Json::quote(p.packageId) +
-           ",\n  \"icon\": " + Json::quote(p.icon) + ", \"splash\": " + Json::quote(p.splash) + ", \"intro\": " + Json::quote(p.intro) +
-           ",\n  \"skipSplash\": " + (p.skipSplash ? "true" : "false") + ", \"fullscreen\": " + (p.fullscreen ? "true" : "false") +
-           ", \"orientation\": " + std::to_string(p.orientation);
-    out += ",\n  \"markers\": [";
-    for (size_t m = 0; m < p.markers.size(); ++m) {
-        const Marker& k = p.markers[m];
+static std::string fnum(float f) { char b[32]; snprintf(b, sizeof b, "%g", f); return b; }
+// anchors (and the Main Camera, which has the same parts) as JSON objects, each on its own line
+static std::string markersJson(const std::vector<Marker>& list) {
+    std::string out;
+    for (size_t m = 0; m < list.size(); ++m) {
+        const Marker& k = list[m];
         Json::Writer w;
         w.i("id", k.id).s("name", k.name).s("type", k.type == MK_BARCODE ? "barcode" : "pattern").s("preset", k.preset).s("picture", k.picture)
          .s("letter", k.letter).i("barcode", k.barcode).f("sunStrength", k.sunStrength).f("sunYaw", k.sunYaw).f("sunPitch", k.sunPitch)
@@ -174,7 +168,91 @@ std::string toJson(const Project& p) {
         w.out += "]";
         out += std::string(m ? "," : "") + "\n    " + w.str();
     }
-    return out + "\n  ]\n}\n";
+    return out;
+}
+static Marker markerFrom(const Json::Value& mv, Project& p) {
+    Marker k;
+    k.id = (int)mv.num("id", 0); k.name = mv.str("name", k.name); k.type = mv.str("type") == "barcode" ? MK_BARCODE : MK_PATTERN; k.preset = mv.str("preset", "");
+    k.picture = mv.str("picture"); k.letter = mv.str("letter"); k.barcode = (int)mv.num("barcode", 0);
+    k.target = mv.str("target"); k.facePoint = (int)mv.num("facePoint", 1);
+    k.sunStrength = (float)mv.num("sunStrength", k.sunStrength); k.sunYaw = (float)mv.num("sunYaw", k.sunYaw); k.sunPitch = (float)mv.num("sunPitch", k.sunPitch);
+    k.portal = readBool(mv, "portal", k.portal); k.expanded = readBool(mv, "expanded", true);
+    readArr(mv, "ambient", k.ambient, 3); readArr(mv, "sun", k.sun, 3); readArr(mv, "portalSize", k.portalSize, 2);
+    k.planeDetect = (int)mv.num("planeDetect", 2); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
+    readArr(mv, "planeColour", k.planeColour, 4);
+    if (const Json::Value* os = mv.get("objects"))
+        for (const Json::Value& ov : os->a) {
+            Object o;
+            o.id = (int)ov.num("id", 0); o.parent = (int)ov.num("parent", -1); o.name = ov.str("name", o.name);
+            o.kind = indexOf(KIND_NAMES, KIND_COUNT, ov.str("kind"), EMPTY); o.active = readBool(ov, "active", true); o.expanded = readBool(ov, "expanded", true);
+            o.file = ov.str("file"); o.lit = readBool(ov, "lit", true); o.glow = readBool(ov, "glow", false); o.billboard = readBool(ov, "billboard", false);
+            o.anim = indexOf(ANIM_NAMES, ANIM_COUNT, ov.str("anim"), A_STILL); o.animSpeed = (float)ov.num("animSpeed", 1); o.animAmount = (float)ov.num("animAmount", 0.1);
+            o.count = (int)ov.num("count", 12); o.spriteSize = (float)ov.num("spriteSize", 0.15); o.flap = (float)ov.num("flap", 1);
+            o.rays = (int)ov.num("rays", 6); o.text = ov.str("text", o.text);
+            o.clip = ov.str("clip"); o.clipSpeed = (float)ov.num("clipSpeed", 1); o.clipLoop = readBool(ov, "clipLoop", true);
+            o.lookOn = readBool(ov, "lookOn", true); o.animOn = readBool(ov, "animOn", true);
+            o.prefab = ov.str("prefab");
+            o.occluder = readBool(ov, "occluder", false);
+            o.hasLight = readBool(ov, "hasLight", false); o.lightOn = readBool(ov, "lightOn", true); o.lightType = (int)ov.num("lightType", 0);
+            o.lightIntensity = (float)ov.num("lightIntensity", o.lightIntensity); o.lightRange = (float)ov.num("lightRange", o.lightRange); o.spotAngle = (float)ov.num("spotAngle", o.spotAngle);
+            o.hasAudio = readBool(ov, "hasAudio", false); o.audioOn = readBool(ov, "audioOn", true); o.audioFile = ov.str("audioFile"); o.volume = (float)ov.num("volume", 1);
+            o.audioLoop = readBool(ov, "audioLoop", false); o.playOnStart = readBool(ov, "playOnStart", true); o.spatial = readBool(ov, "spatial", true);
+            o.audioNear = (float)ov.num("audioNear", o.audioNear); o.audioFar = (float)ov.num("audioFar", o.audioFar);
+            o.hasVideo = readBool(ov, "hasVideo", false); o.videoOn = readBool(ov, "videoOn", true); o.videoFile = ov.str("videoFile");
+            o.videoLoop = readBool(ov, "videoLoop", true); o.videoPlayOnStart = readBool(ov, "videoPlayOnStart", true); o.videoMuted = readBool(ov, "videoMuted", false);
+            o.videoVolume = (float)ov.num("videoVolume", 1); o.videoSpeed = (float)ov.num("videoSpeed", 1);
+            o.hasPath = readBool(ov, "hasPath", false); o.pathOn = readBool(ov, "pathOn", true); o.pathLoop = readBool(ov, "pathLoop", false); o.pathLine = readBool(ov, "pathLine", true);
+            o.pathName = ov.str("pathName", o.pathName); o.arrowSpacing = (float)ov.num("arrowSpacing", o.arrowSpacing); o.arrowSize = (float)ov.num("arrowSize", o.arrowSize);
+            readArr(ov, "pathColour", o.pathColour, 4);
+            if (const Json::Value* pp = ov.get("pathPoints")) if (pp->type == Json::Value::ARR && pp->a.size() >= 3) {
+                o.pathPoints.clear(); for (const auto& v : pp->a) o.pathPoints.push_back((float)v.n); o.pathPoints.resize(o.pathPoints.size() / 3 * 3);
+            }
+            o.hasFollower = readBool(ov, "hasFollower", false); o.followerOn = readBool(ov, "followerOn", true); o.followLoop = readBool(ov, "followLoop", true);
+            o.followOnStart = readBool(ov, "followOnStart", true); o.followPath = ov.str("followPath", o.followPath); o.followSpeed = (float)ov.num("followSpeed", o.followSpeed);
+            o.hasCanvas = readBool(ov, "hasCanvas", false); o.canvasWithAnchor = readBool(ov, "canvasWithAnchor", false); o.canvasCss = ov.str("canvasCss");
+            { const std::string u = ov.str("ui"); o.ui = UI_NONE; for (int k = 1; k < UI_COUNT; ++k) if (u == UI_NAMES[k]) o.ui = k; }
+            o.uiOn = readBool(ov, "uiOn", true); o.uiAnchor = (int)ov.num("uiAnchor", 4); o.uiText = ov.str("uiText", o.uiText); o.uiFont = (float)ov.num("uiFont", 20);
+            o.uiAlign = (int)ov.num("uiAlign", 1); o.uiMin = (float)ov.num("uiMin", 0); o.uiMax = (float)ov.num("uiMax", 1); o.uiValue = (float)ov.num("uiValue", 0.5);
+            o.uiChecked = readBool(ov, "uiChecked", false); o.uiFile = ov.str("uiFile"); o.uiClass = ov.str("uiClass"); o.uiOnClick = ov.str("uiOnClick");
+            readArr(ov, "uiRect", o.uiRect, 4); readArr(ov, "uiColour", o.uiColour, 4); readArr(ov, "uiBg", o.uiBg, 4);
+            o.hasParticles = readBool(ov, "hasParticles", false); o.particlesOn = readBool(ov, "particlesOn", true); o.particleFile = ov.str("particleFile");
+            o.pRate = (float)ov.num("pRate", o.pRate); o.pLife = (float)ov.num("pLife", o.pLife); o.pSpeed = (float)ov.num("pSpeed", o.pSpeed); o.pSpread = (float)ov.num("pSpread", o.pSpread);
+            o.pSizeStart = (float)ov.num("pSizeStart", o.pSizeStart); o.pSizeEnd = (float)ov.num("pSizeEnd", o.pSizeEnd); o.pGravity = (float)ov.num("pGravity", o.pGravity); o.pGlow = readBool(ov, "pGlow", true);
+            o.hasLine = readBool(ov, "hasLine", false); o.lineOn = readBool(ov, "lineOn", true); o.lineLoop = readBool(ov, "lineLoop", false); o.lineWidth = (float)ov.num("lineWidth", o.lineWidth);
+            o.hasTrail = readBool(ov, "hasTrail", false); o.trailOn = readBool(ov, "trailOn", true); o.trailTime = (float)ov.num("trailTime", o.trailTime); o.trailWidth = (float)ov.num("trailWidth", o.trailWidth);
+            readArr(ov, "lightColour", o.lightColour, 3); readArr(ov, "pColourStart", o.pColourStart, 4); readArr(ov, "pColourEnd", o.pColourEnd, 4);
+            readArr(ov, "lineColour", o.lineColour, 4); readArr(ov, "trailColour", o.trailColour, 4);
+            if (const Json::Value* lp = ov.get("linePoints")) if (lp->type == Json::Value::ARR && lp->a.size() >= 6) {
+                o.linePoints.clear(); for (const auto& v : lp->a) o.linePoints.push_back((float)v.n);
+                o.linePoints.resize(o.linePoints.size() / 3 * 3);
+            }
+            o.hasAnim = readBool(ov, "hasAnim", o.anim != A_STILL);
+            if (const Json::Value* ss = ov.get("scripts"))
+                for (const Json::Value& sv : ss->a) { Script sc; sc.file = sv.str("file"); sc.on = readBool(sv, "on", true); if (!sc.file.empty()) o.scripts.push_back(sc); }
+            readArr(ov, "position", o.pos, 3); readArr(ov, "rotation", o.rot, 3); readArr(ov, "scale", o.scl, 3); readArr(ov, "colour", o.colour, 4);
+            k.objects.push_back(o);
+            p.nextId = std::max(p.nextId, o.id + 1);
+        }
+    p.nextId = std::max(p.nextId, k.id + 1);
+    return k;
+}
+
+std::string toJson(const Project& p) {
+    std::string out = "{\n  \"diorama\": 1,\n  \"title\": " + Json::quote(p.title) + ",\n  \"tracking\": \"" + TRACKING_NAMES[p.tracking] +
+                      "\",\n  \"gps\": " + (p.gps ? "true" : "false") + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"scene\": " + Json::quote(p.scene) + ",\n  \"scenes\": [";
+    for (size_t i = 0; i < p.scenes.size(); ++i) out += (i ? ", " : "") + Json::quote(p.scenes[i]);
+    out += "],\n  \"platform\": " + Json::quote(p.platform) + ", \"windowsRuntime\": " + std::to_string(p.windowsRuntime) + ", \"renderer\": " + std::to_string(p.renderer) +
+           ",\n  \"company\": " + Json::quote(p.company) + ", \"version\": " + Json::quote(p.version) + ", \"packageId\": " + Json::quote(p.packageId) +
+           ",\n  \"icon\": " + Json::quote(p.icon) + ", \"splash\": " + Json::quote(p.splash) + ", \"intro\": " + Json::quote(p.intro) +
+           ",\n  \"skipSplash\": " + (p.skipSplash ? "true" : "false") + ", \"fullscreen\": " + (p.fullscreen ? "true" : "false") +
+           ", \"orientation\": " + std::to_string(p.orientation);
+    out += ",\n  \"markers\": [";
+    out += markersJson(p.markers);
+    // the Main Camera: its children ride with the phone; and how it draws
+    out += "\n  ],\n  \"camera\": " + markersJson({p.camera}).substr(5) +
+           ",\n  \"camClear\": " + std::to_string(p.camClear) + ", \"camNear\": " + fnum(p.camNear) + ", \"camFar\": " + fnum(p.camFar) +
+           ", \"camFov\": " + fnum(p.camFov) + ", \"camColour\": " + arr(p.camColour, 3);
+    return out + "\n}\n";
 }
 
 bool fromJson(const std::string& text, Project& p, std::string& err) {
@@ -197,74 +275,12 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
     { const Json::Value* b = v.get("fullscreen"); p.fullscreen = b && b->type == Json::Value::BOOL && b->b; }
     p.orientation = (int)v.num("orientation", 0);
     if (std::find(p.scenes.begin(), p.scenes.end(), p.scene) == p.scenes.end()) p.scene = p.scenes[0];
+    if (const Json::Value* cv = v.get("camera")) if (cv->type == Json::Value::OBJ) p.camera = markerFrom(*cv, p);
+    p.camClear = (int)v.num("camClear", 0); p.camNear = (float)v.num("camNear", p.camNear); p.camFar = (float)v.num("camFar", p.camFar); p.camFov = (float)v.num("camFov", p.camFov);
+    readArr(v, "camColour", p.camColour, 3);
     const Json::Value* ms = v.get("markers");
     if (!ms || ms->type != Json::Value::ARR) return true;
-    for (const Json::Value& mv : ms->a) {
-        Marker k;
-        k.id = (int)mv.num("id", 0); k.name = mv.str("name", k.name); k.type = mv.str("type") == "barcode" ? MK_BARCODE : MK_PATTERN; k.preset = mv.str("preset", "");
-        k.picture = mv.str("picture"); k.letter = mv.str("letter"); k.barcode = (int)mv.num("barcode", 0);
-        k.target = mv.str("target"); k.facePoint = (int)mv.num("facePoint", 1);
-        k.sunStrength = (float)mv.num("sunStrength", k.sunStrength); k.sunYaw = (float)mv.num("sunYaw", k.sunYaw); k.sunPitch = (float)mv.num("sunPitch", k.sunPitch);
-        k.portal = readBool(mv, "portal", k.portal); k.expanded = readBool(mv, "expanded", true);
-        readArr(mv, "ambient", k.ambient, 3); readArr(mv, "sun", k.sun, 3); readArr(mv, "portalSize", k.portalSize, 2);
-        k.planeDetect = (int)mv.num("planeDetect", 2); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
-        readArr(mv, "planeColour", k.planeColour, 4);
-        if (const Json::Value* os = mv.get("objects"))
-            for (const Json::Value& ov : os->a) {
-                Object o;
-                o.id = (int)ov.num("id", 0); o.parent = (int)ov.num("parent", -1); o.name = ov.str("name", o.name);
-                o.kind = indexOf(KIND_NAMES, KIND_COUNT, ov.str("kind"), EMPTY); o.active = readBool(ov, "active", true); o.expanded = readBool(ov, "expanded", true);
-                o.file = ov.str("file"); o.lit = readBool(ov, "lit", true); o.glow = readBool(ov, "glow", false); o.billboard = readBool(ov, "billboard", false);
-                o.anim = indexOf(ANIM_NAMES, ANIM_COUNT, ov.str("anim"), A_STILL); o.animSpeed = (float)ov.num("animSpeed", 1); o.animAmount = (float)ov.num("animAmount", 0.1);
-                o.count = (int)ov.num("count", 12); o.spriteSize = (float)ov.num("spriteSize", 0.15); o.flap = (float)ov.num("flap", 1);
-                o.rays = (int)ov.num("rays", 6); o.text = ov.str("text", o.text);
-                o.clip = ov.str("clip"); o.clipSpeed = (float)ov.num("clipSpeed", 1); o.clipLoop = readBool(ov, "clipLoop", true);
-                o.lookOn = readBool(ov, "lookOn", true); o.animOn = readBool(ov, "animOn", true);
-                o.prefab = ov.str("prefab");
-                o.occluder = readBool(ov, "occluder", false);
-                o.hasLight = readBool(ov, "hasLight", false); o.lightOn = readBool(ov, "lightOn", true); o.lightType = (int)ov.num("lightType", 0);
-                o.lightIntensity = (float)ov.num("lightIntensity", o.lightIntensity); o.lightRange = (float)ov.num("lightRange", o.lightRange); o.spotAngle = (float)ov.num("spotAngle", o.spotAngle);
-                o.hasAudio = readBool(ov, "hasAudio", false); o.audioOn = readBool(ov, "audioOn", true); o.audioFile = ov.str("audioFile"); o.volume = (float)ov.num("volume", 1);
-                o.audioLoop = readBool(ov, "audioLoop", false); o.playOnStart = readBool(ov, "playOnStart", true); o.spatial = readBool(ov, "spatial", true);
-                o.audioNear = (float)ov.num("audioNear", o.audioNear); o.audioFar = (float)ov.num("audioFar", o.audioFar);
-                o.hasVideo = readBool(ov, "hasVideo", false); o.videoOn = readBool(ov, "videoOn", true); o.videoFile = ov.str("videoFile");
-                o.videoLoop = readBool(ov, "videoLoop", true); o.videoPlayOnStart = readBool(ov, "videoPlayOnStart", true); o.videoMuted = readBool(ov, "videoMuted", false);
-                o.videoVolume = (float)ov.num("videoVolume", 1); o.videoSpeed = (float)ov.num("videoSpeed", 1);
-                o.hasPath = readBool(ov, "hasPath", false); o.pathOn = readBool(ov, "pathOn", true); o.pathLoop = readBool(ov, "pathLoop", false); o.pathLine = readBool(ov, "pathLine", true);
-                o.pathName = ov.str("pathName", o.pathName); o.arrowSpacing = (float)ov.num("arrowSpacing", o.arrowSpacing); o.arrowSize = (float)ov.num("arrowSize", o.arrowSize);
-                readArr(ov, "pathColour", o.pathColour, 4);
-                if (const Json::Value* pp = ov.get("pathPoints")) if (pp->type == Json::Value::ARR && pp->a.size() >= 3) {
-                    o.pathPoints.clear(); for (const auto& v : pp->a) o.pathPoints.push_back((float)v.n); o.pathPoints.resize(o.pathPoints.size() / 3 * 3);
-                }
-                o.hasFollower = readBool(ov, "hasFollower", false); o.followerOn = readBool(ov, "followerOn", true); o.followLoop = readBool(ov, "followLoop", true);
-                o.followOnStart = readBool(ov, "followOnStart", true); o.followPath = ov.str("followPath", o.followPath); o.followSpeed = (float)ov.num("followSpeed", o.followSpeed);
-                o.hasCanvas = readBool(ov, "hasCanvas", false); o.canvasWithAnchor = readBool(ov, "canvasWithAnchor", false); o.canvasCss = ov.str("canvasCss");
-                { const std::string u = ov.str("ui"); o.ui = UI_NONE; for (int k = 1; k < UI_COUNT; ++k) if (u == UI_NAMES[k]) o.ui = k; }
-                o.uiOn = readBool(ov, "uiOn", true); o.uiAnchor = (int)ov.num("uiAnchor", 4); o.uiText = ov.str("uiText", o.uiText); o.uiFont = (float)ov.num("uiFont", 20);
-                o.uiAlign = (int)ov.num("uiAlign", 1); o.uiMin = (float)ov.num("uiMin", 0); o.uiMax = (float)ov.num("uiMax", 1); o.uiValue = (float)ov.num("uiValue", 0.5);
-                o.uiChecked = readBool(ov, "uiChecked", false); o.uiFile = ov.str("uiFile"); o.uiClass = ov.str("uiClass"); o.uiOnClick = ov.str("uiOnClick");
-                readArr(ov, "uiRect", o.uiRect, 4); readArr(ov, "uiColour", o.uiColour, 4); readArr(ov, "uiBg", o.uiBg, 4);
-                o.hasParticles = readBool(ov, "hasParticles", false); o.particlesOn = readBool(ov, "particlesOn", true); o.particleFile = ov.str("particleFile");
-                o.pRate = (float)ov.num("pRate", o.pRate); o.pLife = (float)ov.num("pLife", o.pLife); o.pSpeed = (float)ov.num("pSpeed", o.pSpeed); o.pSpread = (float)ov.num("pSpread", o.pSpread);
-                o.pSizeStart = (float)ov.num("pSizeStart", o.pSizeStart); o.pSizeEnd = (float)ov.num("pSizeEnd", o.pSizeEnd); o.pGravity = (float)ov.num("pGravity", o.pGravity); o.pGlow = readBool(ov, "pGlow", true);
-                o.hasLine = readBool(ov, "hasLine", false); o.lineOn = readBool(ov, "lineOn", true); o.lineLoop = readBool(ov, "lineLoop", false); o.lineWidth = (float)ov.num("lineWidth", o.lineWidth);
-                o.hasTrail = readBool(ov, "hasTrail", false); o.trailOn = readBool(ov, "trailOn", true); o.trailTime = (float)ov.num("trailTime", o.trailTime); o.trailWidth = (float)ov.num("trailWidth", o.trailWidth);
-                readArr(ov, "lightColour", o.lightColour, 3); readArr(ov, "pColourStart", o.pColourStart, 4); readArr(ov, "pColourEnd", o.pColourEnd, 4);
-                readArr(ov, "lineColour", o.lineColour, 4); readArr(ov, "trailColour", o.trailColour, 4);
-                if (const Json::Value* lp = ov.get("linePoints")) if (lp->type == Json::Value::ARR && lp->a.size() >= 6) {
-                    o.linePoints.clear(); for (const auto& v : lp->a) o.linePoints.push_back((float)v.n);
-                    o.linePoints.resize(o.linePoints.size() / 3 * 3);
-                }
-                o.hasAnim = readBool(ov, "hasAnim", o.anim != A_STILL);
-                if (const Json::Value* ss = ov.get("scripts"))
-                    for (const Json::Value& sv : ss->a) { Script sc; sc.file = sv.str("file"); sc.on = readBool(sv, "on", true); if (!sc.file.empty()) o.scripts.push_back(sc); }
-                readArr(ov, "position", o.pos, 3); readArr(ov, "rotation", o.rot, 3); readArr(ov, "scale", o.scl, 3); readArr(ov, "colour", o.colour, 4);
-                k.objects.push_back(o);
-                p.nextId = std::max(p.nextId, o.id + 1);
-            }
-        p.nextId = std::max(p.nextId, k.id + 1);
-        p.markers.push_back(k);
-    }
+    for (const Json::Value& mv : ms->a) p.markers.push_back(markerFrom(mv, p));
     return true;
 }
 
