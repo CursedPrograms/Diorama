@@ -123,12 +123,64 @@
     }, 64, 64);
     function attr(g, name, arr, n) { var a = new THREE.BufferAttribute(new Float32Array(arr), n); (g.setAttribute || g.addAttribute).call(g, name, a); }
 
+    // a colour as picked (sRGB, like the editor's); three.js works in linear light
+    function rgb(c) { var k = new THREE.Color(); if (THREE.SRGBColorSpace) k.setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace); else k.setRGB(c[0], c[1], c[2]); return k; }
+    // Graphics (Build Settings): shadows, bloom, tone mapping, exposure
+    var GFX = { shadows: true, quality: 1, bloom: true, bloomStrength: 0.6, bloomThreshold: 0.9, tone: 1, exposure: 1, tracking: 'markers' };
+    function graphics(proj) {
+      GFX.shadows = proj.shadows !== false; GFX.quality = proj.shadowQuality === undefined ? 1 : proj.shadowQuality;
+      GFX.bloom = proj.bloom !== false; GFX.bloomStrength = proj.bloomStrength === undefined ? 0.6 : proj.bloomStrength;
+      GFX.bloomThreshold = proj.bloomThreshold === undefined ? 0.9 : proj.bloomThreshold;
+      GFX.tone = proj.toneMapping === undefined ? 1 : proj.toneMapping; GFX.exposure = proj.exposure || 1; GFX.tracking = proj.tracking || 'markers';
+      GFX.webgpu = proj.renderer === 1;
+    }
+    function setupRenderer(renderer) {
+      renderer.toneMapping = GFX.tone === 2 ? THREE.ACESFilmicToneMapping : GFX.tone === 1 ? (THREE.NeutralToneMapping || THREE.ACESFilmicToneMapping) : THREE.NoToneMapping;
+      renderer.toneMappingExposure = GFX.exposure;
+      // soft shadows; three's WebGPU renderer filters with PCF (its soft filter isn't ready there)
+      if (renderer.shadowMap) { renderer.shadowMap.enabled = GFX.shadows; renderer.shadowMap.type = renderer.isWebGPURenderer ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap; }
+    }
+    function shadowMapSize() { return GFX.quality === 0 ? 1024 : GFX.quality === 2 ? 4096 : 2048; }
+    // bloom: three's UnrealBloom, on WebGL (not in AR sessions); with the camera's picture behind, only what's brighter
+    // than paper white blooms (lit and glowing things, never the picture)
+    function makeComposer(renderer, scene, camera, cameraPicture) {
+      if (!GFX.bloom || !(GFX.bloomStrength > 0) || !renderer.isWebGLRenderer) return Promise.resolve(null);
+      return Promise.all([import('three/addons/postprocessing/EffectComposer.js'), import('three/addons/postprocessing/RenderPass.js'),
+                          import('three/addons/postprocessing/UnrealBloomPass.js'), import('three/addons/postprocessing/OutputPass.js')]).then(function (m) {
+        var size = renderer.getSize(new THREE.Vector2());
+        var c = new m[0].EffectComposer(renderer);
+        c.addPass(new m[1].RenderPass(scene, camera));
+        c.addPass(new m[2].UnrealBloomPass(size, GFX.bloomStrength, 0.4, cameraPicture ? Math.max(1.0, GFX.bloomThreshold) : GFX.bloomThreshold));
+        c.addPass(new m[3].OutputPass());
+        return c;
+      }).catch(function (e) { console.log('Diorama: no bloom (' + (e && e.message || e) + ')'); return null; });
+    }
+    // what metals reflect: a soft sky over the ground in the anchor's ambient colour (three's metals reflect only this)
+    function environment(scene, ambient) {
+      var a = ambient || [0.5, 0.5, 0.5], cv = document.createElement('canvas'); cv.width = 64; cv.height = 32;
+      var g = cv.getContext('2d'), grad = g.createLinearGradient(0, 0, 0, 32);
+      var css = function (k) { return 'rgb(' + [0, 1, 2].map(function (i) { return Math.round(Math.min(1, a[i] * k) * 255); }).join(',') + ')'; };
+      grad.addColorStop(0, css(1.9)); grad.addColorStop(0.48, css(1.3)); grad.addColorStop(0.52, css(0.8)); grad.addColorStop(1, css(0.45));
+      g.fillStyle = grad; g.fillRect(0, 0, 64, 32);
+      var t = new THREE.CanvasTexture(cv); t.mapping = THREE.EquirectangularReflectionMapping; if (THREE.SRGBColorSpace) t.colorSpace = THREE.SRGBColorSpace;
+      scene.environment = t;
+      if ('environmentIntensity' in scene) scene.environmentIntensity = 0.6;
+    }
+    function shadowFlags(root, o) {   // what casts and gets shadows
+      root.traverse(function (c) {
+        if (!c.isMesh || c.isInstancedMesh || c.userData.isPathLook) return;
+        c.castShadow = o.castShadows !== false && !o.glow && !o.occluder;
+        c.receiveShadow = o.receiveShadows !== false && !o.occluder;
+      });
+    }
     function material(o, map) {
-      var opts = { color: new THREE.Color(o.colour[0], o.colour[1], o.colour[2]), opacity: o.colour[3], side: THREE.DoubleSide,
-                   transparent: true, alphaTest: 0.01 };
+      var opts = { color: rgb(o.colour), opacity: o.colour[3], side: THREE.DoubleSide, transparent: true, alphaTest: 0.01 };
       if (map) opts.map = map;
       if (o.glow) { opts.blending = THREE.AdditiveBlending; opts.depthWrite = false; }
-      return o.lit ? new THREE.MeshLambertMaterial(opts) : new THREE.MeshBasicMaterial(opts);
+      if (o.emissiveStrength > 0 && o.emissive) { opts.emissive = rgb(o.emissive); opts.emissiveIntensity = o.emissiveStrength; }
+      if (!o.lit) { var b = new THREE.MeshBasicMaterial(opts); if (opts.emissive) b.color.add(opts.emissive.clone().multiplyScalar(opts.emissiveIntensity)); return b; }
+      opts.metalness = o.metallic || 0; opts.roughness = o.roughness === undefined ? 0.6 : o.roughness;   // PBR, as the editor draws it
+      return new THREE.MeshStandardMaterial(opts);
     }
     function capsule() {   // a lathe of two half circles and a tube, 2 high, 1 across
       var pts = [], i;
@@ -155,7 +207,7 @@
       // pictures and words that face the phone are sprites (three.js turns them to the camera)
       var facing = function (map, aspect) {
         var sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: map, transparent: true, opacity: o.colour[3],
-          color: new THREE.Color(o.colour[0], o.colour[1], o.colour[2]), blending: o.glow ? THREE.AdditiveBlending : THREE.NormalBlending }));
+          color: rgb(o.colour), blending: o.glow ? THREE.AdditiveBlending : THREE.NormalBlending }));
         sp.scale.set(1, aspect, 1); node.add(sp); return sp;
       };
       if (look && o.kind === 'Picture' && file) {
@@ -179,11 +231,12 @@
         new GLTFLoader().load(file, function (g) {
           node.add(g.scene);
           if (o.occluder) { occlude(g.scene); return; }
+          shadowFlags(g.scene, o);
           g.scene.traverse(function (c) {
             if (c.isMesh && c.material) {
               var ms = Array.isArray(c.material) ? c.material : [c.material];
               ms.forEach(function (m) {
-                if (m.color) m.color.multiply(new THREE.Color(o.colour[0], o.colour[1], o.colour[2]));
+                if (m.color) m.color.multiply(rgb(o.colour));
                 m.side = THREE.DoubleSide;
                 // glTF counts a model with no material as metal; without reflections that draws black: plain instead
                 if (m.metalness !== undefined && !m.metalnessMap && !m.envMap) m.metalness = 0;
@@ -215,12 +268,13 @@
           attr(rg, 'position', [-0.02, 0, 0, 0.02, 0, 0, 0.12, -1, 0, -0.12, -1, 0], 3);
           attr(rg, 'uv', [0, 1, 1, 1, 1, 0, 0, 0], 2);
           rg.setIndex([0, 1, 2, 0, 2, 3]);
-          var rm = new THREE.Mesh(rg, new THREE.MeshBasicMaterial({ map: rayTex, color: new THREE.Color(o.colour[0], o.colour[1], o.colour[2]),
+          var rm = new THREE.Mesh(rg, new THREE.MeshBasicMaterial({ map: rayTex, color: rgb(o.colour),
             transparent: true, opacity: o.colour[3], blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
           node.userData.rays.push(rm); node.add(rm);
         }
       }
       components(o, node);
+      shadowFlags(node, o);
       node.userData.o = o;
       return node;
     }
@@ -341,11 +395,12 @@
       if (o.hasCanvas || o.ui) { var ue = uiElement(o, node); if (ue) node.userData.el = ue; }
       if (o.occluder) occlude(node);
       if (o.hasLight) {
-        var col = new THREE.Color(o.lightColour[0], o.lightColour[1], o.lightColour[2]), li;
+        var col = rgb(o.lightColour), li;
         if (o.lightType === 1) li = new THREE.SpotLight(col, o.lightIntensity * K, o.lightRange, o.spotAngle * D2R / 2, 0.15, 0);
         else if (o.lightType === 2) li = new THREE.DirectionalLight(col, o.lightIntensity * K);
         else li = new THREE.PointLight(col, o.lightIntensity * K, o.lightRange, 0);
         if (li.target) { var tg = new THREE.Object3D(); tg.position.set(0, 0, -1); node.add(tg); li.target = tg; }
+        if (o.lightType === 1 && o.lightShadows && GFX.shadows) { li.castShadow = true; li.shadow.mapSize.set(1024, 1024); li.shadow.bias = -0.0005; li.shadow.normalBias = 0.01; }
         li.visible = o.lightOn !== false;
         node.add(li); node.userData.light = li;
       }
@@ -407,7 +462,7 @@
       if (node.userData.pathLook) node.remove(node.userData.pathLook);
       var g = new THREE.Group(); g.userData.isPathLook = true;
       var pts = ArNav.fromFlat(o.pathPoints || []), c = o.pathColour || [0.15, 0.2, 0.75, 0.95];
-      var mat = new THREE.MeshLambertMaterial({ color: new THREE.Color(c[0], c[1], c[2]), transparent: c[3] < 1, opacity: c[3] });
+      var mat = new THREE.MeshLambertMaterial({ color: rgb(c), transparent: c[3] < 1, opacity: c[3] });
       ArNav.arrows(pts, o.arrowSpacing || 0.5, !!o.pathLoop).forEach(function (a) {
         var m = new THREE.Mesh(arrowGeometry(), mat);
         m.position.set(a.p.x, a.p.y + 0.01, a.p.z); m.rotation.y = a.yaw; m.scale.setScalar(o.arrowSize || 0.25);
@@ -725,7 +780,7 @@
       case 'transform': return this.transform;
       case 'animate': return o.hasAnim ? { get on() { return o.animOn; }, set on(v) { o.animOn = !!v; }, get does() { return o.anim; }, set does(v) { o.anim = v; },
                                             get speed() { return o.animSpeed; }, set speed(v) { o.animSpeed = +v; }, get amount() { return o.animAmount; }, set amount(v) { o.animAmount = +v; } } : null;
-      case 'material': return { colour: vec(o.colour, function () { node.traverse(function (c) { if (c.material && c.material.color && !c.material.userData.isPathLook) c.material.color.setRGB(o.colour[0], o.colour[1], o.colour[2]); }); }), get opacity() { return o.colour[3]; }, set opacity(v) { o.colour[3] = +v; node.traverse(function (c) { if (c.material) { c.material.userData.base = +v; } }); } };
+      case 'material': return { colour: vec(o.colour, function () { node.traverse(function (c) { if (c.material && c.material.color && !c.material.userData.isPathLook) c.material.color.copy(rgb(o.colour)); }); }), get opacity() { return o.colour[3]; }, set opacity(v) { o.colour[3] = +v; node.traverse(function (c) { if (c.material) { c.material.userData.base = +v; } }); } };
       case 'words': return o.kind === 'Words' ? { get text() { return o.text; }, set text(v) { o.text = String(v); rebuild(this.go); }, go: this } : null;
       case 'model': return o.kind === 'Model' ? { get clip() { return o.clip; }, play: function (name) { o.clip = name; rebuild(this.go); }, go: this } : null;
       case 'canvas': return o.hasCanvas ? { get visible() { return node.visible; }, set visible(v) { node.visible = !!v; }, element: node.userData.el } : null;
@@ -895,11 +950,11 @@
           var g = new THREE.BufferGeometry(), pos = [];
           poly.forEach(function (q) { pos.push(q[0], 0.004, q[1]); });
           attr(g, 'position', pos, 3); g.setIndex(ArNav.fan(poly));
-          p.node.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: new THREE.Color(c[0], c[1], c[2]), transparent: true, opacity: c[3] * 0.45, depthWrite: false, side: THREE.DoubleSide })));
+          p.node.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: rgb(c), transparent: true, opacity: c[3] * 0.45, depthWrite: false, side: THREE.DoubleSide })));
           var ds = ArNav.dots(poly, 0.15);
           if (ds.length) {
             var disc = new THREE.CircleGeometry(0.012, 8); disc.rotateX(-Math.PI / 2);
-            var dots = new THREE.InstancedMesh(disc, new THREE.MeshBasicMaterial({ color: new THREE.Color(c[0], c[1], c[2]), transparent: true, opacity: Math.min(1, c[3] * 2.2), depthWrite: false }), ds.length);
+            var dots = new THREE.InstancedMesh(disc, new THREE.MeshBasicMaterial({ color: rgb(c), transparent: true, opacity: Math.min(1, c[3] * 2.2), depthWrite: false }), ds.length);
             var dm = new THREE.Matrix4();
             ds.forEach(function (d, i) { dm.makeTranslation(d[0], 0.006, d[1]); dots.setMatrixAt(i, dm); });
             dots.instanceMatrix.needsUpdate = true;
@@ -907,7 +962,7 @@
           }
           var ep = []; poly.concat([poly[0]]).forEach(function (q) { ep.push(q[0], 0.006, q[1]); });
           var eg = new THREE.BufferGeometry(); attr(eg, 'position', ep, 3);
-          p.node.add(new THREE.Line(eg, new THREE.LineBasicMaterial({ color: new THREE.Color(c[0], c[1], c[2]) })));
+          p.node.add(new THREE.Line(eg, new THREE.LineBasicMaterial({ color: rgb(c) })));
         }
         var x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9; poly.forEach(function (q) { x0 = Math.min(x0, q[0]); x1 = Math.max(x1, q[0]); z0 = Math.min(z0, q[1]); z1 = Math.max(z1, q[1]); });
         p.size = { x: x1 - x0, y: z1 - z0 };
@@ -999,11 +1054,24 @@
     // an anchor's world: its lights, its window, its objects (nodes and animation players collected for the frame loop)
     function anchorWorld(m, nodes, players) {
       var root = new THREE.Group();
-      var amb = new THREE.AmbientLight(new THREE.Color(m.ambient[0], m.ambient[1], m.ambient[2]), THREE.SRGBColorSpace ? Math.PI : 1);
-      var sun = new THREE.DirectionalLight(new THREE.Color(m.sun[0], m.sun[1], m.sun[2]), m.sunStrength * (THREE.SRGBColorSpace ? Math.PI : 1));
+      var amb = new THREE.AmbientLight(rgb(m.ambient), THREE.SRGBColorSpace ? Math.PI : 1);
+      var sun = new THREE.DirectionalLight(rgb(m.sun), m.sunStrength * (THREE.SRGBColorSpace ? Math.PI : 1));
       var sy = m.sunYaw * D2R, sp = m.sunPitch * D2R;
-      sun.position.set(Math.cos(sp) * Math.sin(sy), Math.sin(sp), Math.cos(sp) * Math.cos(sy));
+      var R = GFX.tracking === 'surfaces' ? 4 : 1.6;   // the shadows' reach: a marker's scene, or a room (metres)
+      sun.position.set(Math.cos(sp) * Math.sin(sy) * R * 2.5, Math.sin(sp) * R * 2.5, Math.cos(sp) * Math.cos(sy) * R * 2.5);
+      var sunAt = new THREE.Object3D(); root.add(sunAt); sun.target = sunAt;
       root.add(amb); root.add(sun);
+      if (GFX.shadows && m.sunShadows !== false && GFX.tracking !== 'faces') {
+        sun.castShadow = true; sun.shadow.mapSize.set(shadowMapSize(), shadowMapSize());
+        var sc = sun.shadow.camera; sc.left = -R; sc.right = R; sc.top = R; sc.bottom = -R; sc.near = 0.05; sc.far = R * 6; sc.updateProjectionMatrix();
+        sun.shadow.bias = -0.0005; sun.shadow.normalBias = 0.01;
+        if (m.shadowCatcher !== false && !GFX.webgpu) {   // an invisible floor that only shows shadows: they fall on the real world (WebGL: three r172's WebGPU shadow material doesn't compile yet)
+          var cg = new THREE.PlaneGeometry(R * 2.5, R * 2.5); cg.rotateX(-Math.PI / 2);
+          var catcher = new THREE.Mesh(cg, new THREE.ShadowMaterial({ opacity: 0.35, depthWrite: false }));
+          catcher.position.y = 0.001; catcher.receiveShadow = true; catcher.renderOrder = -0.5;
+          root.add(catcher);
+        }
+      }
       if (m.portal) root.add(portal(m));
       var byId = {};
       m.objects.forEach(function (o) {
@@ -1036,12 +1104,13 @@
     // the Main Camera's settings: the colour behind (when it's not the camera's picture), near, far, field of view
     function cameraSettings(proj, camera, opts) {
       var c = proj.camColour || [0.07, 0.07, 0.08];
-      var colour = new THREE.Color(c[0], c[1], c[2]);
+      var colour = rgb(c);
       if (opts && opts.preview) { camera.fov = proj.camFov || 60; }
       if (opts && opts.ownProjection !== true) { camera.near = proj.camNear || 0.01; camera.far = proj.camFar || 100; if (camera.updateProjectionMatrix && camera.isPerspectiveCamera) camera.updateProjectionMatrix(); }
       return { solid: proj.camClear === 1, colour: colour };
     }
-    return { anchorWorld: anchorWorld, animate: animate, runtime: runtime, planes: PLANES, nav: nav, navLoadSaved: navLoadSaved, cameraRig: cameraRig, cameraSettings: cameraSettings };
+    return { anchorWorld: anchorWorld, animate: animate, runtime: runtime, planes: PLANES, nav: nav, navLoadSaved: navLoadSaved, cameraRig: cameraRig, cameraSettings: cameraSettings,
+             graphics: graphics, setupRenderer: setupRenderer, makeComposer: makeComposer, environment: environment };
   }
 
   function fromDisk() {
@@ -1100,6 +1169,7 @@
       say('Starting the camera...');
       document.title = proj.title;
       var C = core(THREE, lib.GLTFLoader);
+      C.graphics(proj);
       window.ARThreeOnLoad = function () {
         ARController.getUserMediaThreeScene({
           maxARVideoSize: 640, cameraParam: 'data/camera_para.dat',
@@ -1115,6 +1185,7 @@
             var renderer = makeRenderer(lib, { antialias: true });
             // the camera: ARToolKit's own projection (the webcam's lens); WebGPU's depth runs 0..1, WebGL's -1..1
             var arCam = arScene.camera, P = arCam.projectionMatrix.clone();
+            arCam.near = 0.01; arCam.far = 1000;   // a plain THREE.Camera has none; WebGPU's shadow and depth nodes read them
             var toWebGPU = new THREE.Matrix4().set(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.5, 0.5, 0, 0, 0, 1);
             arCam.updateProjectionMatrix = function () {
               this.projectionMatrix.copy(P);
@@ -1133,12 +1204,15 @@
               if (arController.orientation === 'portrait') { var w = window.innerWidth / vh * vw, h = window.innerWidth; renderer.setSize(w, h); }
               else renderer.setSize(window.innerWidth, window.innerWidth / vw * vh);
             };
-            fit(); window.addEventListener('resize', fit);
+            var composer = null;
+            fit(); window.addEventListener('resize', function () { fit(); if (composer) { var sz = renderer.getSize(new THREE.Vector2()); composer.setSize(sz.x, sz.y); } });
+            C.setupRenderer(renderer);
             var camSet = C.cameraSettings(proj, arScene.camera, { ownProjection: true });   // ARToolKit's lens is the real one
             if (camSet.solid) { arScene.videoScene.traverse(function (c) { if (c.isMesh) c.visible = false; }); if (renderer.setClearColor) renderer.setClearColor(camSet.colour, 1); }
             document.body.insertBefore(renderer.domElement, document.body.firstChild);
             C.runtime.setCamera(arScene.camera, renderer.domElement);
             var nodes = [], players = [], roots = [];
+            C.environment(arScene.scene, proj.markers[0] && proj.markers[0].ambient);
             C.cameraRig(proj, arScene.camera, nodes, players);
             proj.markers.forEach(function (m) {
               var root = C.anchorWorld(m, nodes, players);
@@ -1163,14 +1237,23 @@
               C.runtime.update(dt, t);
               nodes.forEach(function (n) { if (!n.userData.go || !n.userData.go.dead) C.animate(n, t); });
               players.forEach(function (p) { p.update(dt); });
-              arScene.renderOn(renderer);
+              if (composer) composer.render(); else arScene.renderOn(renderer);
             };
             var started = renderer.init ? renderer.init() : Promise.resolve();
             Promise.resolve(started).then(function () {
-              if (usesWebGPU(renderer)) console.log('Diorama: drawing with WebGPU');
+              if (usesWebGPU(renderer)) {   // WebGPU reads video textures the other way up from WebGL
+                console.log('Diorama: drawing with WebGPU');
+                arScene.videoScene.traverse(function (c) { if (c.isMesh) c.scale.y *= -1; });
+              }
               arCam.coordinateSystem = renderer.coordinateSystem !== undefined ? renderer.coordinateSystem : arCam.coordinateSystem;
               arCam.updateProjectionMatrix();
               renderer.setAnimationLoop(tick);
+              if (arController.orientation !== 'portrait' && !camSet.solid) C.makeComposer(renderer, arScene.scene, arScene.camera, true).then(function (c) {
+                if (!c) return;
+                var bg = new THREE.VideoTexture(arScene.video); if (THREE.SRGBColorSpace) bg.colorSpace = THREE.SRGBColorSpace;
+                arScene.scene.background = bg;   // the camera's picture behind, through the composer
+                composer = c;
+              });
             });
           }
         });
@@ -1190,6 +1273,7 @@
     withScene(function (proj) {
       document.title = proj.title;
       var C = core(THREE, lib.GLTFLoader);
+      C.graphics(proj);
       var anchors = proj.markers;
       var go = function (imageTargetSrc) {
         say('Starting the camera...');
@@ -1197,6 +1281,8 @@
         if (!faces) opts.imageTargetSrc = imageTargetSrc;
         var mind = new lib.MindARThree(opts);
         var renderer = mind.renderer, scene = mind.scene, camera = mind.camera;
+        C.setupRenderer(renderer);
+        C.environment(scene, anchors[0] && anchors[0].ambient);
         if (!camera.parent) scene.add(camera);
         var camSet = C.cameraSettings(proj, camera, { ownProjection: true });
         if (camSet.solid) {   // the webcam picture hidden: a world of its own
@@ -1270,6 +1356,7 @@
     withScene(function (proj) {
       document.title = proj.title;
       var C = core(THREE, lib.GLTFLoader);
+      C.graphics(proj);
       var renderer = null;
       var useRenderer = function (gpu) {   // WebXR needs WebGL; the preview can draw with WebGPU
         renderer = makeRenderer({ THREE: THREE, webgpu: gpu }, { antialias: true, alpha: true });
@@ -1278,7 +1365,9 @@
         renderer.domElement.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh';
         document.body.insertBefore(renderer.domElement, document.body.firstChild);
         C.runtime.setCamera(camera, renderer.domElement);
+        C.setupRenderer(renderer);
       };
+      var composer = null;
       var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 200);
       scene.add(camera);
       var first = proj.markers[0] || {};
@@ -1286,12 +1375,13 @@
         planeColour: first.planeColour || [0.25, 0.95, 0.55, 0.35], planePrefab: first.planePrefab,
         planePrefabName: first.planePrefab ? String(first.planePrefab).split('/').pop().replace(/\.prefab$/, '') : '' };
       C.planes.look = new THREE.Group(); scene.add(C.planes.look);
+      C.environment(scene, first.ambient);
       var nodes = [], players = [];
       var anchors = proj.markers.map(function (m) { var root = C.anchorWorld(m, nodes, players); root.visible = false; scene.add(root); return { m: m, root: root, placed: false }; });
       C.cameraRig(proj, camera, nodes, players);
       var camSet = C.cameraSettings(proj, camera, { preview: true });
       C.navLoadSaved();
-      window.addEventListener('resize', function () { if (renderer) renderer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); });
+      window.addEventListener('resize', function () { if (renderer) renderer.setSize(window.innerWidth, window.innerHeight); if (composer) composer.setSize(window.innerWidth, window.innerHeight); camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); });
       // where an anchor goes: a point on a surface, turned to face the player
       var place = function (a, pos) {
         var cam = new THREE.Vector3(); camera.getWorldPosition(cam);
@@ -1307,7 +1397,7 @@
           C.runtime.update(dt, t);
           nodes.forEach(function (n) { if (!n.userData.go || !n.userData.go.dead) C.animate(n, t); });
           players.forEach(function (p) { p.update(dt); });
-          renderer.render(scene, camera);
+          if (composer && !(renderer.xr && renderer.xr.isPresenting)) composer.render(); else renderer.render(scene, camera);
         };
       };
 
@@ -1315,6 +1405,7 @@
       var preview = function (why) {
         say(why);
         useRenderer(!!lib.webgpu);
+        C.makeComposer(renderer, scene, camera, false).then(function (c) { composer = c; });
         scene.background = camSet.colour;
         var yaw = 0.35, pitch = 0.55, dist = 6.5, tgt = new THREE.Vector3(0.2, 0.4, -0.6);
         var aim = function () { camera.position.set(tgt.x + dist * Math.cos(pitch) * Math.sin(yaw), tgt.y + dist * Math.sin(pitch), tgt.z + dist * Math.cos(pitch) * Math.cos(yaw)); camera.lookAt(tgt); };

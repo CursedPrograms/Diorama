@@ -1396,7 +1396,7 @@ static void buildSettings() {
         const char* tms[] = {"None", "PBR Neutral (colours kept)", "ACES (filmic)"};
         labelled("Tone mapping"); ImGui::Combo("##tm", &proj.toneMapping, tms, 3);
         labelled("Exposure"); ImGui::SliderFloat("##exp", &proj.exposure, 0.2f, 3, "%.2f");
-        ImGui::TextDisabled("The editor's view shows these too. AR on phones (WebXR) and MindAR have no bloom.");
+        ImGui::TextDisabled("The editor's view shows these too. No bloom: AR on phones (WebXR), MindAR, WebGPU;\nWebGPU has no shadows on the real world yet (three.js r172).");
     }
     ImGui::SeparatorText("Player Settings");
     { char b[128]; snprintf(b, sizeof b, "%s", proj.title.c_str()); labelled("Game name"); if (ImGui::InputText("##gname", b, sizeof b) && b[0]) proj.title = b; }
