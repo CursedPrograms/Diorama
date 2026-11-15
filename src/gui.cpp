@@ -153,6 +153,9 @@ static double now() { return SDL_GetTicks() / 1000.0; }
 static void say(const std::string& s) { toast = s; toastUntil = now() + 6; }
 static bool showAbout = false, showSettings = false;
 static void rememberProject();
+static void sceneToFile(const Project& p, const std::string& name);
+static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out);
+static std::vector<Scene::Marker> sceneMarkers(const std::string& name);
 // where projects live: Documents/Diorama, or the home folder's Diorama when Windows guards Documents
 // (Controlled Folder Access refuses unknown apps there, without a word)
 static bool writable(const fs::path& d) {
@@ -280,6 +283,7 @@ static bool saveProject(bool askFolder) {
     forEachFile(rel, [&](std::string& s) { if (!s.empty()) { std::error_code ec; const fs::path r = fs::relative(fs::u8path(s), base, ec); if (!ec && !r.empty() && r.u8string().rfind("..", 0) != 0) s = r.generic_u8string(); } });
     std::string err;
     if (!Scene::save(rel, folder, err)) { say(err); return false; }
+    sceneToFile(proj, proj.scene);
     rememberProject();
     say("Saved " + (fs::u8path(folder) / "project.diorama").u8string());
     return true;
@@ -291,6 +295,7 @@ static void openProject(const std::string& path) {
     if (!Scene::load(np, p.u8string(), err)) { say(err); return; }
     forEachFile(np, [&](std::string& s) { if (!s.empty() && fs::u8path(s).is_relative()) s = (p / fs::u8path(s)).u8string(); });
     proj = np; folder = p.u8string(); selMarker = 0; selObject = -1; shownMarker = -1;
+    { std::vector<Scene::Marker> ms; if (sceneFromFile(proj.scene, ms)) proj.markers = ms; }
     rememberProject();
     say("Opened " + proj.title);
 }
@@ -676,8 +681,17 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     fs::create_directories(o / "lib", ec);
     fs::copy_file(web / "diorama.js", o / "lib" / "diorama.js", fs::copy_options::overwrite_existing, ec);
     // the files the scene uses, each once, under assets/
-    Project b = proj;
     std::map<std::string, std::string> done, scriptSrc;
+    std::vector<std::pair<Markers::Image, std::string>> sheet;
+    std::vector<std::string> pages;
+    for (size_t si = 0; si < proj.scenes.size(); ++si) pages.push_back(si == 0 ? "index.html" : slugOf(proj.scenes[si]) + ".html");
+    std::string scenesJs = "window.DIORAMA_SCENES = [";
+    for (size_t si = 0; si < proj.scenes.size(); ++si) scenesJs += std::string(si ? ", " : "") + "{\"name\": " + Json::quote(proj.scenes[si]) + ", \"page\": " + Json::quote(pages[si]) + "}";
+    scenesJs += "];\n";
+    for (size_t si = 0; si < proj.scenes.size(); ++si) {   // ---- each scene, its own page ----
+    Project b = proj; b.markers = sceneMarkers(proj.scenes[si]);
+    const std::string sceneSlug = si == 0 ? "" : slugOf(proj.scenes[si]) + "-";
+    const std::string jsName = si == 0 ? "scene.js" : "scene-" + slugOf(proj.scenes[si]) + ".js";
     auto take = [&](std::string& f) {
         if (f.empty()) return;
         auto it = done.find(f);
@@ -690,10 +704,10 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
         const std::string key = f; f = "assets/" + name; done[key] = f;
     };
     // the markers: their pattern files (made from their pictures), their printable pictures, a sheet of them all
-    std::vector<std::pair<Markers::Image, std::string>> sheet;
     for (size_t i = 0; i < b.markers.size(); ++i) {
         Scene::Marker& m = b.markers[i];
-        const std::string slug = slugOf(m.name) + "-" + std::to_string(i + 1);
+        const Scene::Marker orig = m;
+        const std::string slug = sceneSlug + slugOf(m.name) + "-" + std::to_string(i + 1);
         for (auto& ob : m.objects) { take(ob.file); take(ob.audioFile); take(ob.particleFile); take(ob.videoFile); take(ob.uiFile); take(ob.canvasCss); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
         if (proj.tracking == TRACK_IMAGES) {   // the picture to look for: in the build, and on the sheet to print
             if (m.target.empty()) { err = m.name + " has no picture to look for (its Inspector)"; return false; }
@@ -710,17 +724,18 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
             m.patt = "markers/" + slug + ".patt";
         }
         m.picture.clear();
-        const Markers::Image im = printable(proj.markers[i], 1024);
+        const Markers::Image im = printable(orig, 1024);
         Markers::savePng((o / "markers" / (slug + ".png")).u8string(), im);
         sheet.push_back({im, m.name + (m.type == MK_BARCODE ? "  (barcode " + std::to_string(m.barcode) + ")" : "")});
     }
-    if (!sheet.empty()) Markers::savePng((o / "markers.png").u8string(), Markers::sheet(sheet, fontFile));
+    if (si + 1 == proj.scenes.size() && !sheet.empty()) Markers::savePng((o / "markers.png").u8string(), Markers::sheet(sheet, fontFile));
     fs::copy_file(fs::u8path(exeDir) / "assets" / "logo.png", o / "icon.png", fs::copy_options::overwrite_existing, ec);
-    { std::ofstream f(o / "scene.json", std::ios::binary); f << Scene::toJson(b); if (!f) { err = "Couldn't write scene.json"; return false; } }
+    if (si == 0) { std::ofstream f(o / "scene.json", std::ios::binary); f << Scene::toJson(b); if (!f) { err = "Couldn't write scene.json"; return false; } }
     {   // the scene and its scripts, inside the page (so they need no loading)
-        std::ofstream f(o / "scene.js", std::ios::binary);
+        std::ofstream f(o / fs::u8path(jsName), std::ios::binary);
         f << "// the scene and its scripts, inside the page (so they need no loading)\n";
         if (play) f << "window.DIORAMA_PLAY = true;   // played from the editor: logs go to its Console\n";
+        f << scenesJs << "window.DIORAMA_SCENE_INDEX = " << si << ";\n";
         f << "window.DIORAMA_SCENE = " << Scene::toJson(b) << ";\nwindow.DIORAMA_SCRIPTS = {";
         bool first = true;
         for (const auto& d : done) {
@@ -752,7 +767,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
             f << " s[" << Json::quote(d.second) << "] = s[" << Json::quote(d.second) << "] || " << Json::quote(ss.str()) << ";";
         }
         f << " })(window.DIORAMA_SCRIPTS);\n";
-        if (!f) { err = "Couldn't write scene.js"; return false; }
+        if (!f) { err = "Couldn't write " + jsName; return false; }
     }
     // Play.bat: play it on this PC without a web host (a tiny local server: browsers only let a page load its pictures
     // and use the webcam when it comes from a server)
@@ -788,7 +803,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     // the page
     std::string title;
     for (char c : proj.title) { if (c == '<') title += "&lt;"; else if (c == '&') title += "&amp;"; else title += c; }
-    std::ofstream h(o / "index.html", std::ios::binary);
+    std::ofstream h(o / fs::u8path(pages[si]), std::ios::binary);
     h << "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n"
          "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">\n"
          "  <title>" << title << "</title>\n"
@@ -801,14 +816,14 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
       << "</div>\n";
     if (!mind)
         h << "  <script src=\"lib/three.min.js\"></script>\n  <script src=\"lib/GLTFLoader.js\"></script>\n"
-             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"scene.js\"></script>\n"
+             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
              "  <script>Diorama.startMarkers();</script>\n"
              "  <script async src=\"lib/artoolkit.min.js\"></script>\n  <script async src=\"lib/artoolkit.three.js\"></script>\n"
              "  <!-- Made with Diorama (Cursed Entertainment). jsartoolkit5: LGPL-3.0; three.js: MIT (see lib/). -->\n";
     else {
         const bool faces = proj.tracking == TRACK_FACES;
         h << "  <script type=\"importmap\">{ \"imports\": { \"three\": \"./lib/mindar/three/three.module.min.js\", \"three/addons/\": \"./lib/mindar/three/addons/\" } }</script>\n"
-             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"scene.js\"></script>\n"
+             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
              "  <script type=\"module\">\n"
              "    import * as THREE from 'three';\n"
              "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
@@ -820,6 +835,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
           << "  </script>\n  <!-- Made with Diorama (Cursed Entertainment). MindAR: MIT; three.js: MIT (see lib/mindar/). -->\n";
     }
     h << "</body>\n</html>\n";
+    }   // ---- each scene ----
     std::ofstream(o / "README.txt", std::ios::binary) <<
         proj.title << ", made with Diorama.\n\n"
         "To play it on this PC: double-click Play.bat (opening index.html straight from the disk can't load the game).\n\n"
@@ -839,7 +855,9 @@ static void playInBrowser() {
     bottomTab = 1;
     if (!Serve::start(tmp.u8string(), 8765)) { say("Couldn't start the test server on port 8765"); return; }
 #ifdef _WIN32
-    ShellExecuteW(nullptr, L"open", L"http://localhost:8765/", nullptr, nullptr, SW_SHOWNORMAL);
+    { const auto it = std::find(proj.scenes.begin(), proj.scenes.end(), proj.scene);
+      const std::string page = it == proj.scenes.begin() || it == proj.scenes.end() ? "" : slugOf(proj.scene) + ".html";
+      ShellExecuteW(nullptr, L"open", (L"http://localhost:8765/" + fs::u8path(page).wstring()).c_str(), nullptr, nullptr, SW_SHOWNORMAL); }
 #endif
     say("Playing in the browser: allow the webcam and hold up the printed marker (File > Build Game to keep it)");
 }
@@ -1195,6 +1213,119 @@ static void uiMenuItems() {
     for (int k = 1; k < UI_COUNT; ++k) if (ImGui::MenuItem((std::string(UI_NAMES[k]) + (k == UI_IMAGE ? "..." : "")).c_str())) createUI(k);
 }
 
+
+// ---------- the Scene Manager: the game's scenes (scenes/<name>.scene), in build order; scene 0 is index.html ----------
+static bool showScenes = false;
+static fs::path sceneFile(const std::string& name) { return fs::u8path(folder) / "scenes" / fs::u8path(name + ".scene"); }
+static void sceneToFile(const Project& p, const std::string& name) {   // its anchors and objects, paths relative to the project
+    if (folder.empty()) return;
+    Project rel = p;
+    const fs::path base = fs::u8path(folder);
+    forEachFile(rel, [&](std::string& s) { if (!s.empty()) { std::error_code ec; const fs::path r = fs::relative(fs::u8path(s), base, ec); if (!ec && !r.empty() && r.u8string().rfind("..", 0) != 0) s = r.generic_u8string(); } });
+    std::error_code ec; fs::create_directories(fs::u8path(folder) / "scenes", ec);
+    std::ofstream(sceneFile(name), std::ios::binary) << Scene::toJson(rel);
+}
+static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out) {
+    std::ifstream f(sceneFile(name), std::ios::binary); if (!f) return false;
+    std::stringstream ss; ss << f.rdbuf();
+    Project t; std::string err; if (!Scene::fromJson(ss.str(), t, err)) return false;
+    const fs::path base = fs::u8path(folder);
+    forEachFile(t, [&](std::string& s) { if (!s.empty() && fs::u8path(s).is_relative()) s = (base / fs::u8path(s)).u8string(); });
+    proj.nextId = std::max(proj.nextId, t.nextId);
+    out = t.markers;
+    return true;
+}
+static std::vector<Scene::Marker> sceneMarkers(const std::string& name) {   // a scene's anchors (the open one: as edited)
+    if (name == proj.scene) return proj.markers;
+    std::vector<Scene::Marker> ms; sceneFromFile(name, ms); return ms;
+}
+static std::vector<Scene::Marker> emptyScene() {
+    std::vector<Scene::Marker> v;
+    Scene::Marker k; k.id = newId(proj); k.name = proj.tracking == TRACK_MARKERS ? "Hiro" : std::string(anchorWord()) + " 1"; v.push_back(k);
+    return v;
+}
+static void openScene(const std::string& name) {
+    if (name == proj.scene) return;
+    if (!folder.empty()) saveProject(false);
+    std::vector<Scene::Marker> ms;
+    if (!sceneFromFile(name, ms)) ms = emptyScene();
+    proj.markers = ms; proj.scene = name;
+    undoStack.clear(); redoStack.clear(); frameStart = proj;
+    selMarker = 0; selObject = -1; shownMarker = -1;
+    if (!folder.empty()) saveProject(false);
+    say("Scene " + name);
+}
+static std::string uniqueSceneName(std::string base) {
+    for (auto& c : base) if (strchr("\\/:*?\"<>|", c)) c = '_';
+    if (base.empty()) base = "Scene";
+    std::string n = base;
+    for (int k = 2; std::find(proj.scenes.begin(), proj.scenes.end(), n) != proj.scenes.end(); ++k) n = base + " " + std::to_string(k);
+    return n;
+}
+static void newScene(bool duplicateOpen) {
+    if (folder.empty()) { say("Save the project first"); return; }
+    saveProject(false);
+    const std::string name = uniqueSceneName(duplicateOpen ? proj.scene : "Scene " + std::to_string(proj.scenes.size() + 1));
+    Project t = proj;
+    t.markers = duplicateOpen ? proj.markers : emptyScene();
+    sceneToFile(t, name);
+    proj.scenes.push_back(name);
+    openScene(name);
+}
+static void sceneManager() {
+    if (!showScenes) return;
+    ImGui::SetNextWindowSize(ImVec2(460, 420), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(500, 160), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Scenes (Build Settings)", &showScenes)) { ImGui::End(); return; }
+    ImGui::TextDisabled("The game's scenes in build order: scene 0 is index.html, where the game starts.\nDrag to reorder, double-click to open. Scripts: loadScene(\"Name\") or loadScene(1).");
+    ImGui::Separator();
+    static int renamingScene = -1; static char nameBuf[64];
+    int moveFrom = -1, moveTo = -1, del = -1, open = -1;
+    ImGui::BeginChild("##scenes", ImVec2(0, -40), true);
+    for (int i = 0; i < (int)proj.scenes.size(); ++i) {
+        ImGui::PushID(i);
+        const std::string& n = proj.scenes[i];
+        const bool cur = n == proj.scene;
+        if (renamingScene == i) {
+            ImGui::SetNextItemWidth(-1); ImGui::SetKeyboardFocusHere();
+            if (ImGui::InputText("##rn", nameBuf, sizeof nameBuf, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll)) {
+                const std::string nn = uniqueSceneName(nameBuf);
+                if (nameBuf[0] && nn != n) {
+                    if (!folder.empty()) { saveProject(false); std::error_code ec; fs::rename(sceneFile(n), sceneFile(nn), ec); }
+                    if (cur) proj.scene = nn;
+                    proj.scenes[i] = nn;
+                    if (!folder.empty()) saveProject(false);
+                }
+                renamingScene = -1;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape)) renamingScene = -1;
+        } else {
+            char label[160]; snprintf(label, sizeof label, "%d   %s%s", i, n.c_str(), i == 0 ? "   (index.html)" : "");
+            if (cur) ImGui::PushStyleColor(ImGuiCol_Text, col4(C_BLUE));
+            if (ImGui::Selectable(label, cur, ImGuiSelectableFlags_AllowDoubleClick) && ImGui::IsMouseDoubleClicked(0)) open = i;
+            if (cur) ImGui::PopStyleColor();
+            if (ImGui::BeginDragDropSource()) { ImGui::SetDragDropPayload("SCENE", &i, sizeof i); ImGui::Text("%s", n.c_str()); ImGui::EndDragDropSource(); }
+            if (ImGui::BeginDragDropTarget()) { if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("SCENE")) { moveFrom = *(const int*)pl->Data; moveTo = i; } ImGui::EndDragDropTarget(); }
+            if (ImGui::BeginPopupContextItem("ctx")) {
+                if (ImGui::MenuItem("Open")) open = i;
+                if (ImGui::MenuItem("Rename")) { renamingScene = i; snprintf(nameBuf, sizeof nameBuf, "%s", n.c_str()); }
+                if (ImGui::MenuItem("Make it scene 0 (index.html)", nullptr, false, i > 0)) { moveFrom = i; moveTo = 0; }
+                if (ImGui::MenuItem("Remove from the game", nullptr, false, proj.scenes.size() > 1 && !cur)) del = i;
+                ImGui::EndPopup();
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    if (moveFrom >= 0 && moveTo >= 0 && moveFrom != moveTo) { const std::string n = proj.scenes[moveFrom]; proj.scenes.erase(proj.scenes.begin() + moveFrom); proj.scenes.insert(proj.scenes.begin() + moveTo, n); if (!folder.empty()) saveProject(false); }
+    if (del >= 0) { proj.scenes.erase(proj.scenes.begin() + del); if (!folder.empty()) saveProject(false); say("Removed from the game (its file stays in scenes/)"); }
+    if (open >= 0) openScene(proj.scenes[open]);
+    if (ImGui::Button("New Scene", ImVec2(140, 28))) newScene(false);
+    ImGui::SameLine(); if (ImGui::Button("Duplicate This Scene", ImVec2(170, 28))) newScene(true);
+    ImGui::SameLine(); ImGui::TextDisabled("right-click: more");
+    ImGui::End();
+}
+
 // ---------- the menus ----------
 static void gameObjectItems() {
     if (ImGui::MenuItem("Create Empty", "Ctrl+Shift+N")) create(EMPTY);
@@ -1225,6 +1356,13 @@ static void menuBar() {
         }
         if (ImGui::MenuItem("Open...", "Ctrl+O")) { const std::string f = openDialog(L"Diorama project\0*.diorama\0\0"); if (!f.empty()) openProject(f); }
         ImGui::Separator();
+        if (ImGui::MenuItem("New Scene")) newScene(false);
+        if (ImGui::BeginMenu("Open Scene", proj.scenes.size() > 1)) {
+            for (const auto& n : proj.scenes) if (ImGui::MenuItem(n.c_str(), nullptr, n == proj.scene)) { const std::string c = n; openScene(c); break; }
+            ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem("Scenes (Build Settings)...")) showScenes = true;
+        ImGui::Separator();
         if (ImGui::MenuItem("Save", "Ctrl+S")) saveProject(false);
         if (ImGui::MenuItem("Save As...")) saveProject(true);
         if (!folder.empty() && ImGui::MenuItem("Show the project folder")) openInExplorer(folder);
@@ -1249,6 +1387,7 @@ static void menuBar() {
     }
     if (ImGui::BeginMenu("GameObject")) { gameObjectItems(); ImGui::EndMenu(); }
     if (ImGui::BeginMenu("Window")) {
+        if (ImGui::MenuItem("Scenes (Build Settings)", nullptr, showScenes)) showScenes = !showScenes;
         if (ImGui::MenuItem("Marker Maker", nullptr, showMaker)) showMaker = !showMaker;
         if (ImGui::MenuItem("Script Editor", nullptr, showScripts, !scripts.empty())) showScripts = !showScripts;
         ImGui::EndMenu();
@@ -1372,6 +1511,9 @@ static void objectNode(Scene::Marker& m, int mi, int index, int& moveId, int& mo
 }
 static void hierarchy() {
     ImGui::PushFont(boldFont); ImGui::TextUnformatted("Hierarchy"); ImGui::PopFont();
+    ImGui::SameLine(); ImGui::TextDisabled("%s", proj.scene.c_str());
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The open scene (Window > Scenes)");
+    if (ImGui::IsItemClicked()) showScenes = true;
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24);
     if (ImGui::SmallButton("+")) ImGui::OpenPopup("create");
     if (ImGui::BeginPopup("create")) { gameObjectItems(); ImGui::EndPopup(); }
@@ -2237,6 +2379,7 @@ static void frame() {
     ImGui::Begin("##bottom", nullptr, fixed); bottomPanel(); ImGui::End();
     scriptEditor();
     markerMaker();
+    sceneManager();
     // the status line
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - status)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x, status));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 4));
@@ -2270,7 +2413,8 @@ int main(int argc, char** argv) {
         else if (args[i] == "--template" && i + 1 < args.size()) tmpl = args[++i];
         else if (args[i] == "--select" && i + 1 < args.size()) selectArg = atoi(args[++i].c_str());
         else if (args[i] == "--build" && i + 1 < args.size()) buildArg = args[++i];
-        else if (args[i] == "--maker") { showMaker = true; mk.source = 4; }   // opens the Marker Maker (for screenshots)
+        else if (args[i] == "--maker") { showMaker = true; mk.source = 4; }
+        else if (args[i] == "--scenes") showScenes = true;   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
         else if (args[i] == "--pick" && i + 2 < args.size()) { pickX = atoi(args[i + 1].c_str()); pickY = atoi(args[i + 2].c_str()); i += 2; }
         else openArg = args[i];
     }

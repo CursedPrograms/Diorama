@@ -138,8 +138,12 @@ struct Project {
     std::string title = "My diorama";
     int tracking = TRACK_MARKERS;      // Project Settings > Tracking
     bool gps = false;                  // Project Settings > Location (GPS): the player's place for scripts and place anchors
-    std::vector<Marker> markers;
-    int nextId = 1;
+    std::vector<Marker> markers;       // the open scene's anchors and objects
+    int nextId = 1;                    // ids are unique in the whole project (all its scenes)
+    // the Scene Manager: the game's scenes in build order (scene 0 is the game's index.html), and the open one;
+    // each scene is kept in scenes/<name>.scene
+    std::vector<std::string> scenes = {"Main"};
+    std::string scene = "Main";
 };
 
 int newId(Project& p);

@@ -570,15 +570,25 @@
         if (code === undefined) { report('error', sc.file, 0, 'not found'); return; }
         var name = sc.file.split('/').pop().replace(/\.js$/, '');
         try {
-          var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input',
+          var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input', 'loadScene', 'scene',
             '"use strict";\n' + code + '\n;return { start: typeof start === "function" ? start : null, update: typeof update === "function" ? update : null,' +
             ' onTap: typeof onTap === "function" ? onTap : null, onFound: typeof onFound === "function" ? onFound : null, onLost: typeof onLost === "function" ? onLost : null, onClick: typeof onClick === "function" ? onClick : null, onChange: typeof onChange === "function" ? onChange : null };\n//# sourceURL=' + sc.file);
           var log = function () { report('log', sc.file, 0, Array.prototype.map.call(arguments, function (a) { return typeof a === 'object' ? JSON.stringify(a) : String(a); }).join(' ')); };
-          var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, R.cameraApi, R.input);
+          var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, R.cameraApi, R.input, loadScene, sceneInfo());
           go.scripts.push({ name: name, file: sc.file, fns: api, self: go, started: false });
         } catch (e) { report('error', sc.file, lineOf(e, sc.file), e.message); }
       });
       R.objects.push(go);
+    }
+    // scenes: each is its own page (scene 0 is index.html); loadScene("Name") or loadScene(1) goes there
+    function sceneInfo() {
+      var list = window.DIORAMA_SCENES || [{ name: 'Main', page: 'index.html' }], i = window.DIORAMA_SCENE_INDEX || 0;
+      return { name: (list[i] || list[0]).name, index: i, count: list.length, names: list.map(function (s) { return s.name; }) };
+    }
+    function loadScene(which) {
+      var list = window.DIORAMA_SCENES || [], s = typeof which === 'number' ? list[which] : list.filter(function (x) { return x.name === which; })[0];
+      if (!s) { report('error', '', 0, 'loadScene: no scene ' + JSON.stringify(which)); return; }
+      window.location.href = s.page;
     }
     function call(go, s, fn, arg) {
       if (!s.fns[fn]) return;

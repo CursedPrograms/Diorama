@@ -104,7 +104,9 @@ static int indexOf(const char* const* names, int n, const std::string& s, int de
 
 std::string toJson(const Project& p) {
     std::string out = "{\n  \"diorama\": 1,\n  \"title\": " + Json::quote(p.title) + ",\n  \"tracking\": \"" + TRACKING_NAMES[p.tracking] +
-                      "\",\n  \"gps\": " + (p.gps ? "true" : "false") + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"markers\": [";
+                      "\",\n  \"gps\": " + (p.gps ? "true" : "false") + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"scene\": " + Json::quote(p.scene) + ",\n  \"scenes\": [";
+    for (size_t i = 0; i < p.scenes.size(); ++i) out += (i ? ", " : "") + Json::quote(p.scenes[i]);
+    out += "],\n  \"markers\": [";
     for (size_t m = 0; m < p.markers.size(); ++m) {
         const Marker& k = p.markers[m];
         Json::Writer w;
@@ -170,6 +172,12 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
     p.nextId = (int)v.num("nextId", 1);
     p.tracking = indexOf(TRACKING_NAMES, TRACKING_COUNT, v.str("tracking", "markers"), TRACK_MARKERS);
     { const Json::Value* g = v.get("gps"); p.gps = g && g->type == Json::Value::BOOL && g->b; }
+    if (const Json::Value* sc = v.get("scenes")) if (sc->type == Json::Value::ARR) {
+        std::vector<std::string> names; for (const auto& n : sc->a) if (n.type == Json::Value::STR && !n.s.empty()) names.push_back(n.s);
+        if (!names.empty()) p.scenes = names;
+    }
+    p.scene = v.str("scene", p.scenes[0]);
+    if (std::find(p.scenes.begin(), p.scenes.end(), p.scene) == p.scenes.end()) p.scene = p.scenes[0];
     const Json::Value* ms = v.get("markers");
     if (!ms || ms->type != Json::Value::ARR) return true;
     for (const Json::Value& mv : ms->a) {
