@@ -1,19 +1,31 @@
 Diorama
 Copyright (c) 2026 Cursed Entertainment. MIT license: see LICENSE.
 
-Shipped inside every game Diorama builds (assets/web/lib):
-- jsartoolkit5, https://github.com/artoolkitx/jsartoolkit5, LGPL-3.0 (lib/LICENSE-jsartoolkit5.txt).
+Shipped inside the games Diorama builds (assets/web), each with its licence beside it:
+- three.js r172 and its GLTFLoader, https://threejs.org, MIT (lib/three/LICENSE). Copyright (c) the three.js authors.
+- jsartoolkit5, https://github.com/artoolkitx/jsartoolkit5, LGPL-3.0 (lib/LICENSE-jsartoolkit5.txt), in Markers games.
   Copyright (c) the ARToolKit and artoolkitX authors.
-- three.js r103 and its GLTFLoader, https://threejs.org, MIT (lib/LICENSE-three.txt).
-  Copyright (c) the three.js authors.
+- MindAR 1.2.5 and three.js 0.160, https://github.com/hiukim/mind-ar-js, MIT (lib/mindar), in Images and Faces games.
+- OpenCV.js 4.10 (the @techstark/opencv-js build), https://opencv.org, Apache License 2.0 (lib/opencv/LICENSE),
+  in Surfaces games: the surface tracker for cameras without ARCore.
 - camera_para.dat, ARToolKit's default camera calibration (from jsartoolkit5's examples).
-- patt.hiro and patt.kanji, ARToolKit's sample markers, and the Hiro and Kanji pictures (from AR.js's markers).
+- The Hiro and Kanji pictures (from AR.js's markers).
+- Windows builds: DioramaGame.exe, Diorama's own player, which runs Microsoft Edge WebView2 (the WebView2 runtime is
+  part of Windows 11; the loader is from the Microsoft.Web.WebView2 package).
+- Android builds: Diorama's own player app (assets/player/android), built with the Android SDK and Gradle.
 
 Built into Diorama:
 - Dear ImGui (MIT), https://github.com/ocornut/imgui
 - SDL2 (zlib), https://www.libsdl.org
 - cgltf (MIT), https://github.com/jkuhlmann/cgltf
 - stb_image, stb_image_write, stb_truetype (MIT / public domain), https://github.com/nothings/stb
+- ImGuiColorTextEdit (MIT), https://github.com/BalazsJako/ImGuiColorTextEdit
+- OpenCV 4.10 (Apache License 2.0), https://opencv.org: the native surface tracker and tools/surfacetrack (optional).
+
+Ideas and methods:
+- The surface tracker follows https://github.com/CursedPrograms/AR-Plane-Detection (CLAHE, ORB, homography).
+- Indoor navigation follows "Augmented Reality in Indoor Navigation", IJSREM vol. 07 issue 03 (2023),
+  doi:10.55041/IJSREM18172.
 
 The art gallery template (templates/gallery): the pictures and the frame model are from
 https://github.com/CursedPrograms/ARToolkit-ArtGallery-Template (Cursed Entertainment).
