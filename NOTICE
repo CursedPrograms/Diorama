@@ -12,6 +12,9 @@ Shipped inside the games Diorama builds (assets/web), each with its licence besi
 - The Hiro and Kanji pictures (from AR.js's markers).
 - Windows builds: DioramaGame.exe, Diorama's own player, which runs Microsoft Edge WebView2 (the WebView2 runtime is
   part of Windows 11; the loader is from the Microsoft.Web.WebView2 package).
+- Windows builds on the C++ runtime: DioramaNative.exe, Diorama's native player (its renderer, the C++ trackers, Dear
+  ImGui for the Canvas, QuickJS for the scripts), with SDL2.dll (zlib) and opencv_world4100.dll (OpenCV 4.10, Apache
+  License 2.0) beside it.
 - Android builds: Diorama's own player app (assets/player/android), built with the Android SDK and Gradle.
 
 Built into Diorama:
@@ -20,7 +23,10 @@ Built into Diorama:
 - cgltf (MIT), https://github.com/jkuhlmann/cgltf
 - stb_image, stb_image_write, stb_truetype (MIT / public domain), https://github.com/nothings/stb
 - ImGuiColorTextEdit (MIT), https://github.com/BalazsJako/ImGuiColorTextEdit
-- OpenCV 4.10 (Apache License 2.0), https://opencv.org: the native surface tracker and tools/surfacetrack (optional).
+- OpenCV 4.10 (Apache License 2.0), https://opencv.org: the native trackers (surfaces, ArUco, ARToolKit-style markers,
+  calibration), the native player and the tools (optional).
+- QuickJS (quickjs-ng 0.10.1, MIT), https://github.com/quickjs-ng/quickjs: the native player's scripts.
+- OpenCV's ArUco dictionaries as bits (src/aruco_dicts.h, from OpenCV 4.10, Apache License 2.0).
 
 Ideas and methods:
 - The surface tracker follows https://github.com/CursedPrograms/AR-Plane-Detection (CLAHE, ORB, homography).

@@ -41,6 +41,7 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
   - [5. ArUco markers: one model per number](#5-aruco-markers-one-model-per-number)
   - [6. Calibrate the camera](#6-calibrate-the-camera)
 - [Scripting reference](#scripting-reference)
+- [The native player](#the-native-player)
 - [Install](#install) · [Build](#build) · [Credits](#credits)
 
 ## What it does
@@ -272,6 +273,24 @@ Console.
 ### Units
 
 Markers and pictures are 1 across; faces are 1 wide; Surfaces are in metres. Y is up; rotations are in degrees.
+
+## The native player
+
+**Build Settings > Windows > Runtime: C++** builds `<Game>.exe` on Diorama's own player instead of a browser engine:
+the editor's renderer (PBR, up to 16 lights, soft shadows onto the real table, HDR, bloom, tone mapping) over the
+PC's camera, and the C++ twins of the game's trackers.
+
+- **Tracks:** Markers (the same `.patt` files and 3x3 barcodes as jsartoolkit5), ArUco, Surfaces (Space or a click
+  locks the table or floor in view). Images and Faces games use the JavaScript runtime.
+- **Scripts** run in QuickJS with the same runtime as the web game (`player/native/runtime.js`): every hook and
+  everything in the reference above, `planes.raycast` on the locked surface, `spawn` of objects and prefabs,
+  `loadScene`. Not yet native: sound and video (their components answer but stay quiet) and walked `nav` paths
+  (paths drawn in the editor are drawn and followed). `log()` goes to `game\log.txt`; a problem shows in the title.
+- **The Canvas** is drawn over the camera, laid out as on the phone: Text, Button (with On Click), Slider, Toggle,
+  Image, Panel.
+- The camera's **calibration** (Project Settings) sets its lens. F11 full screen, Esc quits.
+- For testing: `DioramaNative.exe <game folder> --video clip.mp4 --shot out.png --after 3` (plus `--lock-after 1`,
+  `--tap x,y,seconds`).
 
 ## Install
 
