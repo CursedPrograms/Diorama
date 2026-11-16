@@ -1307,6 +1307,41 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
 }
 
 static std::vector<ArPlane> arPlanes;
+static Mesh polyMesh;   // a plane's polygon, filled again for each one
+static void drawPolygon(const std::vector<float>& xz, float y) {
+    const int n = (int)xz.size() / 2;
+    if (n < 3) return;
+    std::vector<float> v; std::vector<unsigned> idx;
+    for (int i = 0; i < n; ++i) addV(v, xz[i * 2], y, xz[i * 2 + 1], 0, 1, 0, 0, 0);
+    for (int i = 1; i + 1 < n; ++i) { idx.push_back(0); idx.push_back(i); idx.push_back(i + 1); }   // a fan: it's convex
+    if (!polyMesh.vao) polyMesh = upload(v, idx, true);
+    else {
+        glBindVertexArray_(polyMesh.vao);
+        glBindBuffer_(GL_ARRAY_BUFFER, polyMesh.vbo); glBufferData_(GL_ARRAY_BUFFER, v.size() * 4, v.data(), GL_DYNAMIC_DRAW);
+        glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, polyMesh.ibo); glBufferData_(GL_ELEMENT_ARRAY_BUFFER, idx.size() * 4, idx.data(), GL_DYNAMIC_DRAW);
+        polyMesh.count = (int)idx.size();
+    }
+    draw(polyMesh);
+}
+// a line clipped to a convex polygon (Cyrus-Beck): false when it misses it
+static bool clipToPolygon(const std::vector<float>& xz, float& ax, float& az, float& bx, float& bz) {
+    const int n = (int)xz.size() / 2;
+    float t0 = 0, t1 = 1; const float dx = bx - ax, dz = bz - az;
+    float cx = 0, cz = 0; for (int i = 0; i < n; ++i) { cx += xz[i * 2]; cz += xz[i * 2 + 1]; } cx /= n; cz /= n;
+    for (int i = 0; i < n; ++i) {
+        const float px = xz[i * 2], pz = xz[i * 2 + 1], qx = xz[(i + 1) % n * 2], qz = xz[(i + 1) % n * 2 + 1];
+        float nx = -(qz - pz), nz = qx - px;                                     // the edge's normal, pointing in
+        if (nx * (cx - px) + nz * (cz - pz) < 0) { nx = -nx; nz = -nz; }
+        const float num = nx * (ax - px) + nz * (az - pz), den = nx * dx + nz * dz;
+        if (std::fabs(den) < 1e-9f) { if (num < 0) return false; continue; }
+        const float t = -num / den;
+        if (den > 0) t0 = std::max(t0, t); else t1 = std::min(t1, t);
+        if (t0 > t1) return false;
+    }
+    const float x0 = ax + dx * t0, z0 = az + dz * t0, x1 = ax + dx * t1, z1 = az + dz * t1;
+    ax = x0; az = z0; bx = x1; bz = z1;
+    return true;
+}
 void setArPlanes(const std::vector<ArPlane>& planes) { arPlanes = planes; }
 unsigned renderCameraPreview(const Project& p, int mi, int w, int h) {
     if (w < 8 || h < 8) return 0;
@@ -1374,15 +1409,25 @@ unsigned renderAR(const Project& p, const std::vector<ArAnchor>& anchors, const 
             const float lin[4] = {std::pow(pl.colour[0], 2.2f), std::pow(pl.colour[1], 2.2f), std::pow(pl.colour[2], 2.2f), pl.colour[3] * 0.35f};
             const float fill[4] = {pl.colour[0], pl.colour[1], pl.colour[2], pl.colour[3] * 0.18f};
             (void)lin;
-            setCommon(mul(translate(0, 0.002f, 0), scale(pl.size, 1, pl.size)), fill, 0, false); draw(mPicture);
             const float lineC[4] = {pl.colour[0], pl.colour[1], pl.colour[2], std::min(1.0f, pl.colour[3] * 1.6f)};
-            const float hs = pl.size / 2;
-            for (float g = -hs; g <= hs + 1e-4f; g += 0.25f) {   // the grid
-                const float a0[3] = {g, 0.004f, -hs}, a1[3] = {g, 0.004f, hs}, b0[3] = {-hs, 0.004f, g}, b1[3] = {hs, 0.004f, g};
-                segment(a0, a1, 0.0025f, lineC); segment(b0, b1, 0.0025f, lineC);
+            std::vector<float> poly = pl.boundary;
+            if (poly.size() < 6) { const float hs = pl.size / 2; poly = {-hs, -hs, hs, -hs, hs, hs, -hs, hs}; }
+            setCommon(ident(), fill, 0, false); drawPolygon(poly, 0.002f);
+            float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+            for (size_t k = 0; k < poly.size(); k += 2) for (int c = 0; c < 2; ++c) { lo[c] = std::min(lo[c], poly[k + c]); hi[c] = std::max(hi[c], poly[k + c]); }
+            for (float g = std::floor(lo[0] / 0.25f) * 0.25f; g <= hi[0]; g += 0.25f) {   // the grid, every 25 cm, inside the plane
+                float ax = g, az = lo[1] - 1, bx = g, bz = hi[1] + 1;
+                if (clipToPolygon(poly, ax, az, bx, bz)) { const float a0[3] = {ax, 0.004f, az}, a1[3] = {bx, 0.004f, bz}; segment(a0, a1, 0.0025f, lineC); }
             }
-            const float c[4][3] = {{-hs, 0.005f, -hs}, {hs, 0.005f, -hs}, {hs, 0.005f, hs}, {-hs, 0.005f, hs}};
-            for (int k = 0; k < 4; ++k) segment(c[k], c[(k + 1) % 4], 0.007f, lineC);
+            for (float g = std::floor(lo[1] / 0.25f) * 0.25f; g <= hi[1]; g += 0.25f) {
+                float ax = lo[0] - 1, az = g, bx = hi[0] + 1, bz = g;
+                if (clipToPolygon(poly, ax, az, bx, bz)) { const float a0[3] = {ax, 0.004f, az}, a1[3] = {bx, 0.004f, bz}; segment(a0, a1, 0.0025f, lineC); }
+            }
+            for (size_t k = 0; k < poly.size(); k += 2) {   // the edge
+                const size_t j = (k + 2) % poly.size();
+                const float a0[3] = {poly[k], 0.005f, poly[k + 1]}, a1[3] = {poly[j], 0.005f, poly[j + 1]};
+                segment(a0, a1, 0.007f, lineC);
+            }
         }
         glDepthMask(GL_TRUE);
     }

@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
 #endif
     (void)argc; (void)argv;
     std::string gameArg, video, shot; int camIndex = 0; double after = 3; int winW = 1280, winH = 720;
-    double lockAfter = -1, lockVAfter = -1; std::vector<double> testTap;   // tests: lock a surface after some seconds; a tap (x, y in -1..1, seconds)
+    double lockAfter = -1, lockVAfter = -1; std::vector<double> testTap; bool autoPlanes = true;   // the first plane finds itself (--no-auto: only by hand)   // tests: lock a surface after some seconds; a tap (x, y in -1..1, seconds)
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
         const bool more = i + 1 < args.size();
@@ -146,6 +146,7 @@ int main(int argc, char** argv) {
         else if (a == "--after" && more) after = std::atof(args[++i].c_str());
         else if (a == "--lock-after" && more) lockAfter = std::atof(args[++i].c_str());
         else if (a == "--lock-wall-after" && more) lockVAfter = std::atof(args[++i].c_str());
+        else if (a == "--no-auto") autoPlanes = false;
         else if (a == "--tap" && more) { std::stringstream ss(args[++i]); std::string part; while (std::getline(ss, part, ',')) testTap.push_back(std::atof(part.c_str())); }
         else if (a == "--size" && more) { const std::string v = args[++i]; const size_t x = v.find('x'); if (x != std::string::npos) { winW = std::atoi(v.c_str()); winH = std::atoi(v.c_str() + x + 1); } }
         else if (a.rfind("--", 0) != 0) gameArg = a;
@@ -209,7 +210,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<MarkerTrack::Tracker> mt; std::unique_ptr<ArucoTrack::Tracker> at; std::unique_ptr<SurfaceTrack::Tracker> st;
     // Surfaces: every plane locked (Space / a click: a floor or table; V: a wall), each with its own tracker; the scene's
     // anchors ride on the first floor or table (else the first plane)
-    struct Plane { std::unique_ptr<SurfaceTrack::Tracker> tr; bool vertical = false; float view[16]; bool on = false; double at = -1; std::string id; bool sent = false; };
+    struct Plane { std::unique_ptr<SurfaceTrack::Tracker> tr; bool vertical = false; float view[16]; bool on = false, tracked = false; double at = -1; std::string id; bool sent = false;
+                   std::vector<float> boundary; bool related = false; float toAnchor[16]; };   // toAnchor: this plane -> the anchor plane's frame (learnt while both are seen)
     std::vector<Plane> planes; SurfaceTrack::Settings surfBase; int lockKind = -1;   // 0 a floor or table, 1 a wall
     auto anchorPlane = [&]() -> int { for (size_t i = 0; i < planes.size(); ++i) if (!planes[i].vertical) return (int)i; return planes.empty() ? -1 : 0; };
     std::map<int, int> pattToMarker, barToMarker, arucoToMarker;
@@ -261,7 +263,7 @@ int main(int argc, char** argv) {
         env.proj = &proj; env.projection = P; env.sceneIndex = i;
         env.anchorView = [&](int a, float v[16]) { if (a < 0 || a >= (int)seen.size() || !seen[a].on) return false; std::memcpy(v, seen[a].view, 16 * sizeof(float)); return true; };
         env.surface = [&](float v[16]) { const int a = anchorPlane(); if (a < 0 || !planes[a].on) return false; std::memcpy(v, planes[a].view, 16 * sizeof(float)); return true; };
-        env.planes = [&]() { std::vector<Scripts::Env::Plane> v; for (const auto& p : planes) if (p.on) { Scripts::Env::Plane q; q.id = p.id; q.vertical = p.vertical; std::memcpy(q.view, p.view, sizeof q.view); v.push_back(q); } return v; };
+        env.planes = [&]() { std::vector<Scripts::Env::Plane> v; for (const auto& p : planes) if (p.on) { Scripts::Env::Plane q; q.id = p.id; q.vertical = p.vertical; std::memcpy(q.view, p.view, sizeof q.view); q.boundary = p.boundary; v.push_back(q); } return v; };
         env.loadScene = [&](int n) { pendingScene = n; };
         env.log = [&](const std::string& level, const std::string& text) {
             std::fprintf(stderr, "%s%s\n", level == "error" ? "Problem: " : "", text.c_str()); std::fflush(stderr);
@@ -328,13 +330,57 @@ int main(int argc, char** argv) {
                     lockWanted = false;
                     Plane p; SurfaceTrack::Settings s = surfBase; s.facing = lockKind == 1; p.vertical = lockKind == 1;
                     p.tr = std::make_unique<SurfaceTrack::Tracker>(s);
-                    if (p.tr->lock(frame)) { p.id = std::string(p.vertical ? "wall " : "floor ") + std::to_string(planes.size() + 1); planes.push_back(std::move(p)); }
+                    if (p.tr->lock(frame)) {
+                        p.id = std::string(p.vertical ? "wall " : "floor ") + std::to_string(planes.size() + 1);
+                        const int a = anchorPlane();   // where it is next to the planes already found (now, while they're seen)
+                        if (a >= 0 && planes[a].tracked) {
+                            SurfaceTrack::Pose sp0 = SurfaceTrack::Tracker::lockPose(s); float v[16]; toView(sp0.R, sp0.t, false, v);
+                            float ia[16] = {0}; const float* M = planes[a].view;
+                            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) ia[j * 4 + i] = M[i * 4 + j];
+                            for (int i = 0; i < 3; ++i) ia[12 + i] = -(ia[i] * M[12] + ia[4 + i] * M[13] + ia[8 + i] * M[14]);
+                            ia[15] = 1;
+                            for (int c = 0; c < 4; ++c) for (int k = 0; k < 4; ++k) p.toAnchor[c * 4 + k] = ia[k] * v[c * 4] + ia[4 + k] * v[c * 4 + 1] + ia[8 + k] * v[c * 4 + 2] + ia[12 + k] * v[c * 4 + 3];
+                            p.related = true;
+                        }
+                        planes.push_back(std::move(p));
+                    }
                     else { problem = "Not enough detail there to lock on: try a more textured surface"; problemUntil = t + 4; }
                 }
+                // the first plane finds itself: the middle of the view detailed enough (every half second)
+                static double lastTry = -1;
+                if (planes.empty() && autoPlanes && t - lastTry > 0.5) {
+                    lastTry = t;
+                    if (SurfaceTrack::Tracker::lockable(frame, surfBase)) {
+                        Plane p; p.tr = std::make_unique<SurfaceTrack::Tracker>(surfBase); p.vertical = surfBase.facing;
+                        if (p.tr->lock(frame)) { p.id = std::string(p.vertical ? "wall " : "floor ") + "1"; planes.push_back(std::move(p)); }
+                    }
+                }
+                static int frameNo2 = 0; ++frameNo2;
                 for (auto& p : planes) {
                     SurfaceTrack::Pose sp;
-                    if (p.tr->track(frame, sp)) { toView(sp.R, sp.t, false, p.view); p.on = true; p.at = t; }
+                    p.tracked = p.tr->track(frame, sp);
+                    if (p.tracked) { toView(sp.R, sp.t, false, p.view); p.on = true; p.at = t; }
                     else if (p.on && t - p.at > 0.35) p.on = false;
+                    if (frameNo2 % 5 == 0 || p.boundary.empty()) {   // its outline, as it grows
+                        p.boundary.clear();
+                        for (const auto& q : p.tr->boundary()) { p.boundary.push_back(q.x); p.boundary.push_back(q.y); }
+                    }
+                }
+                // the planes kept in place relative to each other: learnt while both are seen; then one seen is enough
+                {
+                    const int a0 = anchorPlane();
+                    auto mul16 = [](const float* A, const float* B, float* O) { float r[16]; for (int c = 0; c < 4; ++c) for (int k = 0; k < 4; ++k) r[c * 4 + k] = A[k] * B[c * 4] + A[4 + k] * B[c * 4 + 1] + A[8 + k] * B[c * 4 + 2] + A[12 + k] * B[c * 4 + 3]; std::memcpy(O, r, sizeof r); };
+                    auto inv16 = [](const float* M, float* O) {   // a rotation and a move (and no scale) undone
+                        float r[16] = {0}; for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) r[j * 4 + i] = M[i * 4 + j];
+                        for (int i = 0; i < 3; ++i) r[12 + i] = -(r[i] * M[12] + r[4 + i] * M[13] + r[8 + i] * M[14]);
+                        r[15] = 1; std::memcpy(O, r, sizeof r); };
+                    if (a0 >= 0) {
+                        Plane& A = planes[a0];
+                        if (A.tracked) for (auto& p : planes) if (&p != &A && p.tracked) { float ia[16]; inv16(A.view, ia); mul16(ia, p.view, p.toAnchor); p.related = true; }
+                        if (!A.tracked)   // the anchor plane out of view: from one that's seen and related
+                            for (auto& p : planes) if (&p != &A && p.tracked && p.related) { float ir[16]; inv16(p.toAnchor, ir); mul16(p.view, ir, A.view); A.on = true; A.at = t; break; }
+                        if (A.on) for (auto& p : planes) if (&p != &A && !p.tracked && p.related) { mul16(A.view, p.toAnchor, p.view); p.on = true; p.at = A.at; }
+                    }
                 }
                 const int a = anchorPlane();
                 if (a >= 0 && planes[a].on) for (size_t i = 0; i < seen.size(); ++i) { std::memcpy(seen[i].view, planes[a].view, sizeof seen[i].view); seen[i].on = true; seen[i].at = t; now[i] = true; }
@@ -362,7 +408,7 @@ int main(int argc, char** argv) {
             const Scene::Marker* pm = proj.markers.empty() ? nullptr : &proj.markers[0];
             if (!pm || pm->showPlanes)
                 for (const auto& p : planes) if (p.on) {
-                    Viewer::ArPlane a; std::memcpy(a.view, p.view, sizeof a.view); a.size = 1.5f;
+                    Viewer::ArPlane a; std::memcpy(a.view, p.view, sizeof a.view); a.size = 1.5f; a.boundary = p.boundary;
                     const float floorC[4] = {pm ? pm->planeColour[0] : 0.25f, pm ? pm->planeColour[1] : 0.95f, pm ? pm->planeColour[2] : 0.55f, 0.6f}, wallC[4] = {0.2f, 0.66f, 0.89f, 0.6f};
                     std::memcpy(a.colour, p.vertical ? wallC : floorC, sizeof a.colour);
                     look.push_back(a);
@@ -420,7 +466,7 @@ int main(int argc, char** argv) {
         std::string names;
         for (size_t i = 0; i < seen.size(); ++i) if (seen[i].on) names += (names.empty() ? "" : ", ") + proj.markers[i].name;
         int planesOn = 0, walls = 0; for (const auto& p : planes) { if (p.on) ++planesOn; if (p.vertical) ++walls; }
-        if (surfaces && planes.empty()) hint = "Point at a table or the floor and press Space (or click); at a wall and press V";
+        if (surfaces && planes.empty()) hint = "Looking for a plane: point at a table or the floor (some detail on it), or press Space; V for a wall";
         else if (surfaces) hint = std::to_string(planesOn) + " of " + std::to_string(planes.size()) + " planes seen (" + std::to_string(walls) + " wall" + (walls == 1 ? "" : "s") + ")   Space: a floor or table   V: a wall   R: start again   click: the game";
         else if (names.empty()) hint = aruco ? "Point the camera at an ArUco marker" : "Point the camera at a marker";
         else hint = "Found: " + names;

@@ -1519,8 +1519,19 @@
             M.set(R[0], R[1], R[2], t[0], R[3], R[4], R[5], t[1], R[6], R[7], R[8], t[2], 0, 0, 0, 1).premultiply(F);
             camera.updateMatrixWorld();
             surface.matrix.copy(camera.matrixWorld).multiply(M); surface.matrixWorldNeedsUpdate = true; surface.visible = true;
+            if (++outlineTick % 5 === 1) { var b = tracker.boundary(); if (b.length >= 3) poly = b; }   // its outline, as it grows (the map's hull)
             C.planes.set('surface', surface.matrix, poly, 'horizontal');
           };
+          // walls (V): each its own tracker, facing the camera; drawn and hit like the first plane
+          var walls = [], outlineTick = 0, goodSince = 0;
+          var lockWall = function () {
+            if (!tracker || !window.SurfaceTrack) return;
+            var w = new window.SurfaceTrack.Tracker(tracker.cv, Object.assign({}, settings, { facing: true }));
+            if (!w.lock(video)) { say('Not enough to see on that wall: point at something with a pattern.'); return; }
+            walls.push({ tr: w, id: 'wall ' + (walls.length + 1), poly: poly.slice(), node: new THREE.Object3D(), lostAt: 0 });
+            say('A wall: ' + walls.length + ' found. V for another.');
+          };
+          window.addEventListener('keydown', function (e) { if (e.key === 'v' || e.key === 'V') lockWall(); if (e.key === ' ' && tracker && !tracker.locked()) lock(); });
           relock.addEventListener('click', function (e) { e.stopPropagation(); lock(); });
           renderer.domElement.addEventListener('click', function (e) {
             if (!tracker) return;
@@ -1556,8 +1567,21 @@
               relock.disabled = pv.count < 40;
               relock.style.opacity = pv.count < 40 ? 0.5 : 1;
               say(pv.count < 40 ? 'Too plain or dark here (' + pv.count + ' features): point at something with a pattern, in good light.'
-                                : pv.count + ' features: Lock (or tap) when the middle shows what to lock.');
+                                : pv.count + ' features: looking for a plane (or Lock / tap / Space now; V for a wall).');
+              // the first plane finds itself (as ARCore's): the middle detailed enough for a second
+              if (tracker.lockable(video)) { if (!goodSince) goodSince = t; else if (t - goodSince > 1) { goodSince = 0; lock(); } } else goodSince = 0;
             }
+            walls.forEach(function (w) {   // the walls: tracked, outlined, kept for raycasts
+              var r = w.tr.track(video);
+              if (r.ok) {
+                w.lostAt = 0;
+                M.set(r.R[0], r.R[1], r.R[2], r.t[0], r.R[3], r.R[4], r.R[5], r.t[1], r.R[6], r.R[7], r.R[8], r.t[2], 0, 0, 0, 1).premultiply(F);
+                camera.updateMatrixWorld();
+                var mw = new THREE.Matrix4().copy(camera.matrixWorld).multiply(M);
+                if (++outlineTick % 5 === 1) { var b = w.tr.boundary(); if (b.length >= 3) w.poly = b; }
+                C.planes.set(w.id, mw, w.poly, 'vertical');
+              } else if (!w.lostAt) w.lostAt = t;
+            });
             if (!tracker || !tracker.locked() || video.readyState < 2) return;
             var r = tracker.track(video);
             if (r.ok) { lostAt = 0; show({ R: r.R, t: r.t }); }

@@ -17,7 +17,7 @@ struct Env {
     std::function<void(int)> loadScene;         // asked for another scene (done after this frame)
     std::function<void(const std::string& level, const std::string& text)> log;
     std::function<bool(float view[16])> surface;   // Surfaces: the locked surface's view (false: none)
-    struct Plane { std::string id; bool vertical; float view[16]; };
+    struct Plane { std::string id; bool vertical; float view[16]; std::vector<float> boundary; };   // boundary: x z pairs on it
     std::function<std::vector<Plane>()> planes;     // Surfaces: every plane locked and seen now
 };
 

@@ -306,7 +306,9 @@ FN(d_planes) {
     for (const auto& p : planesNow()) {
         const float* V = p.view;
         s += std::string(s.size() > 1 ? "," : "") + "{\"id\":" + jsonQ(p.id) + ",\"alignment\":\"" + (p.vertical ? "vertical" : "horizontal") +
-             "\",\"center\":{\"x\":" + fmt(V[12]) + ",\"y\":" + fmt(V[13]) + ",\"z\":" + fmt(V[14]) + "},\"size\":{\"x\":1.5,\"y\":1.5},\"boundary\":[]}";
+             "\",\"center\":{\"x\":" + fmt(V[12]) + ",\"y\":" + fmt(V[13]) + ",\"z\":" + fmt(V[14]) + "},\"size\":{\"x\":1.5,\"y\":1.5},\"boundary\":[";
+        for (size_t k = 0; k + 1 < p.boundary.size(); k += 2) s += std::string(k ? "," : "") + "{\"x\":" + fmt(p.boundary[k]) + ",\"z\":" + fmt(p.boundary[k + 1]) + "}";
+        s += "]}";
     }
     return jstr(s + "]");
 }
@@ -325,11 +327,20 @@ FN(d_raycast) {   // where a screen point (-1..1) meets the planes: the nearest 
         const float s = (n[0] * o[0] + n[1] * o[1] + n[2] * o[2]) / den;
         if (s <= 0) continue;
         const float h[3] = {d[0] * s, d[1] * s, d[2] * s};
-        // on the plane as drawn (1.5 m square round where it was locked)
+        // inside the plane as found (its boundary; a 1.5 m square before it has one)
         float local[2] = {0, 0};
         for (int k = 0; k < 2; ++k) { const int c = k == 0 ? 0 : 8; const float ax[3] = {V[c], V[c + 1], V[c + 2]}; const float al = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
             local[k] = ((h[0] - o[0]) * ax[0] + (h[1] - o[1]) * ax[1] + (h[2] - o[2]) * ax[2]) / (al * al); }
-        if (std::fabs(local[0]) > 0.75f || std::fabs(local[1]) > 0.75f) continue;
+        const auto& B = p.boundary; const int nb = (int)B.size() / 2;
+        if (nb >= 3) {   // inside a convex polygon: on the same side of every edge
+            int sign = 0; bool in = true;
+            for (int e = 0; e < nb && in; ++e) {
+                const float cr = (B[(e + 1) % nb * 2] - B[e * 2]) * (local[1] - B[e * 2 + 1]) - (B[(e + 1) % nb * 2 + 1] - B[e * 2 + 1]) * (local[0] - B[e * 2]);
+                const int sg = cr > 0 ? 1 : cr < 0 ? -1 : 0;
+                if (sg && sign && sg != sign) in = false; if (sg) sign = sg;
+            }
+            if (!in) continue;
+        } else if (std::fabs(local[0]) > 0.75f || std::fabs(local[1]) > 0.75f) continue;
         const float dist = s * std::sqrt(d[0] * d[0] + d[1] * d[1] + 1);
         hits.push_back({dist, "{\"position\":{\"x\":" + fmt(h[0]) + ",\"y\":" + fmt(h[1]) + ",\"z\":" + fmt(h[2]) + "},\"distance\":" + fmt(dist) + ",\"plane\":" + jsonQ(p.id) + ",\"alignment\":\"" + (p.vertical ? "vertical" : "horizontal") + "\"}"});
     }

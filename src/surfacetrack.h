@@ -36,7 +36,14 @@ public:
     cv::Matx33d K() const { return K_; }
     static Pose lockPose(const Settings& s);       // where the surface is at the lock, from the tilt and height
     int preview(const cv::Mat& frame, std::vector<cv::Point2f>* points = nullptr);   // before locking: the features it sees (how many)
+    // the plane's map (as ARCore's): its points only ever added, so a place seen before is found again; a new point
+    // joins once a second view puts it in the same place on the plane (things standing on it don't). Its boundary: the
+    // convex hull of the points, on the plane (x, z), growing as more of it is seen.
+    std::vector<cv::Point2f> boundary() const;
+    int mapSize() const { return (int)refX_.size(); }
+    static bool lockable(const cv::Mat& frame, const Settings& s);   // enough detail in the middle of the view to find a plane there
 private:
+    void grow(const cv::Mat& gray, const std::vector<cv::KeyPoint>& kps, const cv::Mat& desc, const std::vector<bool>& matched, const Pose& P);
     void prepare(const cv::Mat& frame, cv::Mat& gray);
     bool reference(const cv::Mat& gray, const Pose& P, double margin);   // this frame's features, placed on the surface
     Settings s_;
@@ -50,6 +57,12 @@ private:
     bool lastGood_ = false;
     int inliers_ = 0;
     int refCount_ = 0;
+    // candidates: points seen once, waiting for a second view
+    cv::Mat candDesc_;
+    std::vector<cv::Point3f> candX_;
+    std::vector<int> candAge_;
+    std::vector<int> seen_;                       // each map point: how many times it was matched
+    int growTick_ = 0;                            // the map grows every third good frame (the rest just track)
 };
 
 }

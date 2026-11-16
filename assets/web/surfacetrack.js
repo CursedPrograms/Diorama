@@ -1,6 +1,7 @@
 // Diorama - a surface (a table, a floor) tracked with any camera: the JavaScript twin of src/surfacetrack.cpp, step for step.
 // CLAHE (contrast), ORB features, matching (Lowe's ratio), a RANSAC homography (only what moves as one flat thing),
-// then the surface's pose (solvePnP); keyframes as the view moves on. Needs OpenCV.js (window.cv).
+// then the surface's pose (solvePnP). Its map (as ARCore's): points only ever added (a second view in the same place
+// confirms each), so a place seen before is found again; its boundary, the convex hull of them, grows. Needs OpenCV.js.
 // Poses: surface -> camera in OpenCV's camera axes (x right, y down, z ahead); R row by row (9), t (3).
 (function () {
   'use strict';
@@ -32,6 +33,7 @@
     this.canvas = document.createElement('canvas');
     this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
     this.refDesc = null; this.refPx = []; this.refX = []; this.refCount = 0;
+    this.rows = []; this.seen = []; this.cand = { rows: [], X: [], age: [] };   // the map's descriptors (a row each), how often matched; the candidates
     this.last = null; this.lastGood = false; this.inliers = 0;
   }
   Tracker.prototype.locked = function () { return this.refX.length > 0; };
@@ -71,13 +73,91 @@
       var Xc = [d[0] * sd - P.t[0], d[1] * sd - P.t[1], d[2] * sd - P.t[2]], Xs = apply3(RT, Xc);
       px.push(pt.x, pt.y); X.push(Xs[0], 0, Xs[2]); rows.push(i);
     }
-    var keep = new Uint8Array(rows.length * cols);
-    rows.forEach(function (r, j) { keep.set(desc.data.subarray(r * cols, (r + 1) * cols), j * cols); });
+    var self = this;
+    this.rows = rows.map(function (r) { return desc.data.slice(r * cols, (r + 1) * cols); });
+    this.seen = rows.map(function () { return 1; });
+    this.cand = { rows: [], X: [], age: [] };
     kps.delete(); desc.delete();
-    if (this.refDesc) this.refDesc.delete();
-    this.refDesc = cv.matFromArray(rows.length, cols, cv.CV_8U, keep);
-    this.refPx = px; this.refX = X; this.refCount = rows.length;
+    this.refPx = px; this.refX = X;
+    this.rebuild();
+    void self;
     return this.refCount >= s.minInliers * 2;
+  };
+  // the map's descriptors as one Mat (for the matcher), after it changes
+  Tracker.prototype.rebuild = function () {
+    var cv = this.cv, n = this.rows.length, cols = n ? this.rows[0].length : 32, all = new Uint8Array(n * cols);
+    for (var i = 0; i < n; ++i) all.set(this.rows[i], i * cols);
+    if (this.refDesc) this.refDesc.delete();
+    this.refDesc = cv.matFromArray(n, cols, cv.CV_8U, all);
+    this.refCount = n;
+  };
+  // the frame's features the map doesn't have yet: placed on the plane; seen in the same place twice, they join the map
+  Tracker.prototype.grow = function (kps, desc, matched, P) {
+    var cv = this.cv, s = this.s, K = this.K, fi = 1 / K[0], n = apply3(P.R, [0, 1, 0]), RT = transpose3(P.R), nt = n[0] * P.t[0] + n[1] * P.t[1] + n[2] * P.t[2];
+    var cols = desc.cols, newRows = [], newX = [];
+    for (var i = 0; i < kps.size(); ++i) {
+      if (matched[i]) continue;
+      var pt = kps.get(i).pt, d = [(pt.x - K[2]) * fi, (pt.y - K[5]) * fi, 1];
+      var den = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
+      if (Math.abs(den) < 1e-6) continue;
+      var sd = nt / den;
+      if (sd <= 0 || sd > 8) continue;                              // behind, or too far to trust
+      var Xs = apply3(RT, [d[0] * sd - P.t[0], d[1] * sd - P.t[1], d[2] * sd - P.t[2]]);
+      if (Math.hypot(Xs[0], Xs[2]) > 4) continue;                   // a plane is a few metres at most
+      newRows.push(desc.data.slice(i * cols, (i + 1) * cols)); newX.push([Xs[0], Xs[2]]);
+    }
+    if (!newRows.length) return;
+    var used = newRows.map(function () { return false; }), C = this.cand, promoted = C.rows.map(function () { return false; }), grew = false;
+    if (C.rows.length) {   // the same feature, in the same place on the plane (2 cm, a hair more far off): it joins the map
+      var nd = new Uint8Array(newRows.length * cols), cd = new Uint8Array(C.rows.length * cols);
+      newRows.forEach(function (r, j) { nd.set(r, j * cols); }); C.rows.forEach(function (r, j) { cd.set(r, j * cols); });
+      var Nm = cv.matFromArray(newRows.length, cols, cv.CV_8U, nd), Cm = cv.matFromArray(C.rows.length, cols, cv.CV_8U, cd), knn = new cv.DMatchVectorVector();
+      this.matcher.knnMatch(Nm, Cm, knn, 2);
+      for (var k = 0; k < knn.size(); ++k) {
+        var m = knn.get(k);
+        if (m.size() >= 1) {
+          var m0 = m.get(0), ok = m0.distance <= 50 && (m.size() < 2 || m0.distance < s.ratio * m.get(1).distance);
+          var a = newX[m0.queryIdx], c = C.X[m0.trainIdx];
+          if (ok && !promoted[m0.trainIdx] && Math.hypot(a[0] - c[0], a[1] - c[1]) <= 0.02 + 0.01 * Math.hypot(a[0], a[1])) {
+            this.rows.push(newRows[m0.queryIdx]); this.refX.push((a[0] + c[0]) / 2, 0, (a[1] + c[1]) / 2); this.seen.push(2);
+            used[m0.queryIdx] = true; promoted[m0.trainIdx] = true; grew = true;
+          }
+        }
+        m.delete();
+      }
+      knn.delete(); Nm.delete(); Cm.delete();
+    }
+    var keep = { rows: [], X: [], age: [] };   // the candidates: the promoted and the old (20 frames) go; the new ones join
+    for (var q = 0; q < C.rows.length; ++q) if (!promoted[q] && C.age[q] < 20) { keep.rows.push(C.rows[q]); keep.X.push(C.X[q]); keep.age.push(C.age[q] + 1); }
+    for (var r = 0; r < newRows.length; ++r) if (!used[r] && keep.rows.length < 2500) { keep.rows.push(newRows[r]); keep.X.push(newX[r]); keep.age.push(0); }
+    this.cand = keep;
+    if (this.rows.length > 5000) {   // the map kept in hand: the points matched least go first
+      var self = this, order = this.rows.map(function (_, i) { return i; }).sort(function (x, y) { return self.seen[y] - self.seen[x]; }).slice(0, 4500);
+      this.rows = order.map(function (i) { return self.rows[i]; }); this.seen = order.map(function (i) { return self.seen[i]; });
+      var X2 = []; order.forEach(function (i) { X2.push(self.refX[i * 3], 0, self.refX[i * 3 + 2]); }); this.refX = X2; grew = true;
+    }
+    if (grew) this.rebuild();
+  };
+  // its boundary: the convex hull of its points (seen twice), on the plane: [[x, z], ...]
+  Tracker.prototype.boundary = function () {
+    var pts = [];
+    for (var i = 0; i < this.seen.length; ++i) if (this.seen[i] >= 2) pts.push([this.refX[i * 3], this.refX[i * 3 + 2]]);
+    if (pts.length < 3) { pts = []; for (var j = 0; j < this.refX.length; j += 3) pts.push([this.refX[j], this.refX[j + 2]]); }
+    if (pts.length < 3) return [];
+    pts.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });   // Andrew's monotone chain
+    var cross = function (o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }, lo = [], hi = [];
+    pts.forEach(function (p) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); });
+    for (var k = pts.length - 1; k >= 0; --k) { var p = pts[k]; while (hi.length >= 2 && cross(hi[hi.length - 2], hi[hi.length - 1], p) <= 0) hi.pop(); hi.push(p); }
+    lo.pop(); hi.pop();
+    return lo.concat(hi);
+  };
+  // enough detail in the middle of the view to find a plane there
+  Tracker.prototype.lockable = function (src) {
+    var cv = this.cv, gray = this.prepare(src), mask = cv.Mat.zeros(gray.rows, gray.cols, cv.CV_8U);
+    var roi = mask.roi(new cv.Rect(gray.cols >> 2, gray.rows >> 2, gray.cols >> 1, gray.rows >> 1)); roi.setTo(new cv.Scalar(255)); roi.delete();
+    var kps = new cv.KeyPointVector(); this.orb.detect(gray, kps, mask);
+    var n = kps.size(); kps.delete(); mask.delete(); gray.delete();
+    return n >= this.s.minInliers * 5;
   };
   // before locking: the features it sees in this frame ({ count, points: [x, y, ...] in the frame's own pixels })
   Tracker.prototype.preview = function (src) {
@@ -109,14 +189,15 @@
     if (desc.rows === 0) { this.lastGood = false; return done(out); }
     var knn = new cv.DMatchVectorVector();
     this.matcher.knnMatch(this.refDesc, desc, knn, 2);
-    var a = [], b = [], X = [];
+    var a = [], b = [], X = [], mi = [], fidx = [];
     for (var i = 0; i < knn.size(); ++i) {
       var m = knn.get(i);
       if (m.size() === 2) {
         var m0 = m.get(0), m1 = m.get(1);
         if (m0.distance < s.ratio * m1.distance) {
           var q = m0.queryIdx, p = kps.get(m0.trainIdx).pt;
-          a.push(this.refPx[q * 2], this.refPx[q * 2 + 1]); b.push(p.x, p.y); X.push(this.refX[q * 3], this.refX[q * 3 + 1], this.refX[q * 3 + 2]);
+          a.push(this.refX[q * 3], this.refX[q * 3 + 2]); b.push(p.x, p.y); X.push(this.refX[q * 3], this.refX[q * 3 + 1], this.refX[q * 3 + 2]);
+          mi.push(q); fidx.push(m0.trainIdx);
         }
       }
       m.delete();
@@ -127,8 +208,8 @@
     // RANSAC: only the matches that move together as one flat surface
     var A = cv.matFromArray(nm, 1, cv.CV_32FC2, a), B = cv.matFromArray(nm, 1, cv.CV_32FC2, b), inl = new cv.Mat();
     var H = cv.findHomography(A, B, cv.RANSAC, s.ransacPx, inl);
-    var pb = [], pX = [];
-    if (!H.empty()) for (var j = 0; j < nm; ++j) if (inl.data[j]) { pb.push(b[j * 2], b[j * 2 + 1]); pX.push(X[j * 3], X[j * 3 + 1], X[j * 3 + 2]); }
+    var pb = [], pX = [], matched = new Array(kps.size()).fill(false);
+    if (!H.empty()) for (var j = 0; j < nm; ++j) if (inl.data[j]) { pb.push(b[j * 2], b[j * 2 + 1]); pX.push(X[j * 3], X[j * 3 + 1], X[j * 3 + 2]); matched[fidx[j]] = true; this.seen[mi[j]]++; }
     A.delete(); B.delete(); inl.delete(); H.delete();
     this.inliers = pb.length / 2;
     if (this.inliers < s.minInliers) { this.lastGood = false; return done(out); }
@@ -143,12 +224,7 @@
       out.R = Array.prototype.slice.call(Rm.data64F, 0, 9); out.t = Array.prototype.slice.call(tvec.data64F, 0, 3); Rm.delete();
       out.ok = true; out.inliers = this.inliers;
       this.last = { R: out.R, t: out.t }; this.lastGood = true;
-      // a keyframe: the view has moved on and fewer features match; while it's still well found, this frame becomes the reference
-      if (this.inliers < Math.max(s.minInliers * 4, Math.floor(this.refCount * 35 / 100))) {
-        var keep = { d: this.refDesc.clone(), px: this.refPx, X: this.refX, n: this.refCount };
-        if (!this.reference(gray, this.last, 0.05)) { this.refDesc.delete(); this.refDesc = keep.d; this.refPx = keep.px; this.refX = keep.X; this.refCount = keep.n; }
-        else keep.d.delete();
-      }
+      if (this.inliers >= s.minInliers * 2 && (this.growTick = (this.growTick || 0) + 1) % 3 === 0) this.grow(kps, desc, matched, this.last);   // well found: the map grows from this view
     } else this.lastGood = false;
     obj.delete(); img.delete(); Km.delete(); dist.delete(); rvec.delete(); tvec.delete();
     return done(out);
