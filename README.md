@@ -38,6 +38,8 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
   - [2. The art gallery](#2-the-art-gallery)
   - [3. Plane detection: tap to place cubes](#3-plane-detection-tap-to-place-cubes)
   - [4. Indoor navigation](#4-indoor-navigation)
+  - [5. ArUco markers: one model per number](#5-aruco-markers-one-model-per-number)
+  - [6. Calibrate the camera](#6-calibrate-the-camera)
 - [Scripting reference](#scripting-reference)
 - [Install](#install) · [Build](#build) · [Credits](#credits)
 
@@ -55,6 +57,10 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
   - **Surfaces:** floors, tables and walls. **Plane detection** on ARCore phones (WebXR), and on **any camera**
     (PCs, phones without ARCore): point at a table or wall, Lock, and it's followed (CLAHE, ORB, RANSAC, solvePnP;
     OpenCV.js in the game, OpenCV in C++). AR Foundation's workflow: AR Plane Manager, `planesChanged`, raycasts.
+  - **ArUco:** OpenCV's square markers (4x4, 5x5, 6x6, the original): many at once, each number its own anchor,
+    printed from the editor. Any camera (OpenCV.js in the game, OpenCV in C++, the same steps).
+  - **Camera calibration** (Project Settings): print the ChArUco board, show it to the camera from 15 angles on the
+    game's `calibrate.html`; the lens's own numbers make markers and surfaces sit exactly.
 - **Objects:** empties, primitives, see-through pictures, **glTF/GLB models with bones and animation clips**, sprite
   flocks, light rays, words.
 - **Components:** Light (point, spot, directional), Audio Source (3D), **Video Player** (with alpha: WebM, MOV ProRes
@@ -170,6 +176,36 @@ After "Augmented Reality in Indoor Navigation" (IJSREM, 2023): plane detection, 
 6. **Build Settings > Android**, **Build And Run** with the phone on USB (ARCore phones walk whole rooms; PCs lock a
    table).
 
+### 5. ArUco markers: one model per number
+
+1. **File > New**, **Edit > Project Settings**: **ArUco**, dictionary **4x4** (the biggest cells: seen furthest).
+2. The first anchor: Inspector **ArUco Marker**, Number `0`. **GameObject > 3D Object > Cube**, Scale `0.5`,
+   Position Y `0.25` (1 unit = the marker's black square).
+3. **GameObject > AR > Anchor: ArUco** twice: Numbers `1` and `2`; a Sphere on one, a glTF model on the other.
+4. **Window > Marker Maker** (type **ArUco**) or the inspector's **Save the printable marker...**: print them at
+   100%, keeping the white margin. The build puts them all on `markers.png` too.
+5. **Play**: each marker brings its own model; several can be on the table at once. Scripts see them with
+   `onFound` / `onLost` like any anchor.
+
+Tools for testing (built with OpenCV): `tools\arucotrack <video | camera number> --dict 0 --id 7 --size 0.2` prints
+each frame's pose; `--camera camera.json` uses a calibration.
+
+### 6. Calibrate the camera
+
+Without a calibration Diorama guesses the camera's field of view (the anchor's **Any camera** settings). Calibrated,
+it knows the lens: its focal length, centre and distortion.
+
+1. **Edit > Project Settings > Camera calibration > Print the board...** (or `board.png` in an ArUco or Surfaces game):
+   print it flat at 100% on A4, or show it on another screen.
+2. Open the game's **Calibrate** link (`calibrate.html`). Show the board from near, far, tilted and from the sides:
+   each different view turns the bar blue; at 15 it works the lens out (field of view and error in pixels; under 1 is
+   good). It's kept on that phone or PC, and the game uses it at once.
+3. **Download camera.json**, then **Load camera.json...** in Project Settings: every player with that camera model
+   gets it (a device's own calibration still comes first).
+
+`tools\calibrate --board board.png` writes the board; `tools\calibrate <video | camera number> camera.json` does the
+same calibration in C++ (`src/calibrate.cpp`, the twin of `assets/web/calibrate.js`).
+
 ## Scripting reference
 
 Scripts are JavaScript files on objects (Add Component > Script). A script's functions are called by name; `this` (and
@@ -242,7 +278,9 @@ run `install.bat`, or install it from the Atelier launcher.
 ## Build
 
 Needs Visual Studio 2022 (C++) and CMake; SDL2, Dear ImGui and Microsoft's WebView2 SDK are fetched once. OpenCV 4.10
-(optional: the native surface tracker and `tools/surfacetrack`) is found from `OpenCV_DIR`.
+(optional: the native trackers and `tools/surfacetrack`, `tools/arucotrack`, `tools/calibrate`) is found from
+`OpenCV_DIR`. `tools/gen_aruco` rewrites `src/aruco_dicts.h`, OpenCV's ArUco dictionaries as bits, so the editor
+itself prints ArUco markers and the calibration board without OpenCV.
 
 ```bat
 build.bat      :: build\Release, dist\Diorama and dist\Diorama-win64.zip

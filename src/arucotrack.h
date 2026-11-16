@@ -14,7 +14,8 @@ struct Settings {
     double fovDeg = 60;          // the camera's field of view, across (without a calibration)
     int width = 640;             // frames are worked on at this width
     double size = 1;             // the marker's black square, across
-    cv::Matx33d K = cv::Matx33d::zeros();   // a calibration (for the frame's own size); zeros: use fovDeg
+    cv::Matx33d K = cv::Matx33d::zeros();   // a calibration (for frames calibWidth across; 0: the frame's own); zeros: use fovDeg
+    int calibWidth = 0;
     std::vector<double> dist;
 };
 struct Found { int id = 0; cv::Matx33d R; cv::Vec3d t; std::vector<cv::Point2f> corners; };

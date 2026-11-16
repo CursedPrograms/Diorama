@@ -1,5 +1,6 @@
 // Diorama - the project (see scene.h)
 #include "scene.h"
+#include <cstdio>
 #include "json.h"
 
 #include <algorithm>
@@ -252,11 +253,23 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
     return k;
 }
 
+// the camera's calibration, as camera.json has it
+static std::string calibJson(const Project& p) {
+    std::string s = ",\n  \"calibration\": {\"width\": " + std::to_string(p.calibW) + ", \"height\": " + std::to_string(p.calibH) + ", \"K\": [";
+    for (int i = 0; i < 4; ++i) s += (i ? ", " : "") + fnum((float)p.calibK[i]);
+    s += "], \"dist\": [";
+    char b[32];
+    for (size_t i = 0; i < p.calibDist.size(); ++i) { std::snprintf(b, sizeof b, "%s%.6f", i ? ", " : "", p.calibDist[i]); s += b; }
+    std::snprintf(b, sizeof b, "%.4f", p.calibRms);
+    return s + "], \"rms\": " + b + "}";
+}
+
 std::string toJson(const Project& p) {
     std::string out = "{\n  \"diorama\": 1,\n  \"title\": " + Json::quote(p.title) + ",\n  \"tracking\": \"" + TRACKING_NAMES[p.tracking] +
                       "\",\n  \"gps\": " + (p.gps ? "true" : "false") + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"scene\": " + Json::quote(p.scene) + ",\n  \"scenes\": [";
     for (size_t i = 0; i < p.scenes.size(); ++i) out += (i ? ", " : "") + Json::quote(p.scenes[i]);
     out += "],\n  \"platform\": " + Json::quote(p.platform) + ", \"windowsRuntime\": " + std::to_string(p.windowsRuntime) + ", \"arucoDict\": " + std::to_string(p.arucoDict) + ", \"renderer\": " + std::to_string(p.renderer) +
+           (p.calibW > 0 ? calibJson(p) : std::string()) +
            ",\n  \"shadows\": " + (p.shadows ? "true" : "false") + ", \"shadowQuality\": " + std::to_string(p.shadowQuality) +
            ", \"bloom\": " + (p.bloom ? "true" : "false") + ", \"bloomStrength\": " + fnum(p.bloomStrength) + ", \"bloomThreshold\": " + fnum(p.bloomThreshold) +
            ", \"toneMapping\": " + std::to_string(p.toneMapping) + ", \"exposure\": " + fnum(p.exposure) +
@@ -287,6 +300,14 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
     }
     p.scene = v.str("scene", p.scenes[0]);
     p.platform = v.str("platform", "web"); p.windowsRuntime = (int)v.num("windowsRuntime", 0); p.renderer = (int)v.num("renderer", 0); p.arucoDict = (int)v.num("arucoDict", 0);
+    if (const Json::Value* c = v.get("calibration")) if (c->type == Json::Value::OBJ) {
+        const Json::Value* K = c->get("K");
+        if (K && K->type == Json::Value::ARR && K->a.size() == 4) {
+            p.calibW = (int)c->num("width", 0); p.calibH = (int)c->num("height", 0); p.calibRms = c->num("rms", 0);
+            for (int i = 0; i < 4; ++i) p.calibK[i] = K->a[i].n;
+            if (const Json::Value* d = c->get("dist")) if (d->type == Json::Value::ARR) for (const auto& x : d->a) p.calibDist.push_back(x.n);
+        }
+    }
     { const Json::Value* b = v.get("shadows"); p.shadows = !b || b->type != Json::Value::BOOL || b->b; }
     { const Json::Value* b = v.get("bloom"); p.bloom = !b || b->type != Json::Value::BOOL || b->b; }
     p.shadowQuality = (int)v.num("shadowQuality", 1); p.bloomStrength = (float)v.num("bloomStrength", 0.6); p.bloomThreshold = (float)v.num("bloomThreshold", 0.9);

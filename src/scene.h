@@ -185,6 +185,12 @@ struct Project {
     std::string platform = "web";      // web, windows, linux, pi, android
     int windowsRuntime = 0;            // 0 JavaScript (WebView2), 1 C++ (Diorama's native player)
     int arucoDict = 0;                 // ArUco markers: 0 4x4_50, 1 5x5_100, 2 6x6_250, 3 the original (5x5, 1024)
+    // the camera's calibration (a camera.json from calibrate.html or tools/calibrate): for the frames calibW x calibH,
+    // K = fx fy cx cy, the lens distortion k1 k2 p1 p2 k3. calibW 0: none (the field of view is guessed)
+    int calibW = 0, calibH = 0;
+    double calibK[4] = {0, 0, 0, 0};
+    std::vector<double> calibDist;
+    double calibRms = 0;
     int renderer = 0;                  // the JavaScript runtime's drawing: 0 WebGL 2, 1 WebGPU (WebGL 2 where there's none)
     // Graphics (the editor's view shows them too)
     bool shadows = true; int shadowQuality = 1;        // 0 1024, 1 2048, 2 4096

@@ -23,7 +23,7 @@ std::vector<Found> Tracker::detect(const cv::Mat& frame) {
     cv::Mat gray; cv::resize(g, gray, cv::Size(w, h), 0, 0, cv::INTER_AREA);
     // the lens: from a calibration (for the frame's own size), else from the field of view
     cv::Matx33d K;
-    if (s_.K(0, 0) > 0) K = cv::Matx33d(s_.K(0, 0) / k, 0, s_.K(0, 2) / k, 0, s_.K(1, 1) / k, s_.K(1, 2) / k, 0, 0, 1);
+    if (s_.K(0, 0) > 0) { const double c = (double)(s_.calibWidth ? s_.calibWidth : g.cols) / w; K = cv::Matx33d(s_.K(0, 0) / c, 0, s_.K(0, 2) / c, 0, s_.K(1, 1) / c, s_.K(1, 2) / c, 0, 0, 1); }
     else { const double f = (w / 2.0) / std::tan(s_.fovDeg * 3.14159265358979 / 360.0); K = cv::Matx33d(f, 0, w / 2.0, 0, f, h / 2.0, 0, 0, 1); }
     std::vector<std::vector<cv::Point2f>> corners, rejected; std::vector<int> ids;
     det_.detectMarkers(gray, corners, ids, rejected);

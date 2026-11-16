@@ -3,17 +3,26 @@
 // Each line: {"frame": n, "ok": true, "t": [x, y, z], "R": [9 numbers]}  (marker -> camera, OpenCV's axes)
 #include "arucotrack.h"
 
+#include "calibrate.h"
+
 #include <opencv2/videoio.hpp>
+#include <fstream>
+#include <sstream>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
 int main(int argc, char** argv) {
-    if (argc < 2) { std::printf("arucotrack <video | camera number> [--dict 0] [--id 0] [--size 1] [--fov 60]\n"); return 1; }
+    if (argc < 2) { std::printf("arucotrack <video | camera number> [--dict 0] [--id 0] [--size 1] [--fov 60] [--camera camera.json]\n"); return 1; }
     ArucoTrack::Settings s; int want = 0;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&] { return i + 1 < argc ? std::atof(argv[++i]) : 0.0; };
+        if (a == "--camera" && i + 1 < argc) {   // a camera.json
+            std::ifstream f(argv[++i]); std::stringstream ss; ss << f.rdbuf(); Calib::Result r;
+            if (Calib::fromJson(ss.str(), r)) { s.K = cv::Matx33d(r.fx, 0, r.cx, 0, r.fy, r.cy, 0, 0, 1); s.dist = r.dist; s.calibWidth = r.width; }
+            continue;
+        }
         if (a == "--dict") s.dict = (int)next(); else if (a == "--id") want = (int)next(); else if (a == "--size") s.size = next(); else if (a == "--fov") s.fovDeg = next();
     }
     const std::string src = argv[1];

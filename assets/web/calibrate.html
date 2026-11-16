@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Calibrate the camera</title>
+  <link rel="stylesheet" href="lib/calibrate.css">
+</head>
+<body>
+  <video id="cam" playsinline muted></video>
+  <canvas id="dots"></canvas>
+  <div id="panel">
+    <h1>Calibrate the camera</h1>
+    <p id="how">Show the camera the <a href="board.png" target="_blank">board</a> (printed, or on another screen) from many angles:
+      near, far, tilted, from the sides. Each different view is kept.</p>
+    <div id="bar"><div id="fill"></div></div>
+    <p id="status">Starting the camera...</p>
+    <div id="result" hidden>
+      <p id="numbers"></p>
+      <button id="download">Download camera.json</button>
+      <button id="again">Again</button>
+    </div>
+    <a id="back" href="index.html">Back to the game</a>
+  </div>
+  <script src="lib/opencv/opencv.js"></script>
+  <script src="lib/calibrate.js"></script>
+  <script src="lib/calibrate-page.js"></script>
+  <!-- Made with Diorama (Cursed Entertainment). OpenCV.js: Apache 2.0 (see lib/opencv). -->
+</body>
+</html>

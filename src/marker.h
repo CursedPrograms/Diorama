@@ -18,6 +18,9 @@ Image printableBarcode(int id, int size);
 // an ArUco marker (OpenCV's dictionaries: 0 4x4_50, 1 5x5_100, 2 6x6_250, 3 original): its black border and cells, a white margin
 Image printableAruco(int dict, int id, int size);
 int arucoCount(int dict);                 // how many markers the dictionary has
+// the camera calibration board (OpenCV's ChArUco, as src/calibrate.cpp makes it): 5 x 7 squares, markers 0.7 of a
+// square, ArUco 4x4 ids 0..16 in the white squares, a white margin of half a square; px a square
+Image printableCharuco(int px);
 const char* arucoName(int dict);
 // a letter or short word, black on white, as a pattern marker's inside picture
 Image letterPicture(const std::string& text, int size, const std::string& fontFile);

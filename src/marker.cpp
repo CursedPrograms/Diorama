@@ -157,6 +157,27 @@ Image printableAruco(int dict, int id, int size) {
                 fillRect(o, (int)std::lround(m + (c + 1) * cell), (int)std::lround(m + (r + 1) * cell), (int)std::lround(m + (c + 2) * cell), (int)std::lround(m + (r + 2) * cell), 255);
     return o;
 }
+Image printableCharuco(int px) {
+    const int cols = 5, rows = 7, m0 = px / 2;
+    Image o = blank(cols * px + 2 * m0, rows * px + 2 * m0);
+    const Aruco::Dict& d = Aruco::DICTS[0];
+    int id = 0;
+    for (int r = 0; r < rows; ++r)
+        for (int c = 0; c < cols; ++c) {
+            const int x0 = m0 + c * px, y0 = m0 + r * px;
+            if ((r + c) % 2 == 0) { fillRect(o, x0, y0, x0 + px, y0 + px, 0); continue; }   // black squares; the top left is black
+            // a marker in the white square: 0.7 of it, its black border and cells
+            const float side = px * 0.7f, cell = side / (d.size + 2), mx = x0 + (px - side) / 2, my = y0 + (px - side) / 2;
+            fillRect(o, (int)std::lround(mx), (int)std::lround(my), (int)std::lround(mx + side), (int)std::lround(my + side), 0);
+            const unsigned char* b = d.bits + (size_t)id * d.size * d.size;
+            for (int y = 0; y < d.size; ++y)
+                for (int x = 0; x < d.size; ++x)
+                    if (b[y * d.size + x])
+                        fillRect(o, (int)std::lround(mx + (x + 1) * cell), (int)std::lround(my + (y + 1) * cell), (int)std::lround(mx + (x + 2) * cell), (int)std::lround(my + (y + 2) * cell), 255);
+            ++id;
+        }
+    return o;
+}
 int arucoCount(int dict) { return Aruco::DICTS[std::clamp(dict, 0, Aruco::DICT_COUNT - 1)].count; }
 const char* arucoName(int dict) { return Aruco::DICTS[std::clamp(dict, 0, Aruco::DICT_COUNT - 1)].name; }
 

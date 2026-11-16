@@ -8,7 +8,7 @@
   var DICTS = ['DICT_4X4_50', 'DICT_5X5_100', 'DICT_6X6_250', 'DICT_ARUCO_ORIGINAL'];
   function Tracker(cv, settings) {
     this.cv = cv;
-    var s = { dict: 0, fovDeg: 60, width: 640, size: 1, K: null, dist: null };
+    var s = { dict: 0, fovDeg: 60, width: 640, size: 1, K: null, dist: null, calibWidth: 0 };   // K: fx fy cx cy, for frames calibWidth across
     for (var k in settings || {}) s[k] = settings[k];
     this.s = s;
     var dict = cv.getPredefinedDictionary(cv[DICTS[Math.max(0, Math.min(3, s.dict))]]);
@@ -31,7 +31,7 @@
     cv.cvtColor(rgba, gray, cv.COLOR_RGBA2GRAY); rgba.delete();
     // the lens: from a calibration (for the frame's own size), else from the field of view
     var K;
-    if (s.K) K = [s.K[0] / k, 0, s.K[2] / k, 0, s.K[1] / k, s.K[3] / k, 0, 0, 1];
+    if (s.K) { var c = (s.calibWidth || sw) / w; K = [s.K[0] / c, 0, s.K[2] / c, 0, s.K[1] / c, s.K[3] / c, 0, 0, 1]; }
     else { var f = (w / 2) / Math.tan(s.fovDeg * Math.PI / 360); K = [f, 0, w / 2, 0, f, h / 2, 0, 0, 1]; }
     var Km = cv.matFromArray(3, 3, cv.CV_64F, K), dist = s.dist ? cv.matFromArray(1, s.dist.length, cv.CV_64F, s.dist) : new cv.Mat();
     var corners = new cv.MatVector(), ids = new cv.Mat(), rejected = new cv.MatVector();

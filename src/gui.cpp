@@ -762,6 +762,11 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
             std::error_code ce; fs::copy_file(web / "surfacetrack.js", o / "lib" / "surfacetrack.js", fs::copy_options::overwrite_existing, ce); if (ce) copied = false;
             copied = copied && copyTree(web / "opencv", o / "lib" / "opencv");
         }
+        if (surfaces || aruco) {   // the camera's calibration page (OpenCV.js), and its board
+            for (const char* f : {"calibrate.js", "calibrate-page.js", "calibrate.css"}) { std::error_code ce; fs::copy_file(web / f, o / "lib" / f, fs::copy_options::overwrite_existing, ce); if (ce) copied = false; }
+            { std::error_code ce; fs::copy_file(web / "calibrate.html", o / "calibrate.html", fs::copy_options::overwrite_existing, ce); if (ce) copied = false; }
+            Markers::savePng((o / "board.png").u8string(), Markers::printableCharuco(200));
+        }
         if (aruco) {   // OpenCV.js finds the ArUco markers
             std::error_code ce; fs::copy_file(web / "arucotrack.js", o / "lib" / "arucotrack.js", fs::copy_options::overwrite_existing, ce); if (ce) copied = false;
             copied = copied && copyTree(web / "opencv", o / "lib" / "opencv");
@@ -922,7 +927,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
          "    #hint { position: fixed; left: 0; right: 0; bottom: 14px; text-align: center; font-size: 14px; opacity: 0.8; }\n"
          "    #hint a { color: #34a9e3; }\n  </style>\n</head>\n<body>\n"
          "  <div id=\"hint\">" << (proj.tracking == TRACK_FACES ? "Look at the camera." : proj.tracking == TRACK_SURFACES ? "Move the phone slowly over the floor." : proj.tracking == TRACK_ARUCO ? "Point the camera at an ArUco marker." : proj.tracking == TRACK_IMAGES ? "Point the camera at the picture." : "Point the camera at the marker.")
-      << (proj.tracking == TRACK_FACES || proj.tracking == TRACK_SURFACES ? "" : proj.tracking == TRACK_IMAGES ? " <a href=\"markers.png\" target=\"_blank\">The pictures</a>" : " <a href=\"markers.png\" target=\"_blank\">Print the markers</a>")
+      << (proj.tracking == TRACK_SURFACES ? " <a href=\"calibrate.html\">Calibrate</a>" : proj.tracking == TRACK_ARUCO ? " <a href=\"markers.png\" target=\"_blank\">Print the markers</a> <a href=\"calibrate.html\">Calibrate</a>" : proj.tracking == TRACK_FACES ? "" : proj.tracking == TRACK_IMAGES ? " <a href=\"markers.png\" target=\"_blank\">The pictures</a>" : " <a href=\"markers.png\" target=\"_blank\">Print the markers</a>")
       << "</div>\n";
     const std::string threeBuild = proj.renderer == 1 ? "three.webgpu.min.js" : "three.module.min.js";
     const std::string importMap = "  <script type=\"importmap\">{ \"imports\": { \"three\": \"./lib/three/" + threeBuild + "\", \"three/addons/\": \"./lib/three/addons/\" } }</script>\n";
@@ -3129,6 +3134,35 @@ static void projectSettings() {
         if (ImGui::Combo("##adict", &proj.arucoDict, dicts, 4)) { beginEdit(); shownMarker = -1; }
     }
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    ImGui::PushFont(boldFont); ImGui::TextUnformatted("Camera calibration"); ImGui::PopFont();
+    if (proj.calibW > 0)
+        ImGui::Text("%d x %d: field of view %.1f\xc2\xb0 across, error %.2f px", proj.calibW, proj.calibH, 2 * std::atan(proj.calibW / 2.0 / proj.calibK[0]) * 180 / 3.14159265, proj.calibRms);
+    else ImGui::TextDisabled("None: the field of view is guessed (each anchor's \"Any camera\" settings).");
+    ImGui::TextDisabled("Markers and surfaces sit exactly where they are on a calibrated camera. ArUco and Surfaces\n"
+                        "games have calibrate.html: show it the board from 10-20 angles; it keeps the result on that\n"
+                        "phone or PC, and gives camera.json to load here for every player with that camera.");
+    if (ImGui::Button("Print the board...", ImVec2(160, 0))) {
+        const std::string f = saveDialog(L"PNG picture\0*.png\0\0", L"png", "calibration board.png");
+        if (!f.empty()) say(Markers::savePng(f, Markers::printableCharuco(300)) ? "Saved the board: print it flat at 100% (A4 is fine)" : "Couldn't save it");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load camera.json...", ImVec2(160, 0))) {
+        const std::string f = openDialog(L"Camera calibration\0*.json\0\0");
+        if (!f.empty()) {
+            std::ifstream in(fs::u8path(f), std::ios::binary); std::stringstream ss; ss << in.rdbuf();
+            Json::Value v; const Json::Value* K = nullptr;
+            if (Json::parse(ss.str(), v) && (K = v.get("K")) && K->type == Json::Value::ARR && K->a.size() == 4 && v.num("width", 0) > 0) {
+                beginEdit();
+                proj.calibW = (int)v.num("width", 0); proj.calibH = (int)v.num("height", 0); proj.calibRms = v.num("rms", 0);
+                for (int i = 0; i < 4; ++i) proj.calibK[i] = K->a[i].n;
+                proj.calibDist.clear();
+                if (const Json::Value* d = v.get("dist")) if (d->type == Json::Value::ARR) for (const auto& x : d->a) proj.calibDist.push_back(x.n);
+                say("The camera's calibration is in the project");
+            } else say("That isn't a camera.json");
+        }
+    }
+    if (proj.calibW > 0) { ImGui::SameLine(); if (ImGui::Button("Forget it", ImVec2(100, 0))) { beginEdit(); proj.calibW = 0; proj.calibDist.clear(); } }
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     ImGui::PushFont(boldFont); ImGui::TextUnformatted("Location"); ImGui::PopFont();
     if (ImGui::Checkbox("Use the player's location (GPS)", &proj.gps)) beginEdit();
     ImGui::TextDisabled("Off: the game never asks for it. On: scripts can read where the player is, and place anchors at\nreal places (coming). Phones ask the player first.");
@@ -3230,6 +3264,7 @@ int main(int argc, char** argv) {
     (void)argc; (void)argv;
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "--capture" && i + 1 < args.size()) capture = args[++i];
+        else if (args[i] == "--board" && i + 1 < args.size()) return Markers::savePng(args[i + 1], Markers::printableCharuco(100)) ? 0 : 1;
         else if (args[i] == "--template" && i + 1 < args.size()) tmpl = args[++i];
         else if (args[i] == "--select" && i + 1 < args.size()) selectArg = atoi(args[++i].c_str());
         else if (args[i] == "--build" && i + 1 < args.size()) buildArg = args[++i];

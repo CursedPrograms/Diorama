@@ -1122,6 +1122,16 @@
     say('Double-click Play.bat in this folder to play it here, or put the folder on a web host (https) for phones.');
     return true;
   }
+  // the camera's calibration: this device's own (calibrate.html keeps it), else the project's (camera.json, from the
+  // editor); null without one. { width, height, K: [fx, fy, cx, cy], dist, fovDeg: across }
+  function calibration(proj) {
+    var c = null;
+    try { c = JSON.parse(localStorage.getItem('dio-camera') || 'null'); } catch (e) {}
+    if (!c || !c.K) c = proj && proj.calibration;
+    if (!c || !c.K || !c.width) return null;
+    c.fovDeg = 2 * Math.atan(c.width / 2 / c.K[0]) * 180 / Math.PI;
+    return c;
+  }
   function withScene(cb) { if (window.DIORAMA_SCENE) cb(window.DIORAMA_SCENE); else loadJSON('scene.json', cb); }
 
   // ---- Markers: jsartoolkit5 (three r103, loaded as plain scripts)
@@ -1452,7 +1462,8 @@
           video.play();
           useRenderer(!!lib.webgpu);
           if (renderer.setClearColor) renderer.setClearColor(0x000000, 0);
-          var settings = { fovDeg: first.webcamFov || 60, tiltDeg: first.webcamTilt || 50, height: first.webcamHeight || 0.6, facing: first.webcamSurface === 2 };
+          var calib = calibration(proj);
+          var settings = { fovDeg: calib ? calib.fovDeg : first.webcamFov || 60, tiltDeg: first.webcamTilt || 50, height: first.webcamHeight || 0.6, facing: first.webcamSurface === 2 };
           var gravityTilt = null;   // the phone's own: how far it looks down
           window.addEventListener('deviceorientation', function (e) { if (e.beta !== null && e.beta !== undefined) gravityTilt = Math.max(15, Math.min(89, 90 - Math.abs(e.beta))); });
           var surface = new THREE.Group(); surface.matrixAutoUpdate = false; surface.visible = false; scene.add(surface);
@@ -1660,7 +1671,8 @@
       });
       C.cameraRig(proj, camera, nodes, players);
       var camSet = C.cameraSettings(proj, camera, { ownProjection: true });
-      var fovDeg = (proj.markers[0] && proj.markers[0].webcamFov) || 60;
+      var calib = calibration(proj);
+      var fovDeg = calib ? calib.fovDeg : (proj.markers[0] && proj.markers[0].webcamFov) || 60;
       var composer = null;
       say('Starting the camera...');
       navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }).then(function (stream) {
@@ -1686,8 +1698,7 @@
         say('Loading the marker finder...');
         loadScripts(['lib/opencv/opencv.js', 'lib/arucotrack.js'], function () {
           var ready = function (cv) {
-            var calib = null; try { calib = JSON.parse(localStorage.getItem('dio-camera') || 'null'); } catch (e) {}
-            tracker = new window.ArucoTrack.Tracker(cv, { dict: lib.dict || 0, fovDeg: fovDeg, K: calib && calib.K, dist: calib && calib.dist });
+            tracker = new window.ArucoTrack.Tracker(cv, { dict: lib.dict || 0, fovDeg: fovDeg, K: calib && calib.K, dist: calib && calib.dist, calibWidth: calib && calib.width });
             say('Point the camera at an ArUco marker.');
           };
           var wait = setInterval(function () {

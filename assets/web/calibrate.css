@@ -1,0 +1,14 @@
+/* Diorama - the camera calibration page */
+html { background: #111; }
+body { margin: 0; width: 100vw; height: 100vh; overflow: hidden; color: #e6e6e6; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
+#cam, #dots { position: fixed; left: 0; top: 0; width: 100vw; height: 100vh; object-fit: contain; }
+#panel { position: fixed; left: 12px; right: 12px; bottom: 12px; max-width: 520px; margin: 0 auto; padding: 14px 16px; background: #1b1b1b;
+         border: 1px solid #333; border-radius: 6px; font-size: 14px; }
+h1 { margin: 0 0 6px; font-size: 17px; font-weight: 600; }
+p { margin: 6px 0; line-height: 1.4; }
+a { color: #34a9e3; }
+#bar { height: 8px; background: #2a2a2a; border-radius: 4px; overflow: hidden; margin: 10px 0 4px; }
+#fill { height: 100%; width: 0; background: #007bb7; }
+button { margin: 6px 8px 6px 0; padding: 8px 14px; border: 0; border-radius: 4px; background: #007bb7; color: #fff; font: inherit; cursor: pointer; }
+button#again { background: #333; }
+#back { display: inline-block; margin-top: 6px; }
