@@ -132,6 +132,67 @@ void Tracker::grow(const cv::Mat& gray, const std::vector<cv::KeyPoint>& kps, co
     refCount_ = (int)refX_.size();
 }
 
+void Tracker::settle(const std::vector<cv::Point2f>& from, const std::vector<cv::Point2f>& to) {
+    std::vector<unsigned char> in;
+    const cv::Mat H = cv::findHomography(from, to, cv::RANSAC, s_.ransacPx, in);
+    if (H.empty()) return;
+    std::vector<cv::Mat> Rs, ts, ns;
+    const int n = cv::decomposeHomographyMat(H, cv::Mat(K_), Rs, ts, ns);
+    if (n <= 0) return;
+    std::vector<int> ok;
+    cv::filterHomographyDecompByVisibleRefpoints(Rs, ns, from, to, ok);
+    // enough movement for the angle to mean something: the camera moved a tenth of its distance from the plane
+    std::vector<cv::Vec3d> cands;
+    for (int i : ok) {
+        const cv::Vec3d t(ts[i].at<double>(0), ts[i].at<double>(1), ts[i].at<double>(2));
+        if (cv::norm(t) < 0.05) continue;
+        cv::Vec3d nn(ns[i].at<double>(0), ns[i].at<double>(1), ns[i].at<double>(2));
+        if (nn[2] < 0) nn = -nn;                           // towards the plane (it's ahead of the camera)
+        cands.push_back(nn / cv::norm(nn));
+    }
+    if (cands.empty()) return;
+    // the real normal stays put as the camera moves on; the false one wanders: one that agrees with an earlier one wins
+    for (const auto& c : cands) {
+        // three that agree (within 4 degrees), averaged: the angle to a degree or so
+        cv::Vec3d sum = c; int agree = 0;
+        for (const auto& v : normalVotes_) if (c.dot(v) > std::cos(4 * 3.14159265358979 / 180)) { sum += v; ++agree; }
+        if (agree < 2) continue;
+        {
+                cv::Vec3d nn = sum / cv::norm(sum);
+                // the plane rebuilt at it: as far as the setting says, through the middle of the lock's view
+                const double d = s_.height;
+                const cv::Vec3d X0 = cv::Vec3d(0, 0, 1) * (d / std::max(0.05, nn[2]));
+                const cv::Vec3d ys = -nn;                                   // up out of it, towards the camera
+                cv::Vec3d xs = cv::Vec3d(1, 0, 0) - ys * ys[0]; xs /= cv::norm(xs);
+                const cv::Vec3d zs = xs.cross(ys);
+                Pose P; P.R = cv::Matx33d(xs[0], ys[0], zs[0], xs[1], ys[1], zs[1], xs[2], ys[2], zs[2]); P.t = X0;
+                // the first points again, on the plane where it really is (what grew on the guessed one goes)
+                const cv::Matx33d Ki = K_.inv();
+                const cv::Vec3d nc = P.R * cv::Vec3d(0, 1, 0);
+                std::vector<cv::Point3f> X; cv::Mat D; std::vector<cv::Point2f> px; std::vector<int> seen;
+                for (int k = 0; k < lockCount_ && k < (int)refX_.size(); ++k) {
+                    const cv::Vec3d dd = Ki * cv::Vec3d(lockPx_[k].x, lockPx_[k].y, 1);
+                    const double den = nc.dot(dd); if (std::fabs(den) < 1e-6) continue;
+                    const double sd = nc.dot(P.t) / den; if (sd <= 0) continue;
+                    const cv::Vec3d Xs = P.R.t() * (dd * sd - P.t);
+                    X.push_back(cv::Point3f((float)Xs[0], 0.0f, (float)Xs[2])); D.push_back(refDesc_.row(k)); px.push_back(lockPx_[k]); seen.push_back(seen_[k]);
+                }
+                if ((int)X.size() < s_.minInliers * 2) return;
+                refX_ = X; refDesc_ = D; refPx_ = px; seen_ = seen; lockPx_ = px; lockCount_ = (int)X.size(); refCount_ = lockCount_;
+                candDesc_ = cv::Mat(); candX_.clear(); candAge_.clear();
+                lastGood_ = false;                                          // the next pose afresh (IPPE)
+                // a floor or table, or a wall: how it faces the camera (no gravity on a webcam: up is the picture's up)
+                // a webcam has no gravity: looking steeply down at a table looks like facing a wall. So what it was asked for
+                // (a floor or table, or a wall: V) stands unless the angle clearly says otherwise
+                vertical_ = s_.facing;   // the angle sets its tilt; floor or wall is what was asked for (no gravity on a webcam)
+                settled_ = true;
+                return;
+        }
+    }
+    for (const auto& c : cands) normalVotes_.push_back(c);
+    if (normalVotes_.size() > 40) normalVotes_.erase(normalVotes_.begin(), normalVotes_.begin() + 10);
+}
+
 std::vector<cv::Point2f> Tracker::boundary() const {
     std::vector<cv::Point2f> pts, hull;
     for (size_t i = 0; i < refX_.size(); ++i) if (seen_[i] >= 2) pts.push_back(cv::Point2f(refX_[i].x, refX_[i].z));
@@ -156,6 +217,7 @@ bool Tracker::lock(const cv::Mat& frame) {
     // features in the middle 70% only: the surface, not the room round it
     if (!reference(gray, P, 0.15)) { refX_.clear(); return false; }
     last_ = P; lastGood_ = true; inliers_ = refCount_;
+    lockPx_ = refPx_; lockCount_ = (int)refX_.size(); sinceLock_ = 0; normalVotes_.clear(); settled_ = false; vertical_ = s_.facing;
     return true;
 }
 
@@ -194,6 +256,11 @@ bool Tracker::track(const cv::Mat& frame, Pose& pose) {
     cv::Mat Rm; cv::Rodrigues(rvec, Rm);
     pose.R = cv::Matx33d((double*)Rm.clone().ptr()); pose.t = cv::Vec3d(tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2));
     last_ = pose; lastGood_ = true;
+    if (!settled_ && ++sinceLock_ < 300) {   // the angle, measured from how the lock's points have moved
+        std::vector<cv::Point2f> from, to;
+        for (size_t i = 0; i < in.size(); ++i) if (in[i] && mi[i] < lockCount_) { from.push_back(lockPx_[mi[i]]); to.push_back(b[i]); }
+        if ((int)from.size() >= s_.minInliers * 2) settle(from, to);
+    }
     if (inliers_ >= s_.minInliers * 2 && ++growTick_ % 3 == 0) grow(gray, kps, desc, matched, pose);   // well found: the map grows from this view
     return true;
 }

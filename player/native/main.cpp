@@ -366,17 +366,21 @@ int main(int argc, char** argv) {
                 }
                 // the first plane finds itself: the middle of the view detailed enough (every half second)
                 static double lastTry = -1;
-                if (planes.empty() && autoPlanes && t - lastTry > 0.5) {
+                // and again when every plane's been lost a while (a new view of the room: a new plane, the old ones kept)
+                double lastSeenAny = -1; for (const auto& p : planes) lastSeenAny = std::max(lastSeenAny, p.at);
+                const bool allLost = !planes.empty() && t - lastSeenAny > 2.0 && planes.size() < 8;
+                if ((planes.empty() || allLost) && autoPlanes && t - lastTry > 0.5) {
                     lastTry = t;
                     if (SurfaceTrack::Tracker::lockable(frame, surfBase)) {
                         Plane p; p.tr = std::make_unique<SurfaceTrack::Tracker>(surfBase); p.vertical = surfBase.facing;
-                        if (p.tr->lock(frame)) { p.id = std::string(p.vertical ? "wall " : "floor ") + "1"; planes.push_back(std::move(p)); }
+                        if (p.tr->lock(frame)) { p.id = "plane " + std::to_string(planes.size() + 1); p.at = t; planes.push_back(std::move(p)); }
                     }
                 }
                 static int frameNo2 = 0; ++frameNo2;
                 for (auto& p : planes) {
                     SurfaceTrack::Pose sp;
                     p.tracked = p.tr->track(frame, sp);
+                    if (p.tr->settled()) p.vertical = p.tr->vertical();   // its angle measured: a floor or table, or a wall
                     if (p.tracked) { toView(sp.R, sp.t, false, p.view); p.on = true; p.at = t; }
                     else if (p.on && t - p.at > 0.35) p.on = false;
                     if (frameNo2 % 5 == 0 || p.boundary.empty()) {   // its outline, as it grows
@@ -384,6 +388,19 @@ int main(int argc, char** argv) {
                         for (const auto& q : p.tr->boundary()) { p.boundary.push_back(q.x); p.boundary.push_back(q.y); }
                     }
                 }
+                // the same surface found twice (a new search found the table again): the newer one merges into the older
+                // (ARCore's "subsumed"): both seen now, facing the same way (10 degrees), lying in the same place (6 cm)
+                for (size_t i = 0; i < planes.size(); ++i)
+                    for (size_t j = i + 1; j < planes.size(); ++j) {
+                        const Plane &A = planes[i], &B = planes[j];
+                        if (!A.tracked || !B.tracked) continue;
+                        const float* a = A.view; const float* b = B.view;
+                        const float na[3] = {a[4], a[5], a[6]}, nb[3] = {b[4], b[5], b[6]};
+                        const float la = std::sqrt(na[0] * na[0] + na[1] * na[1] + na[2] * na[2]), lb = std::sqrt(nb[0] * nb[0] + nb[1] * nb[1] + nb[2] * nb[2]);
+                        const float cosang = (na[0] * nb[0] + na[1] * nb[1] + na[2] * nb[2]) / (la * lb);
+                        const float off = ((b[12] - a[12]) * na[0] + (b[13] - a[13]) * na[1] + (b[14] - a[14]) * na[2]) / la;
+                        if (cosang > std::cos(10 * 3.14159265f / 180) && std::fabs(off) < 0.06f) { planes.erase(planes.begin() + j); --j; }
+                    }
                 // the planes kept in place relative to each other: learnt while both are seen; then one seen is enough
                 {
                     const int a0 = anchorPlane();
@@ -488,9 +505,10 @@ int main(int argc, char** argv) {
         // the title says what's going on
         std::string names;
         for (size_t i = 0; i < seen.size(); ++i) if (seen[i].on) names += (names.empty() ? "" : ", ") + proj.markers[i].name;
-        int planesOn = 0, walls = 0; for (const auto& p : planes) { if (p.on) ++planesOn; if (p.vertical) ++walls; }
+        int planesOn = 0, walls = 0; for (const auto& p : planes) { if (p.on) ++planesOn; if (p.vertical && p.tr->settled()) ++walls; }
+        int measuring = 0; for (const auto& p : planes) if (!p.tr->settled()) ++measuring;
         if (surfaces && planes.empty()) hint = "Looking for a plane: point at a table or the floor (some detail on it), or press Space; V for a wall";
-        else if (surfaces) hint = std::to_string(planesOn) + " of " + std::to_string(planes.size()) + " planes seen (" + std::to_string(walls) + " wall" + (walls == 1 ? "" : "s") + ")   Space: a floor or table   V: a wall   R: start again   click: the game";
+        else if (surfaces) hint = std::to_string(planesOn) + " of " + std::to_string(planes.size()) + " planes seen (" + std::to_string(walls) + " wall" + (walls == 1 ? "" : "s") + (measuring ? ", " + std::to_string(measuring) + " measuring: move the camera a little" : "") + ")   Space: a floor or table   V: a wall   R: start again   click: the game";
         else if (names.empty()) hint = aruco ? "Point the camera at an ArUco marker" : "Point the camera at a marker";
         else hint = "Found: " + names;
         if (!problem.empty() && t < problemUntil) hint = "Problem: " + problem;
