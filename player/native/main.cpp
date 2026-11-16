@@ -444,7 +444,8 @@ int main(int argc, char** argv) {
             if (!pm || pm->showPlanes)
                 for (const auto& p : planes) if (p.on) {
                     Viewer::ArPlane a; std::memcpy(a.view, p.view, sizeof a.view); a.size = 1.5f; a.boundary = p.boundary;
-                    const float floorC[4] = {pm ? pm->planeColour[0] : 0.25f, pm ? pm->planeColour[1] : 0.95f, pm ? pm->planeColour[2] : 0.55f, 0.6f}, wallC[4] = {0.2f, 0.66f, 0.89f, 0.6f};
+                    const float op = pm ? pm->planeColour[3] : 0.35f;   // the plane look's opacity (AR Plane Manager)
+                    const float floorC[4] = {pm ? pm->planeColour[0] : 0.25f, pm ? pm->planeColour[1] : 0.95f, pm ? pm->planeColour[2] : 0.55f, op}, wallC[4] = {0.2f, 0.66f, 0.89f, op};
                     std::memcpy(a.colour, p.vertical ? wallC : floorC, sizeof a.colour);
                     look.push_back(a);
                 }

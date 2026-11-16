@@ -162,6 +162,7 @@ static void sceneToFile(const Project& p, const std::string& name);
 static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& out, bool bumpIds = true, Project* whole = nullptr);
 static std::vector<Scene::Marker> sceneMarkers(const std::string& name);
 static void copyCamera(Project& to, const Project& from);
+static void attachPlaceCubes();
 // where projects live: Documents/Diorama, or the home folder's Diorama when Windows guards Documents
 // (Controlled Folder Access refuses unknown apps there, without a word)
 static bool writable(const fs::path& d) {
@@ -797,7 +798,7 @@ static void profiler() {
         int total = (int)proj.camera.objects.size(); for (const auto& m : proj.markers) total += (int)m.objects.size();
         row("Objects in the scene", std::to_string(total) + " (" + std::to_string(proj.markers.size()) + " anchor" + (proj.markers.size() == 1 ? "" : "s") + ")");
         row("Placed in the view", std::to_string(s.objects));
-        row("Draws", std::to_string(s.draws));
+        row("Draws", std::to_string(s.draws) + " (" + std::to_string(s.culled) + " outside the view, not drawn)");
         row("Lights", std::to_string(s.lights) + " (of 16) + the sun");
         row("Shadow maps", std::to_string(s.shadowMaps) + (proj.shadows ? "" : " (shadows off: Build Settings > Graphics)"));
         row("Pictures loaded", std::to_string(s.textures));
@@ -1987,6 +1988,25 @@ static void newScene(bool duplicateOpen) {
     proj.scenes.push_back(name);
     openScene(name);
 }
+// a new scene made from a template (its anchors, objects, Main Camera and scripts), for a game of the same tracking
+static void newSceneFromTemplate(int which) {
+    if (folder.empty()) { say("Save the project first"); return; }
+    const std::string dir = (fs::u8path(exeDir) / "templates" / "gallery").u8string() + "/";
+    const Project tmpl = which == 3 ? planeDemoTemplate() : which == 2 ? navigationTemplate() : which == 1 ? galleryTemplate(dir) : basicTemplate();
+    if (tmpl.tracking != proj.tracking) { say(std::string("That template is for ") + TRACKING_NAMES[tmpl.tracking] + " games (Edit > Project Settings)"); return; }
+    saveProject(false);
+    const char* names[] = {"Cube on a marker", "Art gallery", "Indoor navigation", "Place cubes"};
+    const std::string name = uniqueSceneName(names[which]);
+    Project t = proj;
+    t.markers = tmpl.markers;
+    copyCamera(t, tmpl);
+    sceneToFile(t, name);
+    proj.scenes.push_back(name);
+    openScene(name);
+    proj.nextId = std::max(proj.nextId, tmpl.nextId);
+    if (which == 3) { attachPlaceCubes(); saveProject(false); }   // its script (tap a plane: a cube)
+    say("Made the scene " + name);
+}
 static void sceneManager() {
     if (!showScenes) return;
     ImGui::SetNextWindowSize(ImVec2(460, 420), ImGuiCond_FirstUseEver);
@@ -2035,6 +2055,17 @@ static void sceneManager() {
     if (open >= 0) openScene(proj.scenes[open]);
     if (ImGui::Button("New Scene", ImVec2(140, 28))) newScene(false);
     ImGui::SameLine(); if (ImGui::Button("Duplicate This Scene", ImVec2(170, 28))) newScene(true);
+    ImGui::SameLine(); if (ImGui::Button("From Template...", ImVec2(130, 28))) ImGui::OpenPopup("tmplscene");
+    if (ImGui::BeginPopup("tmplscene")) {
+        struct T { int which; const char* label; int tracking; };
+        const T ts[] = {{3, "Place cubes: planes found, tap one, a cube lands", TRACK_SURFACES}, {2, "Indoor navigation: a path with arrows", TRACK_SURFACES},
+                        {0, "A cube on a marker", TRACK_MARKERS}, {1, "The art gallery: a window into the marker", TRACK_MARKERS}};
+        for (const T& x : ts) {
+            if (ImGui::MenuItem(x.label, nullptr, false, x.tracking == proj.tracking)) newSceneFromTemplate(x.which);
+            if (x.tracking != proj.tracking && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("For %s games (Edit > Project Settings)", TRACKING_NAMES[x.tracking]);
+        }
+        ImGui::EndPopup();
+    }
     ImGui::SameLine(); ImGui::TextDisabled("right-click: more");
     ImGui::End();
 }
@@ -2324,7 +2355,18 @@ static void hierarchyItems() {
             if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) dropAsset(m, mi, -1, std::string((const char*)pl->Data));
             ImGui::EndDragDropTarget();
         }
-        if (ImGui::BeginPopupContextItem()) { selMarker = mi; selObject = -1; gameObjectItems(); ImGui::EndPopup(); }
+        int deleteAnchor = -1;
+        if (ImGui::BeginPopupContextItem()) {
+            selMarker = mi; selObject = -1; gameObjectItems();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete", "Del")) deleteAnchor = mi;
+            ImGui::EndPopup();
+        }
+        if (deleteAnchor >= 0) {
+            beginEdit(); proj.markers.erase(proj.markers.begin() + deleteAnchor);
+            selMarker = proj.markers.empty() ? -1 : std::max(0, deleteAnchor - 1); selObject = -1; shownMarker = -1;
+            ImGui::PopID(); break;
+        }
         if (open) {
             for (int k : childrenOf(m, -1)) objectNode(m, mi, k, moveId, moveTo);
             ImGui::TreePop();
@@ -2440,7 +2482,10 @@ static void markerInspector(Scene::Marker& m) {
         const char* modes[] = {"Horizontal (floors, tables)", "Vertical (walls)", "Both"};
         labelled("Detection"); ImGui::Combo("##pd", &m.planeDetect, modes, 3);
         ImGui::Checkbox("Show the planes found", &m.showPlanes); tip("The dotted look on floors, tables and walls as they're found");
-        if (m.showPlanes) { labelled("Plane look"); ImGui::ColorEdit4("##pc", m.planeColour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar); }
+        if (m.showPlanes) {
+            labelled("Plane look"); ImGui::ColorEdit3("##pc", m.planeColour, ImGuiColorEditFlags_NoInputs);
+            labelled("Plane opacity"); ImGui::SliderFloat("##po", &m.planeColour[3], 0, 1, "%.2f"); tip("How much the planes found show: their fill, grid and edge (0: hidden, still there to tap)");
+        }
         fileRow("Plane prefab", m.planePrefab, L"Prefab\0*.prefab\0\0"); tip("Made on each plane found (AR Foundation's plane prefab); empty: just the look");
         const char* places[] = {"Tap to place", "On the first floor found", "Where the phone starts"};
         labelled("Placement"); ImGui::Combo("##pl", &m.placement, places, 3);
@@ -3643,7 +3688,14 @@ static void keys() {
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_B)) { if (io.KeyShift) showBuild = true; else startBuild(proj.platform, true); }
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) playInBrowser();
     if (m && selObject >= 0 && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) { beginEdit(); selObject = duplicate(proj, *m, selObject); }
-    if (m && selObject >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) { beginEdit(); remove(*m, selObject); selObject = -1; }
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {   // whatever's selected, as Unity
+        if (m && selObject >= 0) { beginEdit(); remove(*m, selObject); selObject = -1; }
+        else if (selObject < 0 && selMarker >= 0 && selMarker < (int)proj.markers.size()) {   // an anchor, and all on it
+            beginEdit(); const std::string n = proj.markers[selMarker].name;
+            proj.markers.erase(proj.markers.begin() + selMarker); selMarker = proj.markers.empty() ? -1 : std::max(0, selMarker - 1); shownMarker = -1;
+            say("Deleted " + n + " (Ctrl+Z brings it back)");
+        } else if (selMarker == -2 && selObject < 0) say("Every scene needs its Main Camera");
+    }
     if (m && selObject >= 0 && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C)) copyObject(*m, selObject);
     if (m && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V) && !objClip.empty()) {   // as Unity: beside the selected object (or on the anchor)
         const int k = selObject >= 0 ? indexOfId(*m, selObject) : -1;

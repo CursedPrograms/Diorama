@@ -652,6 +652,29 @@ static void ensureTarget(int w, int h) {
 
 // ---------- drawing ----------
 struct Draw { M4 world; const Object* o; float depth; bool inside; bool blend; int part = 0; };
+// frustum culling: an object's bounding sphere (its look's size, times its scale) against the view's six planes
+static int culledCount = 0;
+static float boundRadius(const Object& o) {
+    switch (o.kind) {
+    case CUBE: return 0.87f; case SPHERE: return 0.5f; case PLANE: return 7.08f; case QUAD: case PICTURE: return 0.71f;
+    case CAPSULE: case CYLINDER: return 1.0f; case WORDS: return 1.2f; case SPRITES: case RAYS: return 1.6f;
+    default: return 2.5f;   // models: a generous guess (their own size isn't known here)
+    }
+}
+static bool inView(const M4& vp, const Draw& d) {
+    if (d.part != 0 || d.o->billboard) return true;   // particles, lines, trails, paths, things turned to the camera: always drawn
+    const M4& w = d.world;
+    float sc = 0; for (int c = 0; c < 3; ++c) sc = std::max(sc, std::sqrt(w.m[c * 4] * w.m[c * 4] + w.m[c * 4 + 1] * w.m[c * 4 + 1] + w.m[c * 4 + 2] * w.m[c * 4 + 2]));
+    const float r = boundRadius(*d.o) * sc, x = w.m[12], y = w.m[13], z = w.m[14];
+    const float* m = vp.m;
+    for (int i = 0; i < 6; ++i) {   // Gribb-Hartmann: rows of the matrix, added and taken away
+        const int row = i / 2; const float sg = (i % 2) ? -1.0f : 1.0f;
+        const float a = m[3] + sg * m[row], b = m[7] + sg * m[4 + row], c = m[11] + sg * m[8 + row], dd = m[15] + sg * m[12 + row];
+        const float len = std::sqrt(a * a + b * b + c * c);
+        if (len > 1e-6f && (a * x + b * y + c * z + dd) / len < -r) return false;
+    }
+    return true;
+}
 static M4 viewProj, viewM;
 static float eye[3];
 static const Marker* curMarker = nullptr;
@@ -1105,7 +1128,7 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
             glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
             glClear(GL_DEPTH_BUFFER_BIT);
             viewProj = vp;
-            for (const Draw& d : draws) if (d.part == 0 && d.o->castShadows && !d.o->glow && !d.o->occluder && d.o->kind != RAYS) drawObject(d, t);
+            for (const Draw& d : draws) if (d.part == 0 && d.o->castShadows && !d.o->glow && !d.o->occluder && d.o->kind != RAYS && inView(vp, d)) drawObject(d, t);   // only what the light sees
         };
         M4 sunVPm = ident();
         if (!m || m->sunShadows) {
@@ -1198,7 +1221,7 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
         setCommon(mul(portalM, scale(1, 1.5f, 1)), c, 0, true); draw(mPortalBox);
     }
 
-    if (!previewing) { st.objects = (int)lastWorld.size(); st.draws = (int)draws.size(); st.lights = nl; st.shadowMaps = p.shadows ? (sunShadow ? 1 : 0) + nSpots : 0; }
+    if (!previewing) { st.culled = culledCount; st.objects = (int)lastWorld.size(); st.draws = (int)draws.size(); st.lights = nl; st.shadowMaps = p.shadows ? (sunShadow ? 1 : 0) + nSpots : 0; }
     std::stable_sort(draws.begin(), draws.end(), [](const Draw& a, const Draw& b) {
         if (a.blend != b.blend) return !a.blend;
         if (!a.blend && a.o->occluder != b.o->occluder) return a.o->occluder;   // occluders first: they hide what's behind
@@ -1207,7 +1230,9 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
     glUniform1i_(uNL, nl); if (nl) { glUniform4fv_(uLPos, nl, lp); glUniform4fv_(uLCol, nl, lc); glUniform4fv_(uLDir, nl, ld); }
     // with a window into the paper, each object is cut at the paper: below it only shows through the opening
     if (portal) glEnable(GL_CLIP_DISTANCE0);
+    culledCount = 0;
     for (const Draw& d : draws) {
+        if (!inView(viewProj, d)) { ++culledCount; continue; }   // outside the camera's view: not drawn
         const Object& o = *d.o;   // its material
         curMat.metallic = o.metallic; curMat.roughness = o.roughness; curMat.receive = o.receiveShadows;
         for (int k = 0; k < 3; ++k) curMat.emissive[k] = std::pow(std::max(o.emissive[k], 0.0f), 2.2f) * o.emissiveStrength;
@@ -1407,9 +1432,9 @@ unsigned renderAR(const Project& p, const std::vector<ArAnchor>& anchors, const 
             M4 v; std::memcpy(v.m, pl.view, sizeof v.m);
             viewM = v; viewProj = mul(P, v);
             const float lin[4] = {std::pow(pl.colour[0], 2.2f), std::pow(pl.colour[1], 2.2f), std::pow(pl.colour[2], 2.2f), pl.colour[3] * 0.35f};
-            const float fill[4] = {pl.colour[0], pl.colour[1], pl.colour[2], pl.colour[3] * 0.18f};
+            const float fill[4] = {pl.colour[0], pl.colour[1], pl.colour[2], pl.colour[3] * 0.5f};   // colour[3]: the plane look's opacity
             (void)lin;
-            const float lineC[4] = {pl.colour[0], pl.colour[1], pl.colour[2], std::min(1.0f, pl.colour[3] * 1.6f)};
+            const float lineC[4] = {pl.colour[0], pl.colour[1], pl.colour[2], std::min(1.0f, pl.colour[3] * 2.0f)};
             std::vector<float> poly = pl.boundary;
             if (poly.size() < 6) { const float hs = pl.size / 2; poly = {-hs, -hs, hs, -hs, hs, hs, -hs, hs}; }
             setCommon(ident(), fill, 0, false); drawPolygon(poly, 0.002f);

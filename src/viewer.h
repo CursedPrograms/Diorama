@@ -27,7 +27,7 @@ unsigned pictureTexture(const std::string& file, int* w, int* h);
 unsigned renderCameraPreview(const Scene::Project& p, int marker, int w, int h);   // a picture's GL texture (the UI overlay's images)   // a model's animation clips (for the Inspector)
 void readPixels(std::vector<unsigned char>& rgba, int& w, int& h);
 // the Profiler's numbers for the last view drawn: CPU and GPU time, what was drawn
-struct Stats { float cpuMs = 0, gpuMs = -1; int objects = 0, draws = 0, lights = 0, shadowMaps = 0, textures = 0, models = 0, width = 0, height = 0; };
+struct Stats { float cpuMs = 0, gpuMs = -1; int objects = 0, draws = 0, culled = 0, lights = 0, shadowMaps = 0, textures = 0, models = 0, width = 0, height = 0; };
 const Stats& stats();
 
 // ---- the native AR player: the real camera's picture with each found anchor's world on it
