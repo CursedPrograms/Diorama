@@ -68,6 +68,13 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
   4444 / PNG, GIF; or a green screen), Particle System, Line Renderer, Trail Renderer, Occluder, Animate, **AR Path**
   (route marking with arrows) and **AR Path Follower** (a guide that walks it), **Canvas UI** (Text, Button, Slider,
   Toggle, Image, Panel as real HTML/CSS), **Scripts**.
+- **Windows like Unity's:** Hierarchy, Scene, Inspector, Project and Console dock, resize, tab and float; the layout is
+  kept (Window > Reset Layout). **Window > Profiler**: frame time, the view's CPU and GPU time, draws, lights, memory.
+- **Materials** (Project window: right-click > Create > Material): Standard (PBR) or Unlit, colour, texture, metallic,
+  roughness, emission. Drop one on objects; change it and they all change.
+- **Behaviours** (Add Component > Behaviours): LookAtCameraY, Spin, SelfDestruct, Projectile, Shooter, PickUp,
+  Teleport, Waypoint, Autoplace, SceneTimer: ready-made scripts (copied into the project to edit), web and native.
+- Components copy and paste (each one's ... menu), the Main Camera's preview, assets in the Inspector.
 - **Lighting:** PBR materials (Metallic, Roughness, Emissive), up to 16 lights, soft shadows from the sun and spot
   lights (and onto the real paper, table or floor in the game), HDR with bloom, PBR Neutral or ACES tone mapping and
   exposure: Build Settings > Graphics, the same in the editor's view and the game.

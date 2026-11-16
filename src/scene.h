@@ -36,6 +36,7 @@ struct Object {
     bool animOn = true, hasAnim = false;   // the Animate component: there, and its tick
     std::vector<Script> scripts;
     std::string prefab;                // the prefab it was placed from ("" none)
+    std::string material;              // its material asset (a .material file: its values are copied in; "" its own)
     bool occluder = false;             // material: invisible, but hides what's behind it (a real thing's stand-in)
     // PBR material (lit things): metal or not, rough or shiny, and light of its own; shadows
     float metallic = 0, roughness = 0.6f;

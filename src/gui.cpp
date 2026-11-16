@@ -14,6 +14,7 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <imgui.h>
+#include <imgui_internal.h>   // the dock builder (the default layout)
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl2.h>
 #include <imgui_internal.h>
@@ -43,6 +44,7 @@
 #include "stb_image.h"
 #include <commdlg.h>
 #include <shellapi.h>
+#include <psapi.h>   // the Profiler: memory
 #include <shlobj.h>
 #include <shobjidl.h>
 #pragma comment(lib, "comdlg32.lib")
@@ -579,6 +581,7 @@ static const char* assetKind(const fs::path& p) {
     if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".jfif") return "Picture";
     if (e == ".glb" || e == ".gltf") return "Model";
     if (e == ".prefab") return "Prefab";
+    if (e == ".material") return "Material";
     if (e == ".mp3" || e == ".ogg" || e == ".wav") return "Audio";
     if (e == ".mp4" || e == ".webm" || e == ".mov" || e == ".m4v" || e == ".mkv" || e == ".avi" || e == ".gif" || e == ".apng") return "Video";
     if (e == ".patt" || e == ".marker") return "Marker";
@@ -586,7 +589,53 @@ static const char* assetKind(const fs::path& p) {
 }
 static const char* assetIcon(const char* kind) {
     return !strcmp(kind, "Script") ? "{ }" : !strcmp(kind, "Picture") ? "\xe2\x96\xa8" : !strcmp(kind, "Model") ? "\xe2\x97\x86" : !strcmp(kind, "Prefab") ? "\xe2\x97\x87"
-         : !strcmp(kind, "Audio") ? "\xe2\x99\xab" : !strcmp(kind, "Video") ? "\xe2\x96\xb6" : !strcmp(kind, "Marker") ? "\xe2\x96\xa3" : "\xe2\x96\xa1";
+         : !strcmp(kind, "Material") ? "\xe2\x97\x8f" : !strcmp(kind, "Audio") ? "\xe2\x99\xab" : !strcmp(kind, "Video") ? "\xe2\x96\xb6" : !strcmp(kind, "Marker") ? "\xe2\x96\xa3" : "\xe2\x96\xa1";
+}
+// ---------- materials: a .material file (JSON) holds a look's material; objects linked to it get its values ----------
+static std::string relToProject(const std::string& f) {
+    if (f.empty() || folder.empty()) return f;
+    std::error_code ec; const fs::path r = fs::relative(fs::u8path(f), fs::u8path(folder), ec);
+    return !ec && r.u8string().rfind("..", 0) != 0 ? r.generic_u8string() : f;
+}
+static std::string fromProject(const std::string& f) {
+    if (f.empty() || folder.empty() || !fs::u8path(f).is_relative()) return f;
+    return (fs::u8path(folder) / fs::u8path(f)).u8string();
+}
+static bool saveMaterial(const std::string& file, const Object& o) {
+    std::ofstream f(fs::u8path(file), std::ios::binary);
+    auto arr = [](const float* v, int n) { std::string s = "["; char b[32]; for (int i = 0; i < n; ++i) { snprintf(b, sizeof b, "%s%g", i ? ", " : "", v[i]); s += b; } return s + "]"; };
+    f << "{\n  \"diorama-material\": 1,\n  \"shader\": \"" << (o.lit ? "Standard" : "Unlit") << "\",\n  \"colour\": " << arr(o.colour, 4)
+      << ",\n  \"texture\": " << Json::quote(relToProject(o.file)) << ",\n  \"metallic\": " << o.metallic << ", \"roughness\": " << o.roughness
+      << ",\n  \"emissive\": " << arr(o.emissive, 3) << ", \"emissiveStrength\": " << o.emissiveStrength
+      << ",\n  \"glow\": " << (o.glow ? "true" : "false") << ", \"castShadows\": " << (o.castShadows ? "true" : "false") << ", \"receiveShadows\": " << (o.receiveShadows ? "true" : "false") << "\n}\n";
+    return (bool)f;
+}
+static bool loadMaterial(const std::string& file, Object& o) {
+    std::ifstream in(fs::u8path(file), std::ios::binary); if (!in) return false;
+    std::stringstream ss; ss << in.rdbuf();
+    Json::Value v; if (!Json::parse(ss.str(), v)) return false;
+    auto rd = [&](const char* k, float* out, int n) { const Json::Value* a = v.get(k); if (a && a->type == Json::Value::ARR) for (int i = 0; i < n && i < (int)a->a.size(); ++i) out[i] = (float)a->a[i].n; };
+    auto rb = [&](const char* k, bool d) { const Json::Value* b = v.get(k); return b && b->type == Json::Value::BOOL ? b->b : d; };
+    o.lit = v.str("shader", "Standard") != "Unlit";
+    rd("colour", o.colour, 4); rd("emissive", o.emissive, 3);
+    o.file = fromProject(v.str("texture"));
+    o.metallic = (float)v.num("metallic", 0); o.roughness = (float)v.num("roughness", 0.6); o.emissiveStrength = (float)v.num("emissiveStrength", 0);
+    o.glow = rb("glow", false); o.castShadows = rb("castShadows", true); o.receiveShadows = rb("receiveShadows", true);
+    return true;
+}
+// a material's values onto an object (a picture or model keeps its own file; primitives take the texture)
+static void applyMaterial(const Object& m, Object& o) {
+    for (int k = 0; k < 4; ++k) o.colour[k] = m.colour[k];
+    for (int k = 0; k < 3; ++k) o.emissive[k] = m.emissive[k];
+    o.lit = m.lit; o.glow = m.glow; o.metallic = m.metallic; o.roughness = m.roughness; o.emissiveStrength = m.emissiveStrength;
+    o.castShadows = m.castShadows; o.receiveShadows = m.receiveShadows;
+    if (o.kind != PICTURE && o.kind != MODEL && o.kind != SPRITES) o.file = m.file;
+}
+static int applyMaterialEverywhere(const std::string& file) {   // every object linked to it
+    Object m; if (!loadMaterial(file, m)) return 0;
+    int n = 0;
+    for (int a = -1; a < (int)proj.markers.size(); ++a) for (auto& o : (a < 0 ? proj.camera : proj.markers[a]).objects) if (o.material == file) { applyMaterial(m, o); ++n; }
+    return n;
 }
 static void importFiles(const std::vector<std::string>& files) {
     if (folder.empty()) return;
@@ -672,11 +721,19 @@ static void projectPanel() {
     }
     if (items.empty()) ImGui::TextDisabled("Empty. Import files, drop them here, or right-click to make a script or folder.");
     if (ImGui::BeginPopupContextWindow("##empty", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
-        if (ImGui::MenuItem("New Folder")) { fs::path f = cur / "New Folder"; for (int k = 2; fs::exists(f, ec); ++k) f = cur / ("New Folder " + std::to_string(k)); fs::create_directory(f, ec); }
-        if (ImGui::MenuItem("New Script")) {
-            fs::path f = cur / "NewScript.js"; for (int k = 2; fs::exists(f, ec); ++k) f = cur / ("NewScript" + std::to_string(k) + ".js");
-            std::ofstream(f, std::ios::binary) << "// A behaviour: drag it onto an object.\n\nfunction start() {\n}\n\nfunction update(dt) {\n}\n";
-            openScript(f.u8string());
+        if (ImGui::BeginMenu("Create")) {
+            if (ImGui::MenuItem("Folder")) { fs::path f = cur / "New Folder"; for (int k = 2; fs::exists(f, ec); ++k) f = cur / ("New Folder " + std::to_string(k)); fs::create_directory(f, ec); }
+            if (ImGui::MenuItem("Script")) {
+                fs::path f = cur / "NewScript.js"; for (int k = 2; fs::exists(f, ec); ++k) f = cur / ("NewScript" + std::to_string(k) + ".js");
+                std::ofstream(f, std::ios::binary) << "// A behaviour: drag it onto an object.\n\nfunction start() {\n}\n\nfunction update(dt) {\n}\n";
+                openScript(f.u8string());
+            }
+            if (ImGui::MenuItem("Material")) {   // Unity's: a material asset; drag it onto objects, edit it here and they all change
+                fs::path f = cur / "New Material.material"; for (int k = 2; fs::exists(f, ec); ++k) f = cur / ("New Material " + std::to_string(k) + ".material");
+                Object def; saveMaterial(f.u8string(), def);
+                selAsset = f.u8string(); selAssetMarker = selMarker; selAssetObject = selObject;
+            }
+            ImGui::EndMenu();
         }
         if (ImGui::MenuItem("Import...")) { const std::string f = openDialog(L"All files\0*.*\0\0"); if (!f.empty()) importFiles({f}); }
         if (ImGui::MenuItem("Show in Explorer")) openInExplorer(cur.u8string());
@@ -707,15 +764,56 @@ static void projectPanel() {
     }
 }
 static int bottomTab = 0;
-static void bottomPanel() {
-    if (ImGui::BeginTabBar("##bottom")) {
-        if (ImGui::BeginTabItem("Project")) { projectPanel(); ImGui::EndTabItem(); }
-        int errors = 0; for (const auto& l : consoleLines) if (l.level == "error") ++errors;
-        const std::string cl = errors ? "Console (" + std::to_string(errors) + ")###console" : "Console###console";
-        if (ImGui::BeginTabItem(cl.c_str(), nullptr, bottomTab == 1 ? ImGuiTabItemFlags_SetSelected : 0)) { consolePanel(); ImGui::EndTabItem(); }
-        bottomTab = 0;
-        ImGui::EndTabBar();
+// the editor's dockable windows (Window menu): open or closed; Reset Layout puts them back as Unity has them
+static bool showHierarchy = true, showInspector = true, showSceneWin = true, showProject = true, showConsole = true, resetLayout = false;
+static bool showProfiler = false;
+// ---------- the Profiler (Window > Profiler): frame time, the Scene view's CPU and GPU time, what's drawn, memory ----------
+static void profiler() {
+    static float frameMs[240] = {0}, sceneMs[240] = {0}, gpuMs[240] = {0}; static int at = 0;
+    const Viewer::Stats& s = Viewer::stats();
+    const float dt = ImGui::GetIO().DeltaTime * 1000.0f;
+    frameMs[at] = dt; sceneMs[at] = s.cpuMs; gpuMs[at] = std::max(0.0f, s.gpuMs); at = (at + 1) % 240;
+    if (!showProfiler) return;
+    ImGui::SetNextWindowSize(ImVec2(460, 470), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Profiler", &showProfiler)) { ImGui::End(); return; }
+    float avg = 0, worst = 0; int seen = 0; for (float v : frameMs) if (v > 0) { avg += v; worst = std::max(worst, v); ++seen; } avg /= std::max(1, seen);
+    ImGui::PushFont(boldFont); ImGui::Text("%.0f FPS", avg > 0 ? 1000.0f / avg : 0.0f); ImGui::PopFont();
+    ImGui::SameLine(); ImGui::TextDisabled("frame %.2f ms on average, %.2f ms at worst (the last 4 seconds)", avg, worst);
+    const float w = ImGui::GetContentRegionAvail().x;
+    auto graph = [&](const char* label, const float* v, ImU32 c, float top) {
+        ImGui::PushStyleColor(ImGuiCol_PlotLines, ImGui::ColorConvertU32ToFloat4(c));
+        char ov[64]; snprintf(ov, sizeof ov, "%s %.2f ms", label, v[(at + 239) % 240]);
+        ImGui::PlotLines("##g", v, 240, at, ov, 0, top, ImVec2(w, 70));
+        ImGui::PopStyleColor();
+    };
+    const float top = std::max(16.7f, worst * 1.1f);
+    ImGui::PushID("f"); graph("Frame", frameMs, IM_COL32(0xd0, 0xd0, 0xd0, 255), top); ImGui::PopID();
+    ImGui::PushID("s"); graph("Scene view, CPU", sceneMs, C_BLUE, top); ImGui::PopID();
+    ImGui::PushID("g"); graph(s.gpuMs < 0 ? "Scene view, GPU (no timer queries)" : "Scene view, GPU", gpuMs, IM_COL32(0x5a, 0xb0, 0x4a, 255), top); ImGui::PopID();
+    ImGui::TextDisabled("16.7 ms = 60 frames a second. The editor waits for the screen (vsync), so the frame time is at least that.");
+    ImGui::Separator();
+    if (ImGui::BeginTable("##st", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+        auto row = [](const char* k, const std::string& v) { ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextUnformatted(k); ImGui::TableNextColumn(); ImGui::TextUnformatted(v.c_str()); };
+        int total = (int)proj.camera.objects.size(); for (const auto& m : proj.markers) total += (int)m.objects.size();
+        row("Objects in the scene", std::to_string(total) + " (" + std::to_string(proj.markers.size()) + " anchor" + (proj.markers.size() == 1 ? "" : "s") + ")");
+        row("Placed in the view", std::to_string(s.objects));
+        row("Draws", std::to_string(s.draws));
+        row("Lights", std::to_string(s.lights) + " (of 16) + the sun");
+        row("Shadow maps", std::to_string(s.shadowMaps) + (proj.shadows ? "" : " (shadows off: Build Settings > Graphics)"));
+        row("Pictures loaded", std::to_string(s.textures));
+        row("Models loaded", std::to_string(s.models));
+        row("The view", std::to_string(s.width) + " x " + std::to_string(s.height) + " (HDR" + (proj.bloom ? " + bloom" : "") + ")");
+#ifdef _WIN32
+        PROCESS_MEMORY_COUNTERS pm; pm.cb = sizeof pm;
+        if (GetProcessMemoryInfo(GetCurrentProcess(), &pm, sizeof pm)) row("Diorama's memory", std::to_string(pm.WorkingSetSize / 1048576) + " MB");
+#endif
+        ImGui::EndTable();
     }
+    ImGui::End();
+}
+static std::string consoleTitle() {
+    int errors = 0; for (const auto& l : consoleLines) if (l.level == "error") ++errors;
+    return errors ? "Console (" + std::to_string(errors) + ")###Console" : "Console###Console";
 }
 
 // ---------- Build: the game as a static website (jsartoolkit5 + three.js), for phones and any web host ----------
@@ -1967,6 +2065,13 @@ static void gameObjectItems() {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("UI")) { uiMenuItems(); ImGui::EndMenu(); }
+    if (ImGui::BeginMenu("Audio")) {
+        if (ImGui::MenuItem("Audio Source...")) {   // an object that plays a sound (3D: quieter further from the phone)
+            const std::string f = openDialog(L"Sound\0*.mp3;*.ogg;*.wav;*.m4a\0\0");
+            if (!f.empty()) { create(EMPTY); if (Object* o = curObject()) { o->name = fs::u8path(f).stem().u8string(); o->hasAudio = true; o->audioOn = true; o->audioFile = bring(f); } }
+        }
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("AR")) {
         if (ImGui::MenuItem("Picture...")) create(PICTURE);
         if (ImGui::MenuItem("Model...")) create(MODEL);
@@ -2026,6 +2131,15 @@ static void menuBar() {
         if (ImGui::MenuItem("Build Settings", "Ctrl+Shift+B", showBuild)) showBuild = !showBuild;
         if (ImGui::MenuItem("Marker Maker", nullptr, showMaker)) showMaker = !showMaker;
         if (ImGui::MenuItem("Script Editor", nullptr, showScripts, !scripts.empty())) showScripts = !showScripts;
+        ImGui::Separator();
+        ImGui::MenuItem("Hierarchy", nullptr, &showHierarchy);
+        ImGui::MenuItem("Scene", nullptr, &showSceneWin);
+        ImGui::MenuItem("Inspector", nullptr, &showInspector);
+        ImGui::MenuItem("Project", nullptr, &showProject);
+        ImGui::MenuItem("Console", nullptr, &showConsole);
+        ImGui::MenuItem("Profiler", nullptr, &showProfiler);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reset Layout")) resetLayout = true;
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Help")) { if (ImGui::MenuItem("About Diorama")) showAbout = true; ImGui::EndMenu(); }
@@ -2086,6 +2200,13 @@ static void dropAsset(Scene::Marker& m, int mi, int onto, const std::string& fil
         return;
     }
     if (e == ".prefab") { const int id = placePrefab(m, file, onto); if (id >= 0) { selMarker = mi; selObject = id; } return; }
+    if (e == ".material") {
+        if (i < 0 || m.objects[i].kind == EMPTY) { say("Drop a material onto an object with a look (a mesh, a picture, a model)"); return; }
+        Object mat; if (!loadMaterial(file, mat)) { say("Couldn't read the material"); return; }
+        m.objects[i].material = file; applyMaterial(mat, m.objects[i]); selMarker = mi; selObject = onto;
+        say(m.objects[i].name + " has the material " + fs::u8path(file).stem().u8string());
+        return;
+    }
     if (e == ".marker") { if (applyMarkerFile(m, file)) { selMarker = mi; selObject = -1; say("The marker is now " + m.name); } return; }
     if (e == ".mp3" || e == ".ogg" || e == ".wav" || e == ".m4a") {
         if (i < 0) { say("Drop a sound onto an object: it gets an Audio Source"); return; }
@@ -2156,8 +2277,7 @@ static void objectNode(Scene::Marker& m, int mi, int index, int& moveId, int& mo
 static void hierarchyItems();
 static void hierarchy() { hierarchyItems(); }
 static void hierarchyItems() {
-    ImGui::PushFont(boldFont); ImGui::TextUnformatted("Hierarchy"); ImGui::PopFont();
-    ImGui::SameLine(); ImGui::TextDisabled("%s", proj.scene.c_str());
+    ImGui::TextDisabled("Scene: %s", proj.scene.c_str());
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("The open scene (Window > Scenes)");
     if (ImGui::IsItemClicked()) showScenes = true;
     ImGui::SameLine(ImGui::GetContentRegionAvail().x - 24);
@@ -2400,7 +2520,7 @@ static void markerInspector(Scene::Marker& m) {
 }
 
 // a component's header, Unity's way: open/close, its tick (when it has one), its name, and a menu (Reset, Remove)
-enum { C_KEEP, C_RESET, C_REMOVE };
+enum { C_KEEP, C_RESET, C_REMOVE, C_UP, C_DOWN };
 // Unity's component clipboard: Copy Component, Paste Component Values (onto the same kind), Paste Component As New
 static Object* hdrObj = nullptr;            // the object whose Inspector is being drawn (nullptr: the Main Camera)
 static const char* hdrKey = nullptr;        // this header's component, when its title says something else (the look, a script)
@@ -2482,6 +2602,10 @@ static int componentHeader(const char* name, bool* on, bool removable) {
     if (ImGui::BeginPopup("menu")) {
         if (ImGui::MenuItem("Reset")) act = C_RESET;
         if (ImGui::MenuItem("Remove Component", nullptr, false, removable)) act = C_REMOVE;
+        if (hdrKey && !strcmp(hdrKey, "Script") && hdrObj) {   // scripts run in their order: Move Up / Move Down
+            if (ImGui::MenuItem("Move Up", nullptr, false, hdrScript > 0)) act = C_UP;
+            if (ImGui::MenuItem("Move Down", nullptr, false, hdrScript + 1 < (int)hdrObj->scripts.size())) act = C_DOWN;
+        }
         if (!removable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Every object has a Transform");
         ImGui::Separator();
         const std::string key = hdrKey ? hdrKey : std::string(name).rfind("UI ", 0) == 0 ? "UI" : name;
@@ -2668,6 +2792,25 @@ static void addComponentMenu(Object& o) {
         if (ImGui::MenuItem("AR Path Follower", nullptr, false, !o.hasFollower)) { o.hasFollower = true; o.followerOn = true; }
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("Behaviours")) {   // Diorama's own scripts (assets/behaviours): copied into the project, then edit them as any script
+        std::error_code be;
+        for (const auto& e : fs::directory_iterator(fs::u8path(exeDir) / "assets" / "behaviours", be)) {
+            if (e.path().extension() != ".js") continue;
+            if (ImGui::MenuItem(e.path().stem().u8string().c_str())) {
+                const fs::path dir = folder.empty() ? fs::u8path(projectsHome()) / "scripts" : fs::u8path(folder) / "assets" / "behaviours";
+                std::error_code ce; fs::create_directories(dir, ce);
+                const fs::path to = dir / e.path().filename();
+                if (!fs::exists(to, ce)) fs::copy_file(e.path(), to, ce);
+                beginEdit(); o.scripts.push_back({to.u8string(), true});
+                say("Added " + e.path().stem().u8string() + ": its settings are at the top of the script (Edit Script)");
+            }
+            if (ImGui::IsItemHovered()) {   // its first line says what it does
+                std::ifstream in(e.path()); std::string line; std::getline(in, line);
+                if (line.rfind("// ", 0) == 0) ImGui::SetTooltip("%s", line.substr(3).c_str());
+            }
+        }
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Effects")) {
         if (ImGui::MenuItem("Particle System", nullptr, false, !o.hasParticles)) { o.hasParticles = true; o.particlesOn = true; }
         ImGui::EndMenu();
@@ -2701,6 +2844,26 @@ static void addComponentMenu(Object& o) {
     }
 }
 
+// a material's controls (an object's, or a material asset's); true when something changed
+static bool materialFields(Object& o, bool texture) {
+    const Object before = o;
+    const wchar_t* PICS = L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0";
+    int shader = o.lit ? 0 : 1; const char* shaders[] = {"Standard (lit, PBR)", "Unlit (its own colours)"};
+    labelled("Shader"); if (ImGui::Combo("##shader", &shader, shaders, 2)) o.lit = shader == 0;
+    labelled("Colour"); ImGui::ColorEdit4("##col", o.colour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+    if (texture) fileRow("Texture", o.file, PICS);
+    ImGui::Checkbox("Glow", &o.glow); tip("Added on as light (god rays, sparks)");
+    if (o.lit && !o.glow) {   // PBR: how it takes the light
+        labelled("Metallic"); ImGui::SliderFloat("##met", &o.metallic, 0, 1, "%.2f"); tip("0: paint, plastic, wood; 1: metal (it takes the lights' colour)");
+        labelled("Roughness"); ImGui::SliderFloat("##rough", &o.roughness, 0.02f, 1, "%.2f"); tip("0: a mirror shine; 1: chalk");
+    }
+    labelled("Emissive"); ImGui::ColorEdit3("##emc", o.emissive, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
+    ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##ems", &o.emissiveStrength, 0, 10, "light %.2f"); tip("Light of its own (it glows; bloom makes it bleed)");
+    ImGui::Checkbox("Casts shadows", &o.castShadows); ImGui::SameLine(); ImGui::Checkbox("Gets shadows", &o.receiveShadows);
+    return memcmp(before.colour, o.colour, sizeof o.colour) || memcmp(before.emissive, o.emissive, sizeof o.emissive) || before.lit != o.lit || before.glow != o.glow ||
+           before.metallic != o.metallic || before.roughness != o.roughness || before.emissiveStrength != o.emissiveStrength || before.file != o.file ||
+           before.castShadows != o.castShadows || before.receiveShadows != o.receiveShadows;
+}
 static void objectInspector(Scene::Marker& m, Object& o) {
     hdrObj = &o; hdrKey = nullptr; hdrScript = -1;
     ImGui::Checkbox("##active", &o.active); tip("Active: off hides it and everything under it");
@@ -2747,20 +2910,25 @@ static void objectInspector(Scene::Marker& m, Object& o) {
                 }
                 if (o.kind == RAYS) { labelled("How many"); ImGui::SliderInt("##rays", &o.rays, 1, 24); }
                 if (o.kind == WORDS) { char t[256]; snprintf(t, sizeof t, "%s", o.text.c_str()); ImGui::SetNextItemWidth(-1); if (ImGui::InputText("##text", t, sizeof t)) o.text = t; }
-                // its material
+                // its material: an asset (shared) or its own
                 ImGui::SeparatorText("Material");
-                labelled("Colour"); ImGui::ColorEdit4("##col", o.colour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
-                if (isPrimitive(o.kind)) fileRow("Texture", o.file, PICS);
-                ImGui::Checkbox("Lit", &o.lit); tip("Shaded by the marker's lights");
-                ImGui::SameLine(); ImGui::Checkbox("Glow", &o.glow); tip("Added on as light (god rays, sparks)");
-                if (o.kind == QUAD || o.kind == PICTURE || o.kind == WORDS) { ImGui::SameLine(); ImGui::Checkbox("Faces the phone", &o.billboard); }
-                if (o.lit && !o.glow) {   // PBR: how it takes the light
-                    labelled("Metallic"); ImGui::SliderFloat("##met", &o.metallic, 0, 1, "%.2f"); tip("0: paint, plastic, wood; 1: metal (it takes the lights' colour)");
-                    labelled("Roughness"); ImGui::SliderFloat("##rough", &o.roughness, 0.02f, 1, "%.2f"); tip("0: a mirror shine; 1: chalk");
+                labelled("Asset");
+                if (ImGui::BeginCombo("##matasset", o.material.empty() ? "(its own)" : fs::u8path(o.material).stem().u8string().c_str())) {
+                    if (ImGui::Selectable("(its own)", o.material.empty())) o.material.clear();
+                    std::error_code me;
+                    if (!folder.empty()) for (const auto& e : fs::recursive_directory_iterator(fs::u8path(folder) / "assets", me))
+                        if (e.path().extension() == ".material" && ImGui::Selectable(e.path().stem().u8string().c_str(), o.material == e.path().u8string())) {
+                            Object mat; if (loadMaterial(e.path().u8string(), mat)) { o.material = e.path().u8string(); applyMaterial(mat, o); }
+                        }
+                    ImGui::EndCombo();
                 }
-                labelled("Emissive"); ImGui::ColorEdit3("##emc", o.emissive, ImGuiColorEditFlags_NoInputs); ImGui::SameLine();
-                ImGui::SetNextItemWidth(-1); ImGui::SliderFloat("##ems", &o.emissiveStrength, 0, 10, "light %.2f"); tip("Light of its own (it glows; bloom makes it bleed)");
-                ImGui::Checkbox("Casts shadows", &o.castShadows); ImGui::SameLine(); ImGui::Checkbox("Gets shadows", &o.receiveShadows);
+                tip("A material asset (Project window: right-click > Create > Material) is shared: change it here or in its own\nInspector and every object with it changes. Drop one onto an object to give it to that object.");
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) dropAsset(m, selMarker, o.id, std::string((const char*)pl->Data));
+                    ImGui::EndDragDropTarget();
+                }
+                if (materialFields(o, isPrimitive(o.kind)) && !o.material.empty()) { saveMaterial(o.material, o); applyMaterialEverywhere(o.material); }
+                if (o.kind == QUAD || o.kind == PICTURE || o.kind == WORDS) ImGui::Checkbox("Faces the phone", &o.billboard);
                 ImGui::Checkbox("Occluder", &o.occluder); tip("Invisible in the game, but hides what's behind it:\na stand-in for a real thing (a box, a wall) so the AR goes behind it");
             }
         }
@@ -3040,6 +3208,8 @@ static void objectInspector(Scene::Marker& m, Object& o) {
         const std::string title = "Script: " + fs::u8path(sc.file).filename().u8string();
         hdrKey = "Script"; hdrScript = (int)si; h = componentHeader(title.c_str(), &sc.on, true); hdrKey = nullptr; hdrScript = -1;
         if ((h & 0xff) == C_REMOVE) { o.scripts.erase(o.scripts.begin() + si); ImGui::PopID(); break; }
+        if ((h & 0xff) == C_UP && si > 0) { std::swap(o.scripts[si], o.scripts[si - 1]); ImGui::PopID(); break; }
+        if ((h & 0xff) == C_DOWN && si + 1 < o.scripts.size()) { std::swap(o.scripts[si], o.scripts[si + 1]); ImGui::PopID(); break; }
         if (h & 0x100) {
             fileRow("File", sc.file, L"JavaScript\0*.js\0\0");
             if (ImGui::Button("Edit Script", ImVec2(-1, 0))) openScript(sc.file);
@@ -3122,6 +3292,14 @@ static void assetInspector() {
     } else if (!strcmp(kind, "Prefab")) {
         std::vector<Object> objs;
         if (loadPrefab(selAsset, objs)) { ImGui::Text("%d object%s:", (int)objs.size(), objs.size() == 1 ? "" : "s"); for (const auto& q : objs) ImGui::BulletText("%s%s", q.parent == -1 ? "" : "   ", q.name.c_str()); }
+    } else if (!strcmp(kind, "Material")) {
+        static std::string loaded; static Object mat;
+        if (loaded != selAsset) { mat = Object(); mat.kind = CUBE; loadMaterial(selAsset, mat); loaded = selAsset; }
+        ImGui::PushItemWidth(-1);
+        if (materialFields(mat, true)) { beginEdit(); saveMaterial(selAsset, mat); const int n = applyMaterialEverywhere(selAsset); if (n) say("Changed on " + std::to_string(n) + " object" + (n == 1 ? "" : "s")); }
+        ImGui::PopItemWidth();
+        int users = 0; for (int a = -1; a < (int)proj.markers.size(); ++a) for (const auto& q : (a < 0 ? proj.camera : proj.markers[a]).objects) if (q.material == selAsset) ++users;
+        ImGui::TextDisabled("%d object%s use%s it. Drop it onto an object to give it this material.", users, users == 1 ? "" : "s", users == 1 ? "s" : "");
     } else if (!strcmp(kind, "Video")) {
         const fs::path poster = f.parent_path() / fs::u8path(f.stem().u8string() + ".poster.png");
         int iw = 0, ih = 0; const unsigned t = fs::exists(poster, ec) ? Viewer::pictureTexture(poster.u8string(), &iw, &ih) : 0;
@@ -3140,7 +3318,7 @@ static void assetInspector() {
             if (ImGui::Button(("Add to " + (selMarker == -2 ? std::string("the Main Camera") : m->name)).c_str(), ImVec2(-1, 0))) { const std::string a = selAsset; dropAsset(*m, selMarker, -1, a); selAsset.clear(); return; }
         }
         if (o && strcmp(kind, "Marker") && strcmp(kind, "Prefab")) {
-            const std::string what = !strcmp(kind, "Script") ? "Add to " : !strcmp(kind, "Audio") ? "Give a sound to " : !strcmp(kind, "Video") ? "Play it on " : "Put under ";
+            const std::string what = !strcmp(kind, "Script") ? "Add to " : !strcmp(kind, "Audio") ? "Give a sound to " : !strcmp(kind, "Video") ? "Play it on " : !strcmp(kind, "Material") ? "Give it to " : "Put under ";
             if (ImGui::Button((what + o->name).c_str(), ImVec2(-1, 0))) { const std::string a = selAsset; dropAsset(*m, selMarker, o->id, a); selAsset.clear(); return; }
         }
         if (needsObject && !o) ImGui::TextDisabled("Select an object to give it this %s (or drag it onto one).", !strcmp(kind, "Script") ? "script" : "sound");
@@ -3151,8 +3329,6 @@ static void assetInspector() {
     ImGui::TextDisabled("Drag it onto the Scene view, the Hierarchy or an object.");
 }
 static void inspector() {
-    ImGui::PushFont(boldFont); ImGui::TextUnformatted("Inspector"); ImGui::PopFont();
-    ImGui::Separator();
     ImGui::BeginChild("##insp");
     ImGui::PushItemWidth(-1);
     Scene::Marker* m = curMarker();
@@ -3481,29 +3657,54 @@ static void frame() {
     keys();
     menuBar();
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float top = ImGui::GetFrameHeight(), status = 26, leftW = 280, rightW = 340;
-    const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus;
+    const float top = ImGui::GetFrameHeight(), status = 26;
     const float H = vp->Size.y - top - status;
-    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + top)); ImGui::SetNextWindowSize(ImVec2(leftW, H));
-    ImGui::Begin("##hier", nullptr, fixed); hierarchy(); ImGui::End();
-    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x - rightW, vp->Pos.y + top)); ImGui::SetNextWindowSize(ImVec2(rightW, H));
-    ImGui::Begin("##insp", nullptr, fixed); inspector(); ImGui::End();
-    const float bottomH = std::min(260.0f, H * 0.36f);
-    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + leftW, vp->Pos.y + top)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x - leftW - rightW, H - bottomH));
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, col4(C_BG));
-    ImGui::Begin("##scene", nullptr, fixed); sceneView(); ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + leftW, vp->Pos.y + top + H - bottomH)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x - leftW - rightW, bottomH));
-    ImGui::Begin("##bottom", nullptr, fixed); bottomPanel(); ImGui::End();
+    // the dockspace between the menu bar and the status line
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + top)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x, H));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0)); ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+    ImGui::Begin("##dockhost", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoBackground);
+    ImGui::PopStyleVar(2);
+    const ImGuiID dock = ImGui::GetID("DioramaDock");
+    if (resetLayout || !ImGui::DockBuilderGetNode(dock)) {   // Unity's default: Hierarchy left, Inspector right, the Scene in the middle, Project + Console under it
+        resetLayout = false;
+        showHierarchy = showInspector = showSceneWin = showProject = showConsole = true;
+        ImGui::DockBuilderRemoveNode(dock);
+        ImGui::DockBuilderAddNode(dock, ImGuiDockNodeFlags_DockSpace);
+        ImGui::DockBuilderSetNodeSize(dock, ImVec2(vp->Size.x, H));
+        ImGuiID mid = dock;
+        const ImGuiID left = ImGui::DockBuilderSplitNode(mid, ImGuiDir_Left, 280.0f / vp->Size.x, nullptr, &mid);
+        const ImGuiID right = ImGui::DockBuilderSplitNode(mid, ImGuiDir_Right, 340.0f / (vp->Size.x - 280.0f), nullptr, &mid);
+        const ImGuiID bottom = ImGui::DockBuilderSplitNode(mid, ImGuiDir_Down, std::min(0.36f, 260.0f / H), nullptr, &mid);
+        ImGui::DockBuilderDockWindow("Hierarchy", left);
+        ImGui::DockBuilderDockWindow("Inspector", right);
+        ImGui::DockBuilderDockWindow("Scene", mid);
+        ImGui::DockBuilderDockWindow("Project", bottom);
+        ImGui::DockBuilderDockWindow("###Console", bottom);
+        ImGui::DockBuilderFinish(dock);
+    }
+    ImGui::DockSpace(dock, ImVec2(0, 0), ImGuiDockNodeFlags_None);
+    ImGui::End();
+    if (showHierarchy) { if (ImGui::Begin("Hierarchy", &showHierarchy)) hierarchy(); ImGui::End(); }
+    if (showInspector) { if (ImGui::Begin("Inspector", &showInspector)) inspector(); ImGui::End(); }
+    if (showSceneWin) {
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, col4(C_BG));
+        if (ImGui::Begin("Scene", &showSceneWin)) sceneView();
+        ImGui::End();
+        ImGui::PopStyleColor();
+    }
+    if (showProject) { if (ImGui::Begin("Project", &showProject)) projectPanel(); ImGui::End(); }
+    if (bottomTab == 1) { showConsole = true; ImGui::SetNextWindowFocus(); bottomTab = 0; }
+    if (showConsole) { if (ImGui::Begin(consoleTitle().c_str(), &showConsole)) consolePanel(); ImGui::End(); }
     scriptEditor();
     markerMaker();
     sceneManager();
     buildSettings();
     buildProgress();
+    profiler();
     // the status line
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - status)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x, status));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 4));
-    ImGui::Begin("##status", nullptr, fixed);
+    ImGui::Begin("##status", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings);
     if (!toast.empty() && now() < toastUntil) ImGui::TextUnformatted(toast.c_str());
     else ImGui::TextDisabled("%s  -  %s", proj.title.c_str(), folder.empty() ? "not saved yet" : folder.c_str());
     ImGui::End();
@@ -3542,6 +3743,7 @@ int main(int argc, char** argv) {
             Serve::start(args[i + 1], 8796); SDL_Delay((Uint32)(atof(args[i + 2].c_str()) * 1000)); return 0;
         }
         else if (args[i] == "--scenes") showScenes = true;
+        else if (args[i] == "--profiler") showProfiler = true;   // tests: the Profiler open
         else if (args[i] == "--select-camera") selectArg = -100;   // tests: the Main Camera selected
         else if (args[i] == "--select-asset" && i + 1 < args.size()) { selAsset = args[++i]; selAssetMarker = 0; selAssetObject = -1; }   // tests: a file selected in the Project window
         else if (args[i] == "--add-video" && i + 1 < args.size()) addVideoArg = args[++i];   // tests: a video, as dropped on the first anchor   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
@@ -3566,7 +3768,14 @@ int main(int argc, char** argv) {
     if (icon) SDL_SetWindowIcon(window, icon);
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGui::GetIO().IniFilename = nullptr;
+    {   // the windows' layout (docking) is kept between sessions, in the user's settings
+        static std::string ini;
+        char* pref = SDL_GetPrefPath("Cursed Entertainment", "Diorama");
+        if (pref) { ini = std::string(pref) + "layout.ini"; SDL_free(pref); }
+        ImGui::GetIO().IniFilename = ini.empty() || !capture.empty() ? nullptr : ini.c_str();
+        ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+        ImGui::GetIO().ConfigWindowsMoveFromTitleBarOnly = true;
+    }
     loadFont();
     applyStyle();
 

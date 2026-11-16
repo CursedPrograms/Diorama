@@ -131,7 +131,7 @@ static std::string markersJson(const std::vector<Marker>& list) {
               .s("file", o.file).b("lit", o.lit).b("glow", o.glow).b("billboard", o.billboard).s("anim", ANIM_NAMES[o.anim])
               .f("animSpeed", o.animSpeed).f("animAmount", o.animAmount).i("count", o.count).f("spriteSize", o.spriteSize).f("flap", o.flap)
               .i("rays", o.rays).s("text", o.text).s("clip", o.clip).f("clipSpeed", o.clipSpeed).b("clipLoop", o.clipLoop)
-              .b("lookOn", o.lookOn).b("hasAnim", o.hasAnim).b("animOn", o.animOn).s("prefab", o.prefab);
+              .b("lookOn", o.lookOn).b("hasAnim", o.hasAnim).b("animOn", o.animOn).s("prefab", o.prefab).s("material", o.material);
             ow.f("metallic", o.metallic).f("roughness", o.roughness).f("emissiveStrength", o.emissiveStrength).b("castShadows", o.castShadows).b("receiveShadows", o.receiveShadows).b("lightShadows", o.lightShadows);
             ow.key("emissive"); ow.out += arr(o.emissive, 3);
             ow.b("occluder", o.occluder)
@@ -203,7 +203,7 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
             o.rays = (int)ov.num("rays", 6); o.text = ov.str("text", o.text);
             o.clip = ov.str("clip"); o.clipSpeed = (float)ov.num("clipSpeed", 1); o.clipLoop = readBool(ov, "clipLoop", true);
             o.lookOn = readBool(ov, "lookOn", true); o.animOn = readBool(ov, "animOn", true);
-            o.prefab = ov.str("prefab");
+            o.prefab = ov.str("prefab"); o.material = ov.str("material");
             o.occluder = readBool(ov, "occluder", false);
                 o.metallic = (float)ov.num("metallic", 0); o.roughness = (float)ov.num("roughness", 0.6); o.emissiveStrength = (float)ov.num("emissiveStrength", 0);
                 readArr(ov, "emissive", o.emissive, 3);

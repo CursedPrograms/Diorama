@@ -59,6 +59,11 @@ GLF(void, glFramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint))
 GLF(void, glGenerateMipmap, (GLenum))
 GLF(void, glActiveTexture, (GLenum))
 GLF(void, glBlendFuncSeparate, (GLenum, GLenum, GLenum, GLenum))
+GLF(void, glGenQueries, (GLsizei, GLuint*))
+GLF(void, glBeginQuery, (GLenum, GLuint))
+GLF(void, glEndQuery, (GLenum))
+GLF(void, glGetQueryObjectiv, (GLuint, GLenum, GLint*))
+GLF(void, glGetQueryObjectui64v, (GLuint, GLenum, unsigned long long*))
 GLF(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum))
 #undef GLF
 #define GL_FRAGMENT_SHADER 0x8B30
@@ -143,6 +148,9 @@ static bool loadGL() {
     L(glBindVertexArray) L(glGenBuffers) L(glBindBuffer) L(glBufferData) L(glEnableVertexAttribArray) L(glVertexAttribPointer)
     L(glGenFramebuffers) L(glBindFramebuffer) L(glFramebufferTexture2D) L(glGenRenderbuffers) L(glBindRenderbuffer)
     L(glRenderbufferStorage) L(glFramebufferRenderbuffer) L(glGenerateMipmap) L(glActiveTexture) L(glBlendFuncSeparate) L(glBlitFramebuffer)
+    glGenQueries_ = (PFN_glGenQueries)SDL_GL_GetProcAddress("glGenQueries"); glBeginQuery_ = (PFN_glBeginQuery)SDL_GL_GetProcAddress("glBeginQuery");
+    glEndQuery_ = (PFN_glEndQuery)SDL_GL_GetProcAddress("glEndQuery"); glGetQueryObjectiv_ = (PFN_glGetQueryObjectiv)SDL_GL_GetProcAddress("glGetQueryObjectiv");
+    glGetQueryObjectui64v_ = (PFN_glGetQueryObjectui64v)SDL_GL_GetProcAddress("glGetQueryObjectui64v");   // the Profiler's GPU time (optional)
 #undef L
     return true;
 }
@@ -338,6 +346,10 @@ struct ModelGL {
     float fit = 1, centre[3] = {0, 0, 0};   // to 1 across, standing on y = 0, centred
 };
 static std::map<std::string, std::unique_ptr<ModelGL>> models;
+// ---- the Profiler: the last view's numbers; the GPU's time from timer queries (two, a frame apart: no waiting)
+static Stats st;
+static GLuint timeQ[2] = {0, 0}; static int timeQi = 0; static bool timeQUsed[2] = {false, false};
+const Stats& stats() { return st; }
 static ModelGL* model(const std::string& file) {
     auto it = models.find(file);
     if (it != models.end()) return it->second.get();
@@ -965,7 +977,20 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     viewM = lookAt(eye, target);
     viewProj = mul(perspective(0.8f, (float)w / h, 0.02f, 100), viewM);
     bgTexture = 0;
-    return scenePass(p, mi, selected, w, h, picked, t);
+    // the Profiler: this view's CPU time, and the GPU's (the query from two frames ago is ready by now)
+    const Uint64 c0 = SDL_GetPerformanceCounter();
+    const bool timed = glGenQueries_ && glBeginQuery_ && glGetQueryObjectui64v_ && !redrawing;
+    if (timed) {
+        if (!timeQ[0]) glGenQueries_(2, timeQ);
+        const int i = timeQi;
+        if (timeQUsed[i]) { GLint ready = 0; glGetQueryObjectiv_(timeQ[i], 0x8867 /* GL_QUERY_RESULT_AVAILABLE */, &ready); if (ready) { unsigned long long ns = 0; glGetQueryObjectui64v_(timeQ[i], 0x8866 /* GL_QUERY_RESULT */, &ns); st.gpuMs = ns / 1e6f; } }
+        glBeginQuery_(0x88BF /* GL_TIME_ELAPSED */, timeQ[i]); timeQUsed[i] = true;
+    }
+    const unsigned out = scenePass(p, mi, selected, w, h, picked, t);
+    if (timed) { glEndQuery_(0x88BF); timeQi = 1 - timeQi; }
+    st.cpuMs = (float)((SDL_GetPerformanceCounter() - c0) * 1000.0 / SDL_GetPerformanceFrequency());
+    st.textures = (int)textures.size(); st.models = (int)models.size(); st.width = w; st.height = h;
+    return out;
 }
 
 static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, int& picked, float t) {
@@ -1173,6 +1198,7 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
         setCommon(mul(portalM, scale(1, 1.5f, 1)), c, 0, true); draw(mPortalBox);
     }
 
+    if (!previewing) { st.objects = (int)lastWorld.size(); st.draws = (int)draws.size(); st.lights = nl; st.shadowMaps = p.shadows ? (sunShadow ? 1 : 0) + nSpots : 0; }
     std::stable_sort(draws.begin(), draws.end(), [](const Draw& a, const Draw& b) {
         if (a.blend != b.blend) return !a.blend;
         if (!a.blend && a.o->occluder != b.o->occluder) return a.o->occluder;   // occluders first: they hide what's behind

@@ -9,10 +9,11 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 include(FetchContent)
-if(EXISTS ${CMAKE_SOURCE_DIR}/external/imgui-1.90.4/imgui.h)
-    set(FETCHCONTENT_SOURCE_DIR_IMGUI ${CMAKE_SOURCE_DIR}/external/imgui-1.90.4)
+# Dear ImGui's docking branch: the editor's windows resize, move, snap and tab like Unity's
+if(EXISTS ${CMAKE_SOURCE_DIR}/external/imgui-1.90.4-docking/imgui.h)
+    set(FETCHCONTENT_SOURCE_DIR_IMGUI ${CMAKE_SOURCE_DIR}/external/imgui-1.90.4-docking)
 endif()
-FetchContent_Declare(imgui URL https://github.com/ocornut/imgui/archive/refs/tags/v1.90.4.tar.gz)
+FetchContent_Declare(imgui URL https://github.com/ocornut/imgui/archive/refs/tags/v1.90.4-docking.tar.gz)
 FetchContent_MakeAvailable(imgui)
 # QuickJS (quickjs-ng, MIT): the native player's scripts
 if(EXISTS ${CMAKE_SOURCE_DIR}/external/quickjs/quickjs.h)
