@@ -16,7 +16,7 @@ enum Anim { A_STILL, A_FLOAT, A_SPIN, A_SWAY, A_PULSE, ANIM_COUNT };
 extern const char* ANIM_NAMES[ANIM_COUNT];
 enum MarkerType { MK_PATTERN, MK_BARCODE, MARKER_TYPE_COUNT };
 // what a game tracks (one per game: Project Settings); the anchors at the top of the Hierarchy are of that kind
-enum Tracking { TRACK_MARKERS, TRACK_IMAGES, TRACK_FACES, TRACK_SURFACES, TRACK_HANDS, TRACKING_COUNT };
+enum Tracking { TRACK_MARKERS, TRACK_IMAGES, TRACK_FACES, TRACK_SURFACES, TRACK_ARUCO, TRACK_HANDS, TRACKING_COUNT };
 extern const char* TRACKING_NAMES[TRACKING_COUNT];
 // a face anchor's point: MindAR's face landmarks (of 468) people want things on
 struct FacePoint { const char* name; int landmark; float head[3]; };   // head: where the head's middle is from it (face widths)
@@ -139,6 +139,7 @@ struct Marker {
     std::string picture;               // pattern: its inside picture
     std::string letter;                // pattern: a letter or short word instead
     int barcode = 0;                   // barcode: 0..63
+    int arucoId = 0;                   // ArUco markers: its number in the project's dictionary
     std::string target;                // images: the picture to look for
     int facePoint = 1;                 // faces: the landmark it's on (FACE_POINTS)
     bool expanded = true;
@@ -183,6 +184,7 @@ struct Project {
     // Build Settings: the platform it builds for, and its runtime
     std::string platform = "web";      // web, windows, linux, pi, android
     int windowsRuntime = 0;            // 0 JavaScript (WebView2), 1 C++ (Diorama's native player)
+    int arucoDict = 0;                 // ArUco markers: 0 4x4_50, 1 5x5_100, 2 6x6_250, 3 the original (5x5, 1024)
     int renderer = 0;                  // the JavaScript runtime's drawing: 0 WebGL 2, 1 WebGPU (WebGL 2 where there's none)
     // Graphics (the editor's view shows them too)
     bool shadows = true; int shadowQuality = 1;        // 0 1024, 1 2048, 2 4096

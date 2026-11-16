@@ -15,6 +15,10 @@ std::string pattFrom(const Image& inside);
 Image printablePattern(const Image& inside, int size);
 // a 3x3 barcode (AR_MATRIX_CODE_3x3, 0..63): black square, its 3x3 cells; size px across, with a white margin
 Image printableBarcode(int id, int size);
+// an ArUco marker (OpenCV's dictionaries: 0 4x4_50, 1 5x5_100, 2 6x6_250, 3 original): its black border and cells, a white margin
+Image printableAruco(int dict, int id, int size);
+int arucoCount(int dict);                 // how many markers the dictionary has
+const char* arucoName(int dict);
 // a letter or short word, black on white, as a pattern marker's inside picture
 Image letterPicture(const std::string& text, int size, const std::string& fontFile);
 // a sheet to print: the markers in a grid, their names under them, A4 at 150 dpi

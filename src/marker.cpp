@@ -1,5 +1,6 @@
 // Diorama - markers (see marker.h)
 #include "marker.h"
+#include "aruco_dicts.h"
 
 #include <stb_image.h>
 #include <stb_image_write.h>
@@ -141,6 +142,23 @@ Image printableBarcode(int id, int size) {
             fillRect(o, (int)std::lround(io + c * cell), (int)std::lround(io + r * cell), (int)std::lround(io + (c + 1) * cell), (int)std::lround(io + (r + 1) * cell), bits[r][c] ? 0 : 255);
     return o;
 }
+
+Image printableAruco(int dict, int id, int size) {
+    const Aruco::Dict& d = Aruco::DICTS[std::clamp(dict, 0, Aruco::DICT_COUNT - 1)];
+    id = std::clamp(id, 0, d.count - 1);
+    Image o = blank(size, size);
+    const int m = (int)std::lround(size * MARGIN), sq = size - 2 * m, cells = d.size + 2;
+    const float cell = (float)sq / cells;
+    fillRect(o, m, m, m + sq, m + sq, 0);   // the border (black), then the white cells
+    const unsigned char* b = d.bits + (size_t)id * d.size * d.size;
+    for (int r = 0; r < d.size; ++r)
+        for (int c = 0; c < d.size; ++c)
+            if (b[r * d.size + c])
+                fillRect(o, (int)std::lround(m + (c + 1) * cell), (int)std::lround(m + (r + 1) * cell), (int)std::lround(m + (c + 2) * cell), (int)std::lround(m + (r + 2) * cell), 255);
+    return o;
+}
+int arucoCount(int dict) { return Aruco::DICTS[std::clamp(dict, 0, Aruco::DICT_COUNT - 1)].count; }
+const char* arucoName(int dict) { return Aruco::DICTS[std::clamp(dict, 0, Aruco::DICT_COUNT - 1)].name; }
 
 // ---- text, for letter markers and the sheet's labels
 static std::string fontData(const std::string& file) {

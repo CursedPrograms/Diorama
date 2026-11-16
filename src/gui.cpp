@@ -223,6 +223,7 @@ static Markers::Image insidePicture(const Scene::Marker& m) {
 }
 // the whole printed marker (white margin, black square, its inside)
 static Markers::Image printable(const Scene::Marker& m, int size) {
+    if (proj.tracking == TRACK_ARUCO) return Markers::printableAruco(proj.arucoDict, m.arucoId, size);
     if (m.type == MK_BARCODE) return Markers::printableBarcode(std::clamp(m.barcode, 0, 63), size);
     if (!m.preset.empty()) {   // Hiro, Kanji: their own pictures (the black square edge to edge), a margin added
         Markers::Image full;
@@ -244,7 +245,7 @@ static const Scene::FacePoint& facePointOf(const Scene::Marker& m) {
 static void refreshMarkerPicture() {
     const Scene::Marker* m = curMarker();
     const std::string key = m ? (std::to_string(proj.tracking) + "|" + std::to_string(m->type) + m->preset + "|" + m->picture + "|" + m->letter + "|" +
-                                 std::to_string(m->barcode) + "|" + m->target + "|" + std::to_string(m->facePoint)) : "";
+                                 std::to_string(m->barcode) + "|" + m->target + "|" + std::to_string(m->facePoint) + "|" + std::to_string(m->arucoId) + "|" + std::to_string(proj.arucoDict)) : "";
     if (selMarker == shownMarker && key == shownKey) return;
     shownMarker = selMarker; shownKey = key;
     if (!m) { Viewer::setMarkerPicture({}, 0, 0); Viewer::setAnchorMode(0, nullptr); return; }
@@ -408,7 +409,7 @@ static void create(int kind) {
     reparent(*m, o.id, parent);
     selObject = o.id;
 }
-static const char* anchorWord() { return proj.tracking == TRACK_IMAGES ? "Picture" : proj.tracking == TRACK_FACES ? "Face" : proj.tracking == TRACK_SURFACES ? "Surface" : proj.tracking == TRACK_HANDS ? "Hand" : "Marker"; }
+static const char* anchorWord() { return proj.tracking == TRACK_IMAGES ? "Picture" : proj.tracking == TRACK_FACES ? "Face" : proj.tracking == TRACK_SURFACES ? "Surface" : proj.tracking == TRACK_ARUCO ? "ArUco" : proj.tracking == TRACK_HANDS ? "Hand" : "Marker"; }
 static const char* anchorIcon() {   // what the Hierarchy shows before an anchor's name
     return proj.tracking == TRACK_IMAGES ? "\xe2\x96\xa8" : proj.tracking == TRACK_FACES ? "\xe2\x98\xba" : proj.tracking == TRACK_SURFACES ? "\xe2\x96\xad" : proj.tracking == TRACK_HANDS ? "\xe2\x9c\x8b" : "\xe2\x96\xa3";
 }
@@ -416,7 +417,7 @@ static void addMarker() {
     Scene::Marker k; k.id = newId(proj);
     int n = (int)proj.markers.size();
     k.name = std::string(anchorWord()) + " " + std::to_string(n + 1);
-    k.type = n == 0 ? MK_PATTERN : MK_BARCODE; k.preset = n == 0 ? "hiro" : ""; k.barcode = n;
+    k.type = n == 0 ? MK_PATTERN : MK_BARCODE; k.preset = n == 0 ? "hiro" : ""; k.barcode = n; k.arucoId = n;
     if (proj.tracking == TRACK_FACES) { k.facePoint = FACE_POINTS[std::min(n, FACE_POINT_COUNT - 1)].landmark; k.name = FACE_POINTS[std::min(n, FACE_POINT_COUNT - 1)].name; }
     proj.markers.push_back(k);
     selMarker = (int)proj.markers.size() - 1; selObject = -1;
@@ -752,7 +753,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     if (proj.tracking == TRACK_HANDS) { err = "Hand tracking isn't in yet: pick Markers, Images or Faces in Project Settings"; return false; }
     // only what this game's tracking needs: jsartoolkit5 (markers) or MindAR (pictures, faces)
     std::error_code rm; fs::remove_all(o / "lib", rm);
-    const bool surfaces = proj.tracking == TRACK_SURFACES;
+    const bool surfaces = proj.tracking == TRACK_SURFACES, aruco = proj.tracking == TRACK_ARUCO;
     bool copied = true;
     if (mind) copied = copyTree(web / "mindar", o / "lib" / "mindar");
     else {
@@ -761,7 +762,11 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
             std::error_code ce; fs::copy_file(web / "surfacetrack.js", o / "lib" / "surfacetrack.js", fs::copy_options::overwrite_existing, ce); if (ce) copied = false;
             copied = copied && copyTree(web / "opencv", o / "lib" / "opencv");
         }
-        if (!surfaces) {   // ARToolKit (and its camera data)
+        if (aruco) {   // OpenCV.js finds the ArUco markers
+            std::error_code ce; fs::copy_file(web / "arucotrack.js", o / "lib" / "arucotrack.js", fs::copy_options::overwrite_existing, ce); if (ce) copied = false;
+            copied = copied && copyTree(web / "opencv", o / "lib" / "opencv");
+        }
+        if (!surfaces && !aruco) {   // ARToolKit (and its camera data)
             for (const char* f : {"artoolkit.min.js", "artoolkit.three.js", "LICENSE-jsartoolkit5.txt"}) { std::error_code ce; fs::copy_file(web / "lib" / f, o / "lib" / f, fs::copy_options::overwrite_existing, ce); if (ce) copied = false; }
             copied = copied && copyTree(web / "data", o / "data");
         }
@@ -814,7 +819,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
             continue;
         }
         if (proj.tracking == TRACK_FACES || proj.tracking == TRACK_SURFACES) { m.picture.clear(); continue; }
-        if (m.type == MK_PATTERN) {
+        if (m.type == MK_PATTERN && proj.tracking == TRACK_MARKERS) {
             // every pattern file is written from the very picture that's printed, so the two always agree
             std::ofstream(o / "markers" / (slug + ".patt"), std::ios::binary) << Markers::pattFrom(insidePicture(m));
             m.patt = "markers/" + slug + ".patt";
@@ -822,7 +827,8 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
         m.picture.clear();
         const Markers::Image im = printable(orig, 1024);
         Markers::savePng((o / "markers" / (slug + ".png")).u8string(), im);
-        sheet.push_back({im, m.name + (m.type == MK_BARCODE ? "  (barcode " + std::to_string(m.barcode) + ")" : "")});
+        sheet.push_back({im, m.name + (proj.tracking == TRACK_ARUCO ? "  (ArUco " + std::string(Markers::arucoName(proj.arucoDict)) + " #" + std::to_string(m.arucoId) + ")"
+                                     : m.type == MK_BARCODE ? "  (barcode " + std::to_string(m.barcode) + ")" : "")});
     }
     if (si + 1 == proj.scenes.size() && !sheet.empty()) Markers::savePng((o / "markers.png").u8string(), Markers::sheet(sheet, fontFile));
     {   // the game's icon (Player Settings), else Diorama's
@@ -915,13 +921,21 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
          "    canvas { display: block; margin: 0 auto; }\n"
          "    #hint { position: fixed; left: 0; right: 0; bottom: 14px; text-align: center; font-size: 14px; opacity: 0.8; }\n"
          "    #hint a { color: #34a9e3; }\n  </style>\n</head>\n<body>\n"
-         "  <div id=\"hint\">" << (proj.tracking == TRACK_FACES ? "Look at the camera." : proj.tracking == TRACK_SURFACES ? "Move the phone slowly over the floor." : proj.tracking == TRACK_IMAGES ? "Point the camera at the picture." : "Point the camera at the marker.")
+         "  <div id=\"hint\">" << (proj.tracking == TRACK_FACES ? "Look at the camera." : proj.tracking == TRACK_SURFACES ? "Move the phone slowly over the floor." : proj.tracking == TRACK_ARUCO ? "Point the camera at an ArUco marker." : proj.tracking == TRACK_IMAGES ? "Point the camera at the picture." : "Point the camera at the marker.")
       << (proj.tracking == TRACK_FACES || proj.tracking == TRACK_SURFACES ? "" : proj.tracking == TRACK_IMAGES ? " <a href=\"markers.png\" target=\"_blank\">The pictures</a>" : " <a href=\"markers.png\" target=\"_blank\">Print the markers</a>")
       << "</div>\n";
     const std::string threeBuild = proj.renderer == 1 ? "three.webgpu.min.js" : "three.module.min.js";
     const std::string importMap = "  <script type=\"importmap\">{ \"imports\": { \"three\": \"./lib/three/" + threeBuild + "\", \"three/addons/\": \"./lib/three/addons/\" } }</script>\n";
     const char* gpu = proj.renderer == 1 ? "true" : "false";
-    if (surfaces)
+    if (aruco)
+        h << importMap <<
+             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
+             "  <script type=\"module\">\n"
+             "    import * as THREE from 'three';\n"
+             "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
+             "    Diorama.startAruco({ THREE: THREE, GLTFLoader: GLTFLoader, webgpu: " << gpu << ", dict: " << proj.arucoDict << " });\n"
+             "  </script>\n  <!-- Made with Diorama (Cursed Entertainment). three.js: MIT; OpenCV.js: Apache 2.0 (see lib/). -->\n";
+    else if (surfaces)
         h << importMap <<
              "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
              "  <script type=\"module\">\n"
@@ -1435,7 +1449,8 @@ static void buildSettings() {
 static bool showMaker = false;
 static void tip(const char* s); static void labelled(const char* l); static void giveVideo(Object& o, const std::string& file);
 struct MakerState {
-    int type = MK_PATTERN;        // MK_PATTERN / MK_BARCODE
+    int type = MK_PATTERN;        // MK_PATTERN / MK_BARCODE / 2 ArUco (the project's dictionary)
+    int arucoId = 0;
     int source = 2;               // 0 Hiro, 1 Kanji, 2 letters, 3 a picture, 4 random blocks
     char letters[16] = "A";
     std::string picture;          // source 3
@@ -1447,7 +1462,8 @@ struct MakerState {
 static fs::path markersDir() { return fs::u8path(folder) / "assets" / "markers"; }
 // what a marker in the maker is, as a scene marker (to print, to use)
 static Scene::Marker makerMarker() {
-    Scene::Marker m; m.type = mk.type;
+    Scene::Marker m; m.type = mk.type == 2 ? MK_PATTERN : mk.type;
+    if (mk.type == 2) { m.arucoId = mk.arucoId; return m; }
     if (mk.type == MK_BARCODE) { m.barcode = mk.barcode; return m; }
     m.preset.clear(); m.letter.clear(); m.picture.clear();
     if (mk.source == 0) m.preset = "hiro";
@@ -1461,6 +1477,7 @@ static Markers::Image makerInside() {
     return insidePicture(makerMarker());
 }
 static Markers::Image makerPrintable(int size) {
+    if (mk.type == 2) return Markers::printableAruco(proj.arucoDict, mk.arucoId, size);
     if (mk.type == MK_PATTERN && mk.source == 4) return Markers::printablePattern(mk.blocks, size);
     return printable(makerMarker(), size);
 }
@@ -1517,8 +1534,9 @@ static bool saveMakerMarker(std::string& savedName) {
     }
     if (!Markers::savePng((base.u8string() + ".png"), makerPrintable(1024))) { say("Couldn't save " + name + ".png"); return false; }
     if (mk.type == MK_PATTERN) std::ofstream(fs::u8path(base.u8string() + ".patt"), std::ios::binary) << Markers::pattFrom(makerInside());
+    const std::string kind = mk.type == 2 ? "aruco" : mk.type == MK_BARCODE ? "barcode" : "pattern";
     std::ofstream f(fs::u8path(base.u8string() + ".marker"), std::ios::binary);
-    f << "{\"diorama-marker\":1,\"name\":\"" << jsonEsc(mk.name) << "\",\"type\":\"" << (mk.type == MK_BARCODE ? "barcode" : "pattern") << "\""
+    f << "{\"diorama-marker\":1,\"name\":\"" << jsonEsc(mk.name) << "\",\"type\":\"" << kind << "\",\"arucoId\":" << mk.arucoId << ",\"arucoDict\":" << proj.arucoDict << ""
       << ",\"barcode\":" << mk.barcode
       << ",\"preset\":\"" << (mk.type == MK_PATTERN && mk.source == 0 ? "hiro" : mk.type == MK_PATTERN && mk.source == 1 ? "kanji" : "") << "\""
       << ",\"letter\":\"" << (mk.type == MK_PATTERN && mk.source == 2 ? jsonEsc(mk.letters) : "") << "\""
@@ -1531,6 +1549,7 @@ static bool applyMarkerFile(Scene::Marker& m, const std::string& file) {
     std::ifstream f(fs::u8path(file), std::ios::binary); std::stringstream ss; ss << f.rdbuf();
     Json::Value v; if (!Json::parse(ss.str(), v) || !v.get("diorama-marker")) { say("That isn't a Diorama marker"); return false; }
     m.type = v.str("type") == "barcode" ? MK_BARCODE : MK_PATTERN;
+    m.arucoId = (int)v.num("arucoId", m.arucoId);
     m.barcode = (int)v.num("barcode", 0);
     m.preset = v.str("preset"); m.letter = v.str("letter");
     const std::string pic = v.str("picture");
@@ -1558,8 +1577,8 @@ static void markerMaker() {
     ImGui::PushItemWidth(-1);
     labelled("Name"); ImGui::InputText("##mkn", mk.name, sizeof mk.name);
     labelled("Type");
-    const char* types[] = {"Pattern (like Hiro)", "Barcode (3x3)"};
-    ImGui::Combo("##mkt", &mk.type, types, 2);
+    const char* types[] = {"Pattern (like Hiro)", "Barcode (3x3)", "ArUco (OpenCV)"};
+    ImGui::Combo("##mkt", &mk.type, types, 3);
     if (mk.type == MK_PATTERN) {
         const char* srcs[] = {"Hiro", "Kanji", "A letter or word", "A picture", "Random blocks"};
         labelled("Made from"); ImGui::Combo("##mks", &mk.source, srcs, 5);
@@ -1572,6 +1591,16 @@ static void markerMaker() {
         }
         if (mk.source == 4 && ImGui::Button("New random blocks", ImVec2(-1, 0))) mk.blocks = randomBlocks();
         if (mk.source <= 1) ImGui::TextDisabled("The stock marker, as printed everywhere.");
+    } else if (mk.type == 2) {
+        const int n = Markers::arucoCount(proj.arucoDict);
+        labelled("Number"); ImGui::SliderInt("##mka", &mk.arucoId, 0, n - 1);
+        std::vector<bool> used(n, false); for (const auto& m : proj.markers) if (m.arucoId >= 0 && m.arucoId < n) used[m.arucoId] = proj.tracking == TRACK_ARUCO;
+        if (ImGui::Button("Random (an unused one)", ImVec2(-1, 0))) {
+            std::vector<int> free; for (int i = 0; i < n; ++i) if (!used[i]) free.push_back(i);
+            if (!free.empty()) { static unsigned r = (unsigned)SDL_GetTicks() * 7u + 3u; r = r * 1664525u + 1013904223u; mk.arucoId = free[(r >> 8) % free.size()]; }
+        }
+        if (mk.arucoId < n && used[mk.arucoId]) ImGui::TextColored(col4(IM_COL32(0xf0, 0xb0, 0x60, 255)), "This project uses %d already.", mk.arucoId);
+        ImGui::TextDisabled("Dictionary %s (Project Settings).\nPrint ArUco markers with their white margin.", Markers::arucoName(proj.arucoDict));
     } else {
         labelled("Number"); ImGui::SliderInt("##mkb", &mk.barcode, 0, 63);
         const auto used = barcodesInUse();
@@ -1588,11 +1617,12 @@ static void markerMaker() {
         std::string n; if (saveMakerMarker(n)) { projectDir = markersDir().u8string(); say("Saved " + n + " into assets/markers (.marker, .png to print" + std::string(mk.type == MK_PATTERN ? ", .patt)" : ")")); }
     }
     Scene::Marker* cm = curMarker();
-    const bool canUse = cm && proj.tracking == TRACK_MARKERS;
+    const bool canUse = cm && (mk.type == 2 ? proj.tracking == TRACK_ARUCO : proj.tracking == TRACK_MARKERS);
     if (ImGui::Button("Use on the selected marker", ImVec2(-1, 0)) && canUse) {
         beginEdit();
         if (mk.type == MK_PATTERN && mk.source == 4) {   // random blocks need their picture somewhere: the project
             std::string n; if (saveMakerMarker(n)) applyMarkerFile(*cm, (markersDir() / fs::u8path(n + ".marker")).u8string());
+        } else if (mk.type == 2) { cm->arucoId = mk.arucoId; cm->name = mk.name; shownMarker = -1;
         } else { const Scene::Marker mm = makerMarker(); cm->type = mm.type; cm->barcode = mm.barcode; cm->preset = mm.preset; cm->letter = mm.letter; cm->picture = bring(mm.picture); cm->name = mk.name; shownMarker = -1; }
         say("Marker " + std::string(mk.name) + " is on " + cm->name);
     }
@@ -1617,7 +1647,7 @@ static void markerMaker() {
     // right: the printable marker
     ImGui::SameLine();
     ImGui::BeginChild("##mkr", ImVec2(0, 0), true);
-    const std::string key = std::to_string(mk.type) + "|" + std::to_string(mk.source) + "|" + mk.letters + "|" + mk.picture + "|" + std::to_string(mk.barcode) + "|" + std::to_string(mk.blocks.px.size() ? mk.blocks.px[600 * 4] + mk.blocks.px[100000] * 7 + mk.blocks.px[400000] * 13 : 0);
+    const std::string key = std::to_string(mk.arucoId) + "/" + std::to_string(proj.arucoDict) + "|" + std::to_string(mk.type) + "|" + std::to_string(mk.source) + "|" + mk.letters + "|" + mk.picture + "|" + std::to_string(mk.barcode) + "|" + std::to_string(mk.blocks.px.size() ? mk.blocks.px[600 * 4] + mk.blocks.px[100000] * 7 + mk.blocks.px[400000] * 13 : 0);
     if (key != mk.shownKey || !mk.tex) { mk.shownKey = key; showImage(mk.tex, makerPrintable(512)); }
     const ImVec2 av = ImGui::GetContentRegionAvail();
     const float side = std::max(64.0f, std::min(av.x, av.y));
@@ -2208,6 +2238,15 @@ static void markerInspector(Scene::Marker& m) {
         labelled("Looks down"); ImGui::SliderFloat("##wt", &m.webcamTilt, 10, 90, "%.0f\xc2\xb0"); tip("How far a webcam looks down at the table (phones use their own gravity)");
         labelled("Height"); ImGui::SliderFloat("##wh", &m.webcamHeight, 0.1f, 3, "%.2f m"); tip("The camera's height above the surface: sets the scale");
         labelled("Field of view"); ImGui::SliderFloat("##wf", &m.webcamFov, 30, 110, "%.0f\xc2\xb0"); tip("Across; most webcams 60-80");
+    }
+    if (proj.tracking == TRACK_ARUCO && section("ArUco Marker")) {
+        labelled("Number"); ImGui::SliderInt("##aid", &m.arucoId, 0, Markers::arucoCount(proj.arucoDict) - 1);
+        ImGui::TextDisabled("Dictionary %s (Edit > Project Settings). Each number is its own anchor;\nmany can be on the table at once. 1 unit = the marker's black square.", Markers::arucoName(proj.arucoDict));
+        if (ImGui::Button("Marker Maker...", ImVec2(-1, 0))) showMaker = true;
+        if (ImGui::Button("Save the printable marker...", ImVec2(-1, 0))) {
+            const std::string f = saveDialog(L"PNG picture\0*.png\0\0", L"png", m.name + ".png");
+            if (!f.empty()) say(Markers::savePng(f, printable(m, 1024)) ? "Saved " + fs::u8path(f).filename().u8string() + ": print it at 100%" : "Couldn't save it");
+        }
     }
     if (proj.tracking == TRACK_MARKERS && section("AR Marker")) {
         labelled("Type");
@@ -3071,6 +3110,7 @@ static void projectSettings() {
         {TRACK_IMAGES, "Images", "Any photo, poster, painting or book cover, as it is. Detailed pictures with corners track best.", "MindAR", true},
         {TRACK_FACES, "Faces", "The player's face: masks, glasses, hats, face filters; scripts can read expressions.", "MindAR face", true},
         {TRACK_SURFACES, "Surfaces", "Floors, tables and walls (plane detection): things placed on real surfaces, routes to walk and follow (indoor navigation). Phones with ARCore, in Chrome.", "WebXR", true},
+        {TRACK_ARUCO, "ArUco", "OpenCV's square markers (4x4, 5x5, 6x6): many at once, fast and steady, each its own anchor; printed from here. The markers of OpenCV and robotics projects.", "OpenCV.js", true},
         {TRACK_HANDS, "Hands", "The player's hand: things on the palm or the fingertips.", "coming", false},
     };
     for (const Opt& o : opts) {
@@ -3082,6 +3122,11 @@ static void projectSettings() {
         ImGui::EndDisabled();
         ImGui::SameLine(110); ImGui::PushTextWrapPos(ImGui::GetContentRegionMax().x);
         ImGui::TextDisabled("%s  (%s)", o.what, o.how); ImGui::PopTextWrapPos();
+    }
+    if (proj.tracking == TRACK_ARUCO) {
+        const char* dicts[] = {"4x4 (50 markers): biggest cells, seen furthest", "5x5 (100 markers)", "6x6 (250 markers)", "The original ArUco (1024)"};
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::Combo("##adict", &proj.arucoDict, dicts, 4)) { beginEdit(); shownMarker = -1; }
     }
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     ImGui::PushFont(boldFont); ImGui::TextUnformatted("Location"); ImGui::PopFont();

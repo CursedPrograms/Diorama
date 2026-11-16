@@ -1630,5 +1630,101 @@
     });
   }
 
-  window.Diorama = { say: say, start: startMarkers, startMarkers: startMarkers, startMind: startMind, startSurfaces: startSurfaces, ArNav: ArNav };
+
+  // ---------- ArUco markers (OpenCV's square markers), with any camera: each number its own anchor ----------
+  function startAruco(lib) {
+    splash();
+    if (fromDisk()) return;
+    var THREE = lib.THREE;
+    say('Loading the scene...');
+    withScene(function (proj) {
+      document.title = proj.title;
+      var C = core(THREE, lib.GLTFLoader);
+      C.graphics(proj);
+      var renderer = makeRenderer(lib, { antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio || 1);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.domElement.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh';
+      document.body.insertBefore(renderer.domElement, document.body.firstChild);
+      C.setupRenderer(renderer);
+      var scene = new THREE.Scene(), camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 200);
+      scene.add(camera);
+      C.runtime.setCamera(camera, renderer.domElement);
+      C.environment(scene, proj.markers[0] && proj.markers[0].ambient);
+      var nodes = [], players = [];
+      // each anchor on its marker: a holder the tracker moves, the anchor's world in it
+      var anchors = proj.markers.map(function (m) {
+        var holder = new THREE.Group(); holder.matrixAutoUpdate = false; holder.visible = false;
+        holder.add(C.anchorWorld(m, nodes, players)); scene.add(holder);
+        return { m: m, holder: holder, seen: -1, was: false };
+      });
+      C.cameraRig(proj, camera, nodes, players);
+      var camSet = C.cameraSettings(proj, camera, { ownProjection: true });
+      var fovDeg = (proj.markers[0] && proj.markers[0].webcamFov) || 60;
+      var composer = null;
+      say('Starting the camera...');
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }).then(function (stream) {
+        var video = document.createElement('video');
+        video.playsInline = true; video.muted = true; video.srcObject = stream; video.setAttribute('playsinline', '');
+        video.play();
+        var bg = new THREE.VideoTexture(video); if (THREE.SRGBColorSpace) bg.colorSpace = THREE.SRGBColorSpace;
+        if (!camSet.solid) scene.background = bg; else scene.background = camSet.colour;
+        // the camera's picture fills the screen (cropped, like object-fit: cover); the 3D camera sees just that part
+        var fit = function () {
+          var vw = video.videoWidth || 1280, vh = video.videoHeight || 720, sw = window.innerWidth, sh = window.innerHeight;
+          renderer.setSize(sw, sh); if (composer) composer.setSize(sw, sh);
+          var va = vw / vh, sa = sw / sh;
+          if (sa > va) { bg.repeat.set(1, va / sa); bg.offset.set(0, (1 - va / sa) / 2); } else { bg.repeat.set(sa / va, 1); bg.offset.set((1 - sa / va) / 2, 0); }
+          var vfov = 2 * Math.atan(Math.tan(fovDeg * Math.PI / 360) / va);                 // the video's own, up and down
+          var shown = sa > va ? va / sa : 1;                                                    // how much of its height shows
+          camera.fov = 2 * Math.atan(Math.tan(vfov / 2) * shown) * 180 / Math.PI;
+          camera.aspect = sa; camera.updateProjectionMatrix();
+        };
+        video.addEventListener('loadedmetadata', fit); window.addEventListener('resize', fit);
+        C.makeComposer(renderer, scene, camera, true).then(function (c) { composer = c; if (c) fit(); });
+        var tracker = null;
+        say('Loading the marker finder...');
+        loadScripts(['lib/opencv/opencv.js', 'lib/arucotrack.js'], function () {
+          var ready = function (cv) {
+            var calib = null; try { calib = JSON.parse(localStorage.getItem('dio-camera') || 'null'); } catch (e) {}
+            tracker = new window.ArucoTrack.Tracker(cv, { dict: lib.dict || 0, fovDeg: fovDeg, K: calib && calib.K, dist: calib && calib.dist });
+            say('Point the camera at an ArUco marker.');
+          };
+          var wait = setInterval(function () {
+            if (typeof window.cv === 'undefined') return;
+            if (window.cv instanceof Promise) { clearInterval(wait); window.cv.then(ready); }
+            else if (window.cv.Mat) { clearInterval(wait); ready(window.cv); }
+          }, 100);
+        });
+        var F = new THREE.Matrix4().makeScale(1, -1, -1), M = new THREE.Matrix4().set(1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1), P = new THREE.Matrix4();
+        var clock = new THREE.Clock(), t = 0, lastLine = '';
+        renderer.setAnimationLoop(function () {
+          var dt = Math.min(0.1, clock.getDelta()); t += dt;
+          if (tracker && video.readyState >= 2) {
+            var found = tracker.detect(video);
+            camera.updateMatrixWorld();
+            anchors.forEach(function (a) {
+              var f = null; found.forEach(function (q) { if (q.id === (a.m.arucoId || 0)) f = q; });
+              if (f) {   // OpenCV's camera turned into three's; the marker's axes into the anchor's (Y up out of it, its top -Z)
+                var R = f.R, tv = f.t;
+                P.set(R[0], R[1], R[2], tv[0], R[3], R[4], R[5], tv[1], R[6], R[7], R[8], tv[2], 0, 0, 0, 1);
+                a.holder.matrix.copy(camera.matrixWorld).multiply(F).multiply(P).multiply(M);
+                a.holder.matrixWorldNeedsUpdate = true; a.holder.visible = true; a.seen = t;
+              } else if (t - a.seen > 0.35) a.holder.visible = false;   // tracking flickers: a moment where it last was
+              if (a.was !== a.holder.visible) { a.was = a.holder.visible; C.runtime.seen(a.m.name, a.was); }
+            });
+            var names = anchors.filter(function (a) { return a.holder.visible; }).map(function (a) { return a.m.name; });
+            var line = names.length ? 'Found: ' + names.join(', ') : 'Point the camera at an ArUco marker.';
+            if (line !== lastLine) { say(line); lastLine = line; }
+          }
+          C.runtime.update(dt, t);
+          nodes.forEach(function (n) { if (!n.userData.go || !n.userData.go.dead) C.animate(n, t); });
+          players.forEach(function (pl) { pl.update(dt); });
+          if (composer) composer.render(); else renderer.render(scene, camera);
+        });
+      }).catch(function (e) { say('The camera didn\'t start: ' + (e && (e.message || e.name) || e)); });
+    });
+  }
+
+  window.Diorama = { say: say, start: startMarkers, startMarkers: startMarkers, startMind: startMind, startSurfaces: startSurfaces, startAruco: startAruco, ArNav: ArNav };
 })();

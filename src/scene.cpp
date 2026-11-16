@@ -14,7 +14,7 @@ namespace Scene {
 
 const char* KIND_NAMES[KIND_COUNT] = {"Empty", "Plane", "Cube", "Sphere", "Capsule", "Cylinder", "Quad", "Picture", "Model", "Sprites", "Light rays", "Words"};
 const char* ANIM_NAMES[ANIM_COUNT] = {"Still", "Float", "Spin", "Sway", "Pulse"};
-const char* TRACKING_NAMES[TRACKING_COUNT] = {"markers", "images", "faces", "surfaces", "hands"};
+const char* TRACKING_NAMES[TRACKING_COUNT] = {"markers", "images", "faces", "surfaces", "aruco", "hands"};
 const FacePoint FACE_POINTS[] = {
     {"Nose tip", 1, {0, 0.05f, -0.62f}}, {"Between the eyes", 168, {0, -0.12f, -0.5f}}, {"Forehead", 10, {0, -0.42f, -0.45f}},
     {"Chin", 152, {0, 0.62f, -0.42f}}, {"Mouth", 13, {0, 0.3f, -0.55f}}, {"Left eye", 159, {0.17f, -0.12f, -0.48f}},
@@ -117,6 +117,7 @@ static std::string markersJson(const std::vector<Marker>& list) {
         w.key("ambient"); w.out += arr(k.ambient, 3);
         w.key("sun"); w.out += arr(k.sun, 3);
         w.key("portalSize"); w.out += arr(k.portalSize, 2);
+        w.i("arucoId", k.arucoId);
         w.b("sunShadows", k.sunShadows).b("shadowCatcher", k.shadowCatcher);
         w.i("planeDetect", k.planeDetect).b("showPlanes", k.showPlanes).s("planePrefab", k.planePrefab).i("placement", k.placement);
         w.f("webcamTilt", k.webcamTilt).f("webcamHeight", k.webcamHeight).f("webcamFov", k.webcamFov).i("webcamSurface", k.webcamSurface);
@@ -186,6 +187,7 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
     readArr(mv, "ambient", k.ambient, 3); readArr(mv, "sun", k.sun, 3); readArr(mv, "portalSize", k.portalSize, 2);
     k.webcamTilt = (float)mv.num("webcamTilt", k.webcamTilt); k.webcamHeight = (float)mv.num("webcamHeight", k.webcamHeight); k.webcamFov = (float)mv.num("webcamFov", k.webcamFov); k.webcamSurface = (int)mv.num("webcamSurface", 0);
     k.planeDetect = (int)mv.num("planeDetect", 2);
+    k.arucoId = (int)mv.num("arucoId", 0);
     k.sunShadows = readBool(mv, "sunShadows", true); k.shadowCatcher = readBool(mv, "shadowCatcher", true); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
     readArr(mv, "planeColour", k.planeColour, 4);
     if (const Json::Value* os = mv.get("objects"))
@@ -254,7 +256,7 @@ std::string toJson(const Project& p) {
     std::string out = "{\n  \"diorama\": 1,\n  \"title\": " + Json::quote(p.title) + ",\n  \"tracking\": \"" + TRACKING_NAMES[p.tracking] +
                       "\",\n  \"gps\": " + (p.gps ? "true" : "false") + ",\n  \"nextId\": " + std::to_string(p.nextId) + ",\n  \"scene\": " + Json::quote(p.scene) + ",\n  \"scenes\": [";
     for (size_t i = 0; i < p.scenes.size(); ++i) out += (i ? ", " : "") + Json::quote(p.scenes[i]);
-    out += "],\n  \"platform\": " + Json::quote(p.platform) + ", \"windowsRuntime\": " + std::to_string(p.windowsRuntime) + ", \"renderer\": " + std::to_string(p.renderer) +
+    out += "],\n  \"platform\": " + Json::quote(p.platform) + ", \"windowsRuntime\": " + std::to_string(p.windowsRuntime) + ", \"arucoDict\": " + std::to_string(p.arucoDict) + ", \"renderer\": " + std::to_string(p.renderer) +
            ",\n  \"shadows\": " + (p.shadows ? "true" : "false") + ", \"shadowQuality\": " + std::to_string(p.shadowQuality) +
            ", \"bloom\": " + (p.bloom ? "true" : "false") + ", \"bloomStrength\": " + fnum(p.bloomStrength) + ", \"bloomThreshold\": " + fnum(p.bloomThreshold) +
            ", \"toneMapping\": " + std::to_string(p.toneMapping) + ", \"exposure\": " + fnum(p.exposure) +
@@ -284,7 +286,7 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
         if (!names.empty()) p.scenes = names;
     }
     p.scene = v.str("scene", p.scenes[0]);
-    p.platform = v.str("platform", "web"); p.windowsRuntime = (int)v.num("windowsRuntime", 0); p.renderer = (int)v.num("renderer", 0);
+    p.platform = v.str("platform", "web"); p.windowsRuntime = (int)v.num("windowsRuntime", 0); p.renderer = (int)v.num("renderer", 0); p.arucoDict = (int)v.num("arucoDict", 0);
     { const Json::Value* b = v.get("shadows"); p.shadows = !b || b->type != Json::Value::BOOL || b->b; }
     { const Json::Value* b = v.get("bloom"); p.bloom = !b || b->type != Json::Value::BOOL || b->b; }
     p.shadowQuality = (int)v.num("shadowQuality", 1); p.bloomStrength = (float)v.num("bloomStrength", 0.6); p.bloomThreshold = (float)v.num("bloomThreshold", 0.9);
