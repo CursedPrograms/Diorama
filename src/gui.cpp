@@ -841,7 +841,10 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
         if (!proj.icon.empty() && Markers::load(proj.icon, ic)) Markers::savePng((o / "icon.png").u8string(), Markers::resized(ic, 512, 512));
         else fs::copy_file(fs::u8path(exeDir) / "assets" / "logo.png", o / "icon.png", fs::copy_options::overwrite_existing, ec);
     }
-    if (si == 0) { std::ofstream f(o / "scene.json", std::ios::binary); f << Scene::toJson(b); if (!f) { err = "Couldn't write scene.json"; return false; } }
+    {   // the scene as data: scene.json (scene 0), scene-<n>.json (the native player's loadScene)
+        const std::string sj = si == 0 ? std::string("scene.json") : "scene-" + std::to_string(si) + ".json";
+        std::ofstream f(o / sj, std::ios::binary); f << Scene::toJson(b); if (!f) { err = "Couldn't write " + sj; return false; }
+    }
     {   // the scene and its scripts, inside the page (so they need no loading)
         std::ofstream f(o / fs::u8path(jsName), std::ios::binary);
         f << "// the scene and its scripts, inside the page (so they need no loading)\n";
@@ -870,6 +873,10 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
                 if (!loadPrefab(e.path().u8string(), objs)) continue;
                 for (auto& o : objs) { take(o.file); take(o.audioFile); take(o.particleFile); take(o.videoFile); take(o.uiFile); take(o.canvasCss); for (auto& sc : o.scripts) take(sc.file); }
                 Project tmp; Scene::Marker k; k.objects = objs; tmp.markers.push_back(k);
+                {   // and as a file (the native player's spawn("Name"))
+                    std::error_code pd; fs::create_directories(o / "prefabs", pd);
+                    std::ofstream(o / "prefabs" / fs::u8path(e.path().stem().u8string() + ".prefab"), std::ios::binary) << Scene::toJson(tmp);
+                }
                 f << (firstP ? "\n  " : ",\n  ") << Json::quote(e.path().stem().u8string()) << ": (" << Scene::toJson(tmp) << ").markers[0].objects";
                 firstP = false;
             }
@@ -1047,9 +1054,13 @@ static bool setExeIcon(const std::string& exe, const Markers::Image& pic) {
 #endif
 static bool buildWindows(const std::string& out, std::string& err) {
 #ifdef _WIN32
-    const fs::path o = fs::u8path(out), player = fs::u8path(exeDir) / "player" / "DioramaGame.exe";
+    const bool native = proj.windowsRuntime == 1;
+    const fs::path o = fs::u8path(out), playerDir = fs::u8path(exeDir) / "player", player = playerDir / (native ? "DioramaNative.exe" : "DioramaGame.exe");
     std::error_code ec;
-    if (!fs::exists(player, ec)) { err = "The Windows player (player/DioramaGame.exe) isn't beside Diorama: reinstall Diorama"; return false; }
+    if (!fs::exists(player, ec)) { err = "The Windows player (player/" + player.filename().u8string() + ") isn't beside Diorama: reinstall Diorama"; return false; }
+    if (native && (proj.tracking == TRACK_IMAGES || proj.tracking == TRACK_FACES || proj.tracking == TRACK_HANDS)) {
+        err = "The C++ runtime tracks markers, ArUco markers and surfaces: pick JavaScript for this game (Build Settings > Windows)"; return false;
+    }
     if (!buildGame((o / "game").u8string(), err)) return false;
     std::string name = proj.title; for (auto& c : name) if (strchr("\\/:*?\"<>|", c)) c = '_';
     if (name.empty()) name = "Game";
@@ -1058,6 +1069,19 @@ static bool buildWindows(const std::string& out, std::string& err) {
     if (ec) { err = "Couldn't write " + exe.u8string() + " (is the game running?)"; return false; }
     { Markers::Image icon; if (Markers::load((o / "game" / "icon.png").u8string(), icon)) setExeIcon(exe.u8string(), icon); }
     std::ofstream(o / "game" / "game.json", std::ios::binary) << "{\"title\": " << Json::quote(proj.title) << ", \"made-with\": \"Diorama\"}\n";
+    if (native) {   // Diorama's own player: its renderer and the C++ trackers (SDL2, OpenCV beside it)
+        for (const char* dll : {"SDL2.dll", "opencv_world4100.dll"}) {
+            fs::copy_file(playerDir / dll, o / dll, fs::copy_options::overwrite_existing, ec);
+            if (ec) { err = std::string("Couldn't copy ") + dll + " (is the game running?)"; return false; }
+        }
+        std::ofstream(o / "README.txt", std::ios::binary) <<
+            proj.title << ", made with Diorama.\r\n\r\n"
+            "Double-click " << name << ".exe to play (keep the game folder and the DLLs beside it). It uses the webcam:\r\n" <<
+            (proj.tracking == TRACK_SURFACES ? "point it at a table or the floor and press Space (or click) to lock.\r\n"
+                                             : "print game\\markers.png at 100% and hold a marker up to the camera.\r\n") <<
+            "F11: full screen. Esc: quit. Runs on Diorama's own renderer (OpenGL 3.3).\r\n";
+        return true;
+    }
     std::ofstream(o / "README.txt", std::ios::binary) <<
         proj.title << ", made with Diorama.\r\n\r\n"
         "Double-click " << name << ".exe to play (keep the game folder beside it). It uses the webcam: print\r\n"
@@ -1278,8 +1302,7 @@ static void startBuild(const std::string& platform, bool run) {
         std::error_code ec; fs::create_directories(fs::u8path(out), ec);
         if (pf == "web") ok = buildGame(out, err);
         else if (pf == "windows") {
-            if (proj.windowsRuntime == 1) err = "The C++ runtime isn't ready yet: pick JavaScript for Windows (Build Settings)";
-            else ok = buildWindows(out, err);
+            ok = buildWindows(out, err);
         }
         else if (pf == "linux") ok = buildLinux(out, false, err);
         else if (pf == "pi") ok = buildLinux(out, true, err);
@@ -1377,7 +1400,8 @@ static void buildSettings() {
     ImGui::SeparatorText("Runtime");
     if (shownPlatform == "windows") {
         ImGui::RadioButton("JavaScript (WebView2)", &proj.windowsRuntime, 0); tip("The game as on the web, in Windows' own browser engine: everything works");
-        ImGui::BeginDisabled(); ImGui::RadioButton("C++ (Diorama's native player)  - coming", &proj.windowsRuntime, 1); ImGui::EndDisabled();
+        ImGui::RadioButton("C++ (Diorama's native player)", &proj.windowsRuntime, 1);
+        tip("Diorama's own renderer and C++ trackers: the PC's power (PBR, many lights, soft shadows, HDR, bloom).\nMarkers, ArUco and Surfaces; scripts run as on the web.");
         ImGui::TextDisabled("C++: Diorama's own renderer with native ARToolKit and the PC's full power\n(more lights, shadows); markers first.");
         ImGui::Checkbox("Start full screen", &proj.fullscreen);
     } else if (shownPlatform == "android") {

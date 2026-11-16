@@ -4,3 +4,4 @@ external/SDL2-*/
 external/imgui-*/
 *.log
 external/webview2/
+external/quickjs/

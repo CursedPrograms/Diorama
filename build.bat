@@ -19,6 +19,9 @@ copy /y %BUILD_DIR%\Release\Diorama.exe dist\Diorama\ >nul || goto :error
 copy /y %BUILD_DIR%\Release\SDL2.dll dist\Diorama\ >nul || goto :error
 xcopy /e /i /q /y %BUILD_DIR%\Release\assets dist\Diorama\assets >nul
 xcopy /e /i /q /y %BUILD_DIR%\Release\templates dist\Diorama\templates >nul
+rem the players Windows builds are made from: WebView2 (JavaScript) and Diorama's native one (C++, with SDL2 and OpenCV)
+mkdir dist\Diorama\player
+for %%f in (DioramaGame.exe DioramaNative.exe SDL2.dll opencv_world4100.dll) do if exist %BUILD_DIR%\Release\player\%%f copy /y %BUILD_DIR%\Release\player\%%f dist\Diorama\player\ >nul
 for %%f in (README.md LICENSE NOTICE install.bat install.ps1) do if exist %%f copy /y %%f dist\Diorama\ >nul
 if exist dist\Diorama-win64.zip del dist\Diorama-win64.zip
 "%SystemRoot%\System32\tar.exe" -a -c -f dist\Diorama-win64.zip -C dist Diorama || goto :error

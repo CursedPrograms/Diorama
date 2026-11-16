@@ -189,6 +189,7 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
     k.webcamTilt = (float)mv.num("webcamTilt", k.webcamTilt); k.webcamHeight = (float)mv.num("webcamHeight", k.webcamHeight); k.webcamFov = (float)mv.num("webcamFov", k.webcamFov); k.webcamSurface = (int)mv.num("webcamSurface", 0);
     k.planeDetect = (int)mv.num("planeDetect", 2);
     k.arucoId = (int)mv.num("arucoId", 0);
+    k.patt = mv.str("patt", "");   // a build's pattern file (the native player reads it)
     k.sunShadows = readBool(mv, "sunShadows", true); k.shadowCatcher = readBool(mv, "shadowCatcher", true); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
     readArr(mv, "planeColour", k.planeColour, 4);
     if (const Json::Value* os = mv.get("objects"))

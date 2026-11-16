@@ -58,6 +58,8 @@ GLF(void, glRenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei))
 GLF(void, glFramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint))
 GLF(void, glGenerateMipmap, (GLenum))
 GLF(void, glActiveTexture, (GLenum))
+GLF(void, glBlendFuncSeparate, (GLenum, GLenum, GLenum, GLenum))
+GLF(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum))
 #undef GLF
 #define GL_FRAGMENT_SHADER 0x8B30
 #define GL_VERTEX_SHADER 0x8B31
@@ -71,6 +73,13 @@ GLF(void, glActiveTexture, (GLenum))
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #define GL_DEPTH24_STENCIL8 0x88F0
 #define GL_TEXTURE0 0x84C0
+#ifndef GL_READ_FRAMEBUFFER
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#endif
+#ifndef GL_BGR
+#define GL_BGR 0x80E0
+#endif
 #ifndef GL_CLIP_DISTANCE0
 #define GL_CLIP_DISTANCE0 0x3000
 #endif
@@ -133,10 +142,12 @@ static bool loadGL() {
     L(glGetUniformLocation) L(glUniformMatrix4fv) L(glUniform1i) L(glUniform1f) L(glUniform2f) L(glUniform3f) L(glUniform4f) L(glUniform4fv) L(glGenVertexArrays)
     L(glBindVertexArray) L(glGenBuffers) L(glBindBuffer) L(glBufferData) L(glEnableVertexAttribArray) L(glVertexAttribPointer)
     L(glGenFramebuffers) L(glBindFramebuffer) L(glFramebufferTexture2D) L(glGenRenderbuffers) L(glBindRenderbuffer)
-    L(glRenderbufferStorage) L(glFramebufferRenderbuffer) L(glGenerateMipmap) L(glActiveTexture)
+    L(glRenderbufferStorage) L(glFramebufferRenderbuffer) L(glGenerateMipmap) L(glActiveTexture) L(glBlendFuncSeparate) L(glBlitFramebuffer)
 #undef L
     return true;
 }
+// blending: colour as asked; alpha adds up what covers each pixel (the AR player shows the camera where nothing is)
+static void blendFn(GLenum src, GLenum dst) { glBlendFuncSeparate_(src, dst, GL_ONE, GL_ONE_MINUS_SRC_ALPHA); }
 static GLuint program(const char* vs, const char* fs) {
     auto sh = [](GLenum t, const char* src) { GLuint s = glCreateShader_(t); glShaderSource_(s, 1, &src, nullptr); glCompileShader_(s); return s; };
     GLuint p = glCreateProgram_();
@@ -148,6 +159,7 @@ static GLuint program(const char* vs, const char* fs) {
 static GLuint prog = 0, progLine = 0;
 static GLint uClip, uPick, uPickCol, uNL, uLPos, uLCol, uLDir; static GLint uMVP, uModel, uColour, uUseTex, uLit, uSunDir, uSun, uAmbient, uTex, uLineMVP, uLineColour;
 // PBR, shadows, HDR
+static GLint uCatcher = -1, uFinalBg = -1, uFinalUseBg = -1, uFinalBgRect = -1;
 static GLint uCamPos, uMetallic, uRough, uEmissive, uDepthOnly, uReceive, uSunShadow, uSunVP, uSunShadowOn, uSpotShadow[2], uSpotVP[2], uSpotIdx[2];
 static GLuint progBright = 0, progBlur = 0, progFinal = 0, emptyVao = 0;
 static GLint uBrightSrc, uBrightThr, uBlurSrc, uBlurDir, uFinalHdr, uFinalBloom, uFinalStrength, uFinalExposure, uFinalTone;
@@ -466,7 +478,7 @@ bool init(const std::string& dir) {
         "uniform vec3 sunDir, sun, ambient; uniform int pick; uniform vec3 pickCol; out vec4 o;\n"
         "uniform int nLights; uniform vec4 lPos[16], lCol[16], lDir[16];   // xyz + type; rgb (linear, with intensity) + range; direction + cos(cone)\n"
         "uniform vec3 camPos; uniform float metallic, roughness; uniform vec3 emissive; uniform int depthOnly, receive;\n"
-        "uniform sampler2DShadow sunShadow, spotShadow0, spotShadow1; uniform mat4 sunVP, spotVP0, spotVP1; uniform int sunShadowOn, spotIdx0, spotIdx1;\n"
+        "uniform sampler2DShadow sunShadow, spotShadow0, spotShadow1; uniform mat4 sunVP, spotVP0, spotVP1; uniform int sunShadowOn, spotIdx0, spotIdx1, catcher;\n"
         "vec3 lin(vec3 c){ return pow(max(c, vec3(0.0)), vec3(2.2)); }\n"
         "float shadowAt(sampler2DShadow sm, mat4 vp, vec3 w, float bias){\n"
         "  vec4 q = vp * vec4(w, 1.0); q.xyz /= q.w; q.xyz = q.xyz * 0.5 + 0.5;\n"
@@ -484,6 +496,7 @@ bool init(const std::string& dir) {
         "void main(){ vec4 c = colour; if (useTex == 1) c *= texture(tex, T); if (c.a < 0.01) discard;\n"
         "  if (depthOnly == 1) { if (c.a < 0.5) discard; o = vec4(0.0); return; }\n"
         "  if (pick == 1) { if (c.a < 0.35) discard; o = vec4(pickCol, 1); return; }\n"
+        "  if (catcher == 1) { float s = sunShadowOn == 1 ? shadowAt(sunShadow, sunVP, W, 0.0012) : 1.0; o = vec4(0.0, 0.0, 0.0, (1.0 - s) * 0.5); return; }\n"
         "  vec3 base = lin(c.rgb), rgb = base;\n"
         "  if (lit == 1) { vec3 n = normalize(N); if (!gl_FrontFacing) n = -n; vec3 v = normalize(camPos - W);\n"
         "    float r = clamp(roughness, 0.04, 1.0); vec3 F0 = mix(vec3(0.04), base, metallic);\n"
@@ -511,6 +524,7 @@ bool init(const std::string& dir) {
     uSpotShadow[0] = glGetUniformLocation_(prog, "spotShadow0"); uSpotShadow[1] = glGetUniformLocation_(prog, "spotShadow1");
     uSpotVP[0] = glGetUniformLocation_(prog, "spotVP0"); uSpotVP[1] = glGetUniformLocation_(prog, "spotVP1");
     uSpotIdx[0] = glGetUniformLocation_(prog, "spotIdx0"); uSpotIdx[1] = glGetUniformLocation_(prog, "spotIdx1");
+    uCatcher = glGetUniformLocation_(prog, "catcher");
     // the post pass: the bright parts, blurred (bloom), then exposure, tone mapping and gamma
     const char* fsq = "#version 330\nout vec2 uv; void main(){ vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2); uv = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }";
     progBright = program(fsq, "#version 330\nin vec2 uv; uniform sampler2D src; uniform float thr; out vec4 o;\n"
@@ -518,19 +532,22 @@ bool init(const std::string& dir) {
     progBlur = program(fsq, "#version 330\nin vec2 uv; uniform sampler2D src; uniform vec2 dir; out vec4 o;\n"
         "void main(){ float w[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216); vec3 c = texture(src, uv).rgb * w[0];\n"
         "  for (int i = 1; i < 5; ++i) { c += texture(src, uv + dir * float(i)).rgb * w[i]; c += texture(src, uv - dir * float(i)).rgb * w[i]; } o = vec4(c, 1.0); }");
-    progFinal = program(fsq, "#version 330\nin vec2 uv; uniform sampler2D hdr, bloom; uniform float strength, exposure; uniform int tone; out vec4 o;\n"
+    progFinal = program(fsq, "#version 330\nin vec2 uv; uniform sampler2D hdr, bloom, bgTex; uniform float strength, exposure; uniform int tone, useBg; uniform vec4 bgRect; out vec4 o;\n"
         "vec3 neutral(vec3 color){ const float sc = 0.8 - 0.04; const float desat = 0.15; float x = min(color.r, min(color.g, color.b));\n"
         "  float off = x < 0.08 ? x - 6.25 * x * x : 0.04; color -= off; float peak = max(color.r, max(color.g, color.b)); if (peak < sc) return color;\n"
         "  const float d = 1.0 - sc; float np = 1.0 - d * d / (peak + d - sc); color *= np / peak; float g = 1.0 - 1.0 / (desat * (peak - np) + 1.0);\n"
         "  return mix(color, vec3(np), g); }\n"
         "vec3 aces(vec3 x){ return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0); }\n"
-        "void main(){ vec3 c = texture(hdr, uv).rgb + texture(bloom, uv).rgb * strength; c *= exposure;\n"
+        "void main(){ vec4 h = texture(hdr, uv); vec3 c = h.rgb + texture(bloom, uv).rgb * strength; c *= exposure;\n"
         "  c = tone == 1 ? neutral(c) : tone == 2 ? aces(c) : clamp(c, 0.0, 1.0);\n"
-        "  o = vec4(pow(c, vec3(1.0 / 2.2)), 1.0); }");
+        "  vec3 g = pow(c, vec3(1.0 / 2.2));\n"
+        "  if (useBg == 1) g += texture(bgTex, bgRect.xy + vec2(uv.x, 1.0 - uv.y) * bgRect.zw).rgb * (1.0 - clamp(h.a, 0.0, 1.0));\n"
+        "  o = vec4(min(g, vec3(1.0)), 1.0); }");
     uBrightSrc = glGetUniformLocation_(progBright, "src"); uBrightThr = glGetUniformLocation_(progBright, "thr");
     uBlurSrc = glGetUniformLocation_(progBlur, "src"); uBlurDir = glGetUniformLocation_(progBlur, "dir");
     uFinalHdr = glGetUniformLocation_(progFinal, "hdr"); uFinalBloom = glGetUniformLocation_(progFinal, "bloom"); uFinalStrength = glGetUniformLocation_(progFinal, "strength");
     uFinalExposure = glGetUniformLocation_(progFinal, "exposure"); uFinalTone = glGetUniformLocation_(progFinal, "tone");
+    uFinalBg = glGetUniformLocation_(progFinal, "bgTex"); uFinalUseBg = glGetUniformLocation_(progFinal, "useBg"); uFinalBgRect = glGetUniformLocation_(progFinal, "bgRect");
     glGenVertexArrays_(1, &emptyVao);
     progLine = program(
         "#version 330\nlayout(location=0) in vec3 p; uniform mat4 mvp; void main(){ gl_Position = mvp * vec4(p,1); }",
@@ -663,7 +680,7 @@ static void drawObject(const Draw& d, float t) {
     if (o.occluder) glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     float om = 1; localOf(o, t, &om);
     float col[4] = {o.colour[0], o.colour[1], o.colour[2], o.colour[3] * om};
-    if (o.glow) glBlendFunc(GL_SRC_ALPHA, GL_ONE); else glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (o.glow) blendFn(GL_SRC_ALPHA, GL_ONE); else blendFn(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     // a Video Player shows its first frame (made by ffmpeg beside the video) where the look has no texture
     const GLuint tex = !o.file.empty() ? texture(o.file).id
                      : o.hasVideo && o.videoOn && !o.videoFile.empty() ? texture(o.videoFile + ".poster.png").id : 0;
@@ -726,7 +743,7 @@ static void drawObject(const Draw& d, float t) {
     }
     case RAYS: {
         glDepthMask(GL_FALSE);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        blendFn(GL_SRC_ALPHA, GL_ONE);
         for (int i = 0; i < o.rays; ++i) {
             const float a = (i - (o.rays - 1) / 2.0f) * 0.22f + 0.05f * std::sin(t * 0.7f + i);
             const float flick = 0.6f + 0.4f * std::sin(t * 1.3f + i * 2.1f);
@@ -739,7 +756,7 @@ static void drawObject(const Draw& d, float t) {
     }
     default: break;
     }
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    blendFn(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     if (o.occluder) glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 }
 
@@ -777,7 +794,7 @@ static void drawExtras(const Draw& d, float t) {
         const float T = n / std::max(0.01f, o.pRate);
         const GLuint tx = o.particleFile.empty() ? dotTex : texture(o.particleFile).id;
         glDepthMask(GL_FALSE);
-        glBlendFunc(GL_SRC_ALPHA, o.pGlow ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+        blendFn(GL_SRC_ALPHA, o.pGlow ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
         const float spread = o.pSpread * D2R;
         for (int k = 0; k < n; ++k) {
             const float since = t - k / o.pRate;
@@ -798,7 +815,7 @@ static void drawExtras(const Draw& d, float t) {
             draw(mPicture);
         }
         glDepthMask(GL_TRUE);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        blendFn(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     }
     if (o.hasPath && o.pathOn) {   // path marking: arrows every so far, and the route itself
         const auto pts = ArNav::fromFlat(o.pathPoints);
@@ -862,6 +879,7 @@ static std::map<int, std::pair<M4, M4>> lastWorld;   // id -> (world, parent wor
 static std::vector<std::pair<int, std::pair<float, float>>> screenCentres;   // id, its centre on screen (for clicks)
 
 // the HDR picture into the one shown: the bright parts blurred and added (bloom), exposure, tone mapping, gamma
+static GLuint bgTexture = 0; static float bgRectV[4] = {0, 0, 1, 1};   // the AR player's camera picture (0: none)
 static void finish(const Project& p, int w, int h) {
     glDisable(GL_DEPTH_TEST); glDisable(GL_BLEND); glDisable(GL_STENCIL_TEST);
     glBindVertexArray_(emptyVao);
@@ -889,11 +907,22 @@ static void finish(const Project& p, int w, int h) {
     glUniform1f_(uFinalStrength, bloom ? p.bloomStrength : 0.0f); glUniform1f_(uFinalExposure, p.exposure); glUniform1i_(uFinalTone, p.toneMapping);
     glActiveTexture_(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, hdrTex);
     glActiveTexture_(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, bloomTex[0]);
+    glUniform1i_(uFinalBg, 2); glUniform1i_(uFinalUseBg, bgTexture ? 1 : 0); glUniform4f_(uFinalBgRect, bgRectV[0], bgRectV[1], bgRectV[2], bgRectV[3]);
+    glActiveTexture_(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, bgTexture);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glActiveTexture_(GL_TEXTURE0);
     glBindFramebuffer_(GL_FRAMEBUFFER, 0);
     glEnable(GL_DEPTH_TEST); glEnable(GL_BLEND);
     glUseProgram_(prog);
+}
+// the AR player's pass: this anchor (the view: its pose), the camera's objects with the first
+static bool arPass = false, arCamera = false; static const Marker* arMarker = nullptr;
+static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, int& picked, float t);
+static M4 rigidInverse(const M4& a) {   // a rotation and a move, undone
+    M4 r = ident();
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) r.m[j * 4 + i] = a.m[i * 4 + j];
+    for (int i = 0; i < 3; ++i) r.m[12 + i] = -(r.m[i] * a.m[12] + r.m[4 + i] * a.m[13] + r.m[8 + i] * a.m[14]);
+    return r;
 }
 unsigned render(const Project& p, int mi, int selected, int w, int h, bool hovered, int& picked) {
     picked = -1;
@@ -920,13 +949,17 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     glViewport(0, 0, w, h);
     glClearColor(0.10f, 0.10f, 0.10f, 1); glClearStencil(0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST); glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_BLEND); blendFn(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_CULL_FACE);
 
     eye[0] = target[0] + dist * std::cos(pitch) * std::sin(yaw); eye[1] = target[1] + dist * std::sin(pitch); eye[2] = target[2] + dist * std::cos(pitch) * std::cos(yaw);
     viewM = lookAt(eye, target);
     viewProj = mul(perspective(0.8f, (float)w / h, 0.02f, 100), viewM);
+    bgTexture = 0;
+    return scenePass(p, mi, selected, w, h, picked, t);
+}
 
-    const Marker* m = mi >= 0 && mi < (int)p.markers.size() ? &p.markers[mi] : nullptr;
+static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, int& picked, float t) {
+    const Marker* m = arPass ? arMarker : mi >= 0 && mi < (int)p.markers.size() ? &p.markers[mi] : nullptr;
     curMarker = m;
     glUseProgram_(prog);
     glUniform1i_(uTex, 0); glUniform4f_(uClip, 0, 0, 0, 1); glUniform1i_(uPick, 0);
@@ -946,7 +979,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     // the objects: world matrices down the hierarchy; opaque first, then see-through ones far to near
     std::vector<Draw> draws;
     screenCentres.clear();
-    lastWorld.clear();
+    if (!arPass) lastWorld.clear();   // (the AR player: once a frame, every anchor's kept)
     float lp[64] = {0}, lc[64] = {0}, ld[64] = {0}; int nl = 0; int spotOf[2] = {-1, -1}; M4 spotVPm[2]; int nSpots = 0;
     // where the phone would be (the Main Camera, in the editor): above the marker, before the face, standing in the room
     const bool cameraSel = mi == -2;
@@ -961,6 +994,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
         camWorld = ident();
         for (int k = 0; k < 3; ++k) { camWorld.m[k] = r[k]; camWorld.m[4 + k] = u[k]; camWorld.m[8 + k] = -f[k]; camWorld.m[12 + k] = eyeP[k]; }
     }
+    if (arPass) camWorld = rigidInverse(viewM);   // the real camera
     auto placeAll = [&](const Marker& mk, const M4& base) {
         std::map<int, M4> worldOf;
         for (const Object& o : mk.objects) {
@@ -1011,7 +1045,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
         }
     };
     if (m) placeAll(*m, ident());
-    placeAll(p.camera, camWorld);   // what rides with the phone
+    if (!arPass || arCamera) placeAll(p.camera, camWorld);   // what rides with the phone
 
     // shadows: the sun's view (and spot lights') of what casts them, into depth maps first
     bool sunShadow = false;
@@ -1066,7 +1100,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
         glStencilFunc(GL_NOTEQUAL, 1, 0xff); glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
     }
     // the desk and the printed marker (the marker's black square is 1 across; the print has a white margin)
-    if (anchorMode == 3) {   // Surfaces: the room, then what the phone would find in it
+    if (anchorMode == 3 && !arPass) {   // Surfaces: the room, then what the phone would find in it
         makeSimPlanes();
         const float floorC[4] = {0.42f, 0.4f, 0.38f, 1}, tableC[4] = {0.36f, 0.25f, 0.17f, 1}, wallC[4] = {0.55f, 0.55f, 0.57f, 1};
         if (lk.desk) {
@@ -1097,7 +1131,14 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
         const float c[4] = {1, 1, 1, 1};
         setCommon(mul(translate(0, -0.002f, 0), scale(1.2f, 1, 1.2f)), c, deskTex, true); draw(mPlane);
     }
-    if (anchorMode == 2) {   // a face: a plain head, the anchor point on it (the face looks along +Z, at the viewer)
+    if (arPass) {   // the real table or floor: only the shadows on it
+        if (m && m->shadowCatcher && sunShadow) {
+            const float c[4] = {1, 1, 1, 1};
+            glDepthMask(GL_FALSE); glUniform1i_(uCatcher, 1);
+            setCommon(scale(anchorMode == 3 ? 4.0f : 1.6f, 1, anchorMode == 3 ? 4.0f : 1.6f), c, 0, true); draw(mPlane);
+            glUniform1i_(uCatcher, 0); glDepthMask(GL_TRUE);
+        }
+    } else if (anchorMode == 2) {   // a face: a plain head, the anchor point on it (the face looks along +Z, at the viewer)
         const float c[4] = {0.62f, 0.6f, 0.6f, 1};
         setCommon(mul(translate(headAt[0], headAt[1], headAt[2]), scale(1.0f, 1.3f, 1.15f)), c, 0, true); draw(mSphere);
         const float n[4] = {0.55f, 0.53f, 0.53f, 1};   // a nose, so it's clear which way it faces
@@ -1134,7 +1175,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     curMat = Mat();
     glDisable(GL_CLIP_DISTANCE0); glUniform4f_(uClip, 0, 0, 0, 1);
     glDisable(GL_STENCIL_TEST);
-    if (lk.gizmo) {   // the Main Camera: a phone's view (portrait), from where it'd be held
+    if (lk.gizmo && !arPass) {   // the Main Camera: a phone's view (portrait), from where it'd be held
         const float th = std::tan(p.camFov * 0.5f * D2R), d = 0.22f, hh = th * d, hw = hh * 9.0f / 16.0f;
         const float c[4] = {cameraSel ? 0.2f : 0.85f, cameraSel ? 0.66f : 0.85f, cameraSel ? 0.89f : 0.85f, 1};
         const float local[5][3] = {{0, 0, 0}, {-hw, -hh, -d}, {hw, -hh, -d}, {hw, hh, -d}, {-hw, hh, -d}};
@@ -1201,9 +1242,61 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
             glEnable(GL_DEPTH_TEST);
         }
     }
-    finish(p, w, h);
+    if (!arPass) finish(p, w, h);
     (void)lastPicked;
     return fboTex;
+}
+
+unsigned renderAR(const Project& p, const std::vector<ArAnchor>& anchors, const float proj[16], unsigned bg, const float bgRect[4], int w, int h, float t) {
+    if (w < 8 || h < 8) return 0;
+    ensureTarget(w, h);
+    glBindFramebuffer_(GL_FRAMEBUFFER, hdrFbo);
+    glViewport(0, 0, w, h);
+    glClearColor(0, 0, 0, 0); glClearStencil(0);   // nothing yet: the camera's picture shows everywhere
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_BLEND); blendFn(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_CULL_FACE);
+    M4 P; std::memcpy(P.m, proj, sizeof P.m);
+    lastWorld.clear();
+    arPass = true;
+    int picked = -1;
+    auto pass = [&](const Marker* mk, const M4& view, bool withCamera) {
+        viewM = view; viewProj = mul(P, view);
+        const M4 cw = rigidInverse(view); eye[0] = cw.m[12]; eye[1] = cw.m[13]; eye[2] = cw.m[14];
+        arMarker = mk; arCamera = withCamera;
+        glClear(GL_STENCIL_BUFFER_BIT);
+        scenePass(p, -1, -1, w, h, picked, t);
+        glBindFramebuffer_(GL_FRAMEBUFFER, hdrFbo); glViewport(0, 0, w, h);
+    };
+    bool first = true;
+    for (const ArAnchor& a : anchors) {
+        if (a.marker < 0 || a.marker >= (int)p.markers.size()) continue;
+        M4 v; std::memcpy(v.m, a.view, sizeof v.m);
+        pass(&p.markers[a.marker], v, first); first = false;
+    }
+    if (first) pass(nullptr, ident(), true);   // no anchor: just what rides with the camera
+    arPass = false; arMarker = nullptr;
+    bgTexture = bg; for (int i = 0; i < 4; ++i) bgRectV[i] = bgRect[i];
+    finish(p, w, h);
+    bgTexture = 0;
+    return fboTex;
+}
+void present(int winW, int winH) {
+    glBindFramebuffer_(GL_READ_FRAMEBUFFER, fbo); glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);
+    glBlitFramebuffer_(0, 0, fbW, fbH, 0, 0, winW, winH, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+}
+unsigned uploadBGR(unsigned tex, const unsigned char* bgr, int w, int h) {
+    if (!tex) {
+        GLuint t = 0; glGenTextures(1, &t); tex = t;
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_BGR, GL_UNSIGNED_BYTE, bgr);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    return tex;
 }
 
 bool matrices(int id, float world[16], float parent[16]) {
