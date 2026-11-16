@@ -56,8 +56,13 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
   - **Images:** any photo, poster or page (MindAR).
   - **Faces:** things on the player's face (MindAR face).
   - **Surfaces:** floors, tables and walls. **Plane detection** on ARCore phones (WebXR), and on **any camera**
-    (PCs, phones without ARCore): point at a table or wall, Lock, and it's followed (CLAHE, ORB, RANSAC, solvePnP;
-    OpenCV.js in the game, OpenCV in C++). AR Foundation's workflow: AR Plane Manager, `planesChanged`, raycasts.
+    (PCs, phones without ARCore), as ARCore does it: the first plane **finds itself** when the view has some detail;
+    each plane keeps a **map** of points that only grows (a second view confirms each), so a place seen before is
+    found again; its **outline** is the map's convex hull and grows as more is seen; its **angle is measured** from
+    the camera's movement (the homography's normal, the one three views agree on), not guessed. **V** adds a wall,
+    **Space** a floor or table, **R** starts again; planes seen twice merge; planes stay in place relative to each
+    other. The plane look has a colour and an **opacity**. CLAHE, ORB, RANSAC, solvePnP: OpenCV.js in the game,
+    OpenCV in C++, the same steps. AR Foundation's workflow: AR Plane Manager, `planesChanged`, raycasts.
   - **ArUco:** OpenCV's square markers (4x4, 5x5, 6x6, the original): many at once, each number its own anchor,
     printed from the editor. Any camera (OpenCV.js in the game, OpenCV in C++, the same steps).
   - **Camera calibration** (Project Settings): print the ChArUco board, show it to the camera from 15 angles on the
@@ -68,6 +73,10 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
   4444 / PNG, GIF; or a green screen), Particle System, Line Renderer, Trail Renderer, Occluder, Animate, **AR Path**
   (route marking with arrows) and **AR Path Follower** (a guide that walks it), **Canvas UI** (Text, Button, Slider,
   Toggle, Image, Panel as real HTML/CSS), **Scripts**.
+- **Scenes from templates** (Window > Scenes > From Template): Place cubes (planes found, tap one, a cube lands),
+  Indoor navigation, A cube on a marker, The art gallery. **Delete** removes whatever's selected (objects, anchors).
+- **Frustum culling:** what the camera can't see isn't drawn (and what a light can't see isn't in its shadows); the
+  Profiler counts it.
 - **Windows like Unity's:** Hierarchy, Scene, Inspector, Project and Console dock, resize, tab and float; the layout is
   kept (Window > Reset Layout). **Window > Profiler**: frame time, the view's CPU and GPU time, draws, lights, memory.
 - **Materials** (Project window: right-click > Create > Material): Standard (PBR) or Unlit, colour, texture, metallic,
@@ -296,8 +305,19 @@ PC's camera, and the C++ twins of the game's trackers.
 - **The Canvas** is drawn over the camera, laid out as on the phone: Text, Button (with On Click), Slider, Toggle,
   Image, Panel.
 - The camera's **calibration** (Project Settings) sets its lens. F11 full screen, Esc quits.
+- **Planes:** found by themselves, outlined, measured, merged and kept in place (see Surfaces above); Space adds a
+  floor or table, V a wall, R starts again; a hint along the bottom says what to press.
+- **F8 records** the session: the camera's own frames (`game\recordings\<time>.avi`) and every key and click with its
+  time (`.jsonl`), to play it again exactly with `--video` and see what the tracking did.
 - For testing: `DioramaNative.exe <game folder> --video clip.mp4 --shot out.png --after 3` (plus `--lock-after 1`,
-  `--tap x,y,seconds`).
+  `--lock-wall-after 2`, `--tap x,y,seconds`, `--record`, `--no-auto`).
+
+### Coming: the room, remembered
+
+Planes on any camera are tracked one by one. Next is **SLAM** (stella_vslam, BSD) in the native player, built to
+WebAssembly for the browser too: one map of the whole room, the camera found again after a fast turn, the map saved
+and loaded. On it: planes fitted to the map, **occlusion** (real walls and things hiding virtual ones, and what's
+behind them not drawn), and **shared maps for multiplayer** (every player in the same room, the same places).
 
 ## Install
 
