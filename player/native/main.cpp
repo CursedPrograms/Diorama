@@ -23,6 +23,7 @@
 #include <SDL_opengl.h>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
+#include <ctime>
 #include <stb_image.h>
 #include <stb_image_write.h>
 
@@ -136,7 +137,7 @@ int main(int argc, char** argv) {
 #endif
     (void)argc; (void)argv;
     std::string gameArg, video, shot; int camIndex = 0; double after = 3; int winW = 1280, winH = 720;
-    double lockAfter = -1, lockVAfter = -1; std::vector<double> testTap; bool autoPlanes = true;   // the first plane finds itself (--no-auto: only by hand)   // tests: lock a surface after some seconds; a tap (x, y in -1..1, seconds)
+    double lockAfter = -1, lockVAfter = -1; std::vector<double> testTap; bool autoPlanes = true; bool recordAtStart = false;   // the first plane finds itself (--no-auto: only by hand)   // tests: lock a surface after some seconds; a tap (x, y in -1..1, seconds)
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
         const bool more = i + 1 < args.size();
@@ -147,6 +148,7 @@ int main(int argc, char** argv) {
         else if (a == "--lock-after" && more) lockAfter = std::atof(args[++i].c_str());
         else if (a == "--lock-wall-after" && more) lockVAfter = std::atof(args[++i].c_str());
         else if (a == "--no-auto") autoPlanes = false;
+        else if (a == "--record") recordAtStart = true;   // the camera's frames and what was pressed, from the start (F8 toggles it)
         else if (a == "--tap" && more) { std::stringstream ss(args[++i]); std::string part; while (std::getline(ss, part, ',')) testTap.push_back(std::atof(part.c_str())); }
         else if (a == "--size" && more) { const std::string v = args[++i]; const size_t x = v.find('x'); if (x != std::string::npos) { winW = std::atoi(v.c_str()); winH = std::atoi(v.c_str() + x + 1); } }
         else if (a.rfind("--", 0) != 0) gameArg = a;
@@ -281,6 +283,10 @@ int main(int argc, char** argv) {
     bool lockWanted = false, fullscreen = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0, planesSent = false;
     int downX = -1, downY = -1; bool tapped = false; float tapX = 0, tapY = 0; int tapPx = -1, tapPy = -1;
     std::string lastTitle, shownHint;
+    // F8: a recording of the session: the camera's own frames (recordings/<time>.avi) and every key and click with its
+    // time (recordings/<time>.jsonl), so a session can be played again exactly (--video) to see what the tracking did
+    cv::VideoWriter rec; std::ofstream recLog; double recT0 = 0; bool recWanted = recordAtStart;
+    auto recEvent = [&](const std::string& what, double t) { if (recLog) { recLog << "{\"t\": " << (t - recT0) << ", \"event\": \"" << what << "\"}\n"; recLog.flush(); } };
     bool running = true, shotDone = false, testTapDone = false;
     double last = clock();
     while (running) {
@@ -293,13 +299,16 @@ int main(int argc, char** argv) {
                 else if (e.key.keysym.sym == SDLK_SPACE || e.key.keysym.sym == SDLK_h) { lockWanted = true; lockKind = 0; }
                 else if (e.key.keysym.sym == SDLK_v) { lockWanted = true; lockKind = 1; }
                 else if (e.key.keysym.sym == SDLK_r && surfaces) { planes.clear(); planesSent = false; Scripts::planesChanged("{\"added\":[],\"updated\":[],\"removed\":[]}"); }
-                else if (e.key.keysym.sym == SDLK_F11) { fullscreen = !fullscreen; SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
+                else if (e.key.keysym.sym == SDLK_F8) recWanted = !recWanted;
+                if (e.key.keysym.sym == SDLK_SPACE || e.key.keysym.sym == SDLK_v || e.key.keysym.sym == SDLK_h || e.key.keysym.sym == SDLK_r) recEvent(std::string("key ") + SDL_GetKeyName(e.key.keysym.sym), clock());
+                if (e.key.keysym.sym == SDLK_F11) { fullscreen = !fullscreen; SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
             } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) { downX = e.button.x; downY = e.button.y; }
             else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
                 // a tap (not a drag, not on the UI): locks a surface first, then it's the game's
                 if (downX >= 0 && std::hypot(e.button.x - downX, e.button.y - downY) <= 8 && !Ui::wantsMouse()) {
                     if (surfaces && planes.empty()) { lockWanted = true; lockKind = 0; }
                     else { tapped = true; tapPx = e.button.x; tapPy = e.button.y; }
+                    { int ww, wh; SDL_GetWindowSize(win, &ww, &wh); recEvent("click " + std::to_string((float)e.button.x / ww * 2 - 1) + " " + std::to_string(1 - (float)e.button.y / wh * 2), clock()); }
                 }
                 downX = downY = -1;
             }
@@ -315,6 +324,15 @@ int main(int argc, char** argv) {
         if (cam.get(frame, frameNo)) {
             vidW = frame.cols; vidH = frame.rows;
             bgTex = Viewer::uploadBGR(bgTex, frame.data, frame.cols, frame.rows);
+            if (recWanted && !rec.isOpened()) {   // start: a file named by the time, beside the game
+                std::error_code rce; fs::create_directories("recordings", rce);
+                char name[64]; const std::time_t now = std::time(nullptr); std::strftime(name, sizeof name, "recordings/%Y-%m-%d_%H-%M-%S", std::localtime(&now));
+                rec.open(std::string(name) + ".avi", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 30, frame.size());
+                recLog.open(std::string(name) + ".jsonl", std::ios::binary); recT0 = t;
+                recLog << "{\"t\": 0, \"event\": \"start " << frame.cols << "x" << frame.rows << "\"}\n";
+            }
+            if (!recWanted && rec.isOpened()) { rec.release(); recLog.close(); }
+            if (rec.isOpened()) rec.write(frame);
             std::vector<bool> now(seen.size(), false);
             auto found = [&](int mi, const cv::Matx33d& R, const cv::Vec3d& tv, bool markerAxes) {
                 if (mi < 0 || mi >= (int)seen.size()) return;
@@ -450,6 +468,11 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame();
         std::vector<bool> on(seen.size()); for (size_t i = 0; i < seen.size(); ++i) on[i] = seen[i].on;
         Ui::draw(proj, on);
+        if (rec.isOpened()) {   // recording: REC in the corner
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            fg->AddCircleFilled(ImVec2(24, 24), 8, IM_COL32(0xe0, 0x30, 0x30, 255));
+            fg->AddText(ImGui::GetFont(), 22, ImVec2(38, 13), IM_COL32(255, 255, 255, 255), "REC (F8 stops)");
+        }
         if (surfaces) {   // what to press, along the bottom
             const ImVec2 ds = ImGui::GetIO().DisplaySize;
             ImDrawList* fg = ImGui::GetForegroundDrawList();
@@ -486,6 +509,7 @@ int main(int argc, char** argv) {
         }
         SDL_GL_SwapWindow(win);
     }
+    if (rec.isOpened()) { rec.release(); recLog.close(); }
     Scripts::stop();
     ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplSDL2_Shutdown(); ImGui::DestroyContext();
     SDL_GL_DeleteContext(gl);
