@@ -319,6 +319,17 @@ WebAssembly for the browser too: one map of the whole room, the camera found aga
 and loaded. On it: planes fitted to the map, **occlusion** (real walls and things hiding virtual ones, and what's
 behind them not drawn), and **shared maps for multiplayer** (every player in the same room, the same places).
 
+## Minimum requirements
+
+| | |
+| --- | --- |
+| **System** | Windows 10 or 11, 64-bit (Linux builds from source) |
+| **Processor** | any 64-bit processor |
+| **Memory** | 8 GB RAM |
+| **Graphics** | any graphics card with OpenGL 3.3 (2010 or newer) |
+| **Disk** | 200 MB, plus your projects |
+| **Other** | Microsoft Edge WebView2 (part of Windows 11); a webcam only to test AR live; Android builds need Java 17 and the Android SDK |
+
 ## Install
 
 Download `Diorama-win64.zip` from the [releases](https://github.com/CursedPrograms/Diorama/releases), unzip it and
