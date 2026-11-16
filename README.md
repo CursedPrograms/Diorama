@@ -187,6 +187,9 @@ After "Augmented Reality in Indoor Navigation" (IJSREM, 2023): plane detection, 
 5. **Play**: each marker brings its own model; several can be on the table at once. Scripts see them with
    `onFound` / `onLost` like any anchor.
 
+The native player reads the same markers: `src/markertrack.cpp` matches the same `.patt` files (ARToolKit's
+colour templates, pattRatio 0.5) and 3x3 barcodes; `tools\markertrack <video> --patt hiro.patt --want patt:0`.
+
 Tools for testing (built with OpenCV): `tools\arucotrack <video | camera number> --dict 0 --id 7 --size 0.2` prints
 each frame's pose; `--camera camera.json` uses a calibration.
 
@@ -278,7 +281,7 @@ run `install.bat`, or install it from the Atelier launcher.
 ## Build
 
 Needs Visual Studio 2022 (C++) and CMake; SDL2, Dear ImGui and Microsoft's WebView2 SDK are fetched once. OpenCV 4.10
-(optional: the native trackers and `tools/surfacetrack`, `tools/arucotrack`, `tools/calibrate`) is found from
+(optional: the native trackers and `tools/surfacetrack`, `tools/arucotrack`, `tools/markertrack`, `tools/calibrate`) is found from
 `OpenCV_DIR`. `tools/gen_aruco` rewrites `src/aruco_dicts.h`, OpenCV's ArUco dictionaries as bits, so the editor
 itself prints ArUco markers and the calibration board without OpenCV.
 
