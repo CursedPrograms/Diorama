@@ -10,7 +10,7 @@
 namespace Viewer {
 
 bool init(const std::string& exeDir);
-struct Look { bool desk = true, gizmo = true, animate = true; float time = 0; };
+struct Look { bool desk = true, gizmo = true, animate = true; float time = 0; bool view2D = false; };   // view2D: Unity's 2D button: straight down, no perspective
 Look& look();
 // draws marker m of the project (its printed marker from markerPicture: RGBA, top row first), selected: an object id
 // (-1 none); returns the texture (draw it with uv (0,1)-(1,0)). Clicking an object picks it: picked gets its id.

@@ -974,8 +974,14 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     if (w < 8 || h < 8) return 0;
     ImGuiIO& io = ImGui::GetIO();
     if (hovered) {
+        if (lk.view2D) {   // 2D: any drag pans (the view doesn't turn); world units per pixel from the zoom
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3) || ImGui::IsMouseDragging(ImGuiMouseButton_Right) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                const float k = dist * 2.0f / std::max(1, h);
+                target[0] -= io.MouseDelta.x * k; target[2] -= io.MouseDelta.y * k;
+            }
+        } else
         if (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3)) { yaw -= io.MouseDelta.x * 0.008f; pitch = std::clamp(pitch + io.MouseDelta.y * 0.008f, -0.2f, 1.55f); }
-        if (ImGui::IsMouseDragging(ImGuiMouseButton_Right) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        if (!lk.view2D && (ImGui::IsMouseDragging(ImGuiMouseButton_Right) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle))) {
             const float k = dist * 0.0015f;
             target[0] -= (std::cos(yaw) * io.MouseDelta.x) * k; target[2] -= (-std::sin(yaw) * io.MouseDelta.x) * k; target[1] += io.MouseDelta.y * k;
         }
@@ -999,6 +1005,18 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
     eye[0] = target[0] + dist * std::cos(pitch) * std::sin(yaw); eye[1] = target[1] + dist * std::sin(pitch); eye[2] = target[2] + dist * std::cos(pitch) * std::cos(yaw);
     viewM = lookAt(eye, target);
     viewProj = mul(perspective(0.8f, (float)w / h, 0.02f, 100), viewM);
+    if (lk.view2D) {   // 2D: looking straight down, orthographic; dist is half the view's height (world units)
+        eye[0] = target[0]; eye[1] = target[1] + 50; eye[2] = target[2] + 0.0001f;
+        M4 v = ident();   // camera: x right, y = -z (up the screen is away), looking down -y
+        v.m[0] = 1; v.m[4] = 0; v.m[8] = 0;
+        v.m[1] = 0; v.m[5] = 0; v.m[9] = -1;
+        v.m[2] = 0; v.m[6] = 1; v.m[10] = 0;
+        v.m[12] = -eye[0]; v.m[13] = eye[2]; v.m[14] = -eye[1];
+        viewM = v;
+        const float hh = dist * 0.5f, hw = hh * w / std::max(1, h), n = 0.1f, f = 200.0f;
+        M4 o = ident(); o.m[0] = 1 / hw; o.m[5] = 1 / hh; o.m[10] = -2 / (f - n); o.m[14] = -(f + n) / (f - n);
+        viewProj = mul(o, viewM);
+    }
     bgTexture = 0;
     // the Profiler: this view's CPU time, and the GPU's (the query from two frames ago is ready by now)
     const Uint64 c0 = SDL_GetPerformanceCounter();

@@ -3529,6 +3529,14 @@ static void sceneView() {
         if (on) ImGui::PopStyleColor();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", toolNames[k]);
     }
+    ImGui::SameLine(0, 14);
+    {   // Unity's 2D button: straight down and flat (a floor plan), or the 3D view
+        const bool on = lk.view2D;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_BLUE));
+        if (ImGui::Button("2D", ImVec2(32, 0))) lk.view2D = !lk.view2D;
+        if (on) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("2D: from straight above, no perspective (drag pans, wheel zooms). Again: 3D");
+    }
     ImGui::SameLine(0, 14); ImGui::Checkbox("Desk", &lk.desk);
     ImGui::SameLine(); ImGui::Checkbox("Axes", &lk.gizmo);
     ImGui::SameLine(); ImGui::Checkbox("UI", &showUI); if (ImGui::IsItemHovered()) ImGui::SetTooltip("The game's UI (Canvases) over the view, on a phone");
@@ -3795,7 +3803,8 @@ int main(int argc, char** argv) {
             Serve::start(args[i + 1], 8796); SDL_Delay((Uint32)(atof(args[i + 2].c_str()) * 1000)); return 0;
         }
         else if (args[i] == "--scenes") showScenes = true;
-        else if (args[i] == "--profiler") showProfiler = true;   // tests: the Profiler open
+        else if (args[i] == "--profiler") showProfiler = true;
+        else if (args[i] == "--2d") Viewer::look().view2D = true;   // tests: the 2D view   // tests: the Profiler open
         else if (args[i] == "--select-camera") selectArg = -100;   // tests: the Main Camera selected
         else if (args[i] == "--select-asset" && i + 1 < args.size()) { selAsset = args[++i]; selAssetMarker = 0; selAssetObject = -1; }   // tests: a file selected in the Project window
         else if (args[i] == "--add-video" && i + 1 < args.size()) addVideoArg = args[++i];   // tests: a video, as dropped on the first anchor   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
