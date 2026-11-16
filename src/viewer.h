@@ -36,6 +36,9 @@ struct ArAnchor { int marker; float view[16]; };   // which anchor (project.mark
 // (bg: a texture, top row first; bgRect: the part of it the window shows, x y w h in 0..1) under what was drawn
 unsigned renderAR(const Scene::Project& p, const std::vector<ArAnchor>& anchors, const float proj[16], unsigned bg, const float bgRect[4], int w, int h, float t);
 void present(int winW, int winH);                  // the last picture, onto the window
+// the planes found (AR Foundation's plane visualiser): each its view (plane -> camera), colour, and size (metres)
+struct ArPlane { float view[16]; float colour[4]; float size; };
+void setArPlanes(const std::vector<ArPlane>& planes);
 unsigned uploadBGR(unsigned tex, const unsigned char* bgr, int w, int h);   // a camera frame into a texture (0: a new one)
 // for the editing handles: an object's world matrix and its parent's, as last drawn (column-major); a point in the
 // world on the view (pixels from its top-left; false behind the camera); the camera's position; looking at a point

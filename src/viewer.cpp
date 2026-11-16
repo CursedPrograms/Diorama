@@ -1306,6 +1306,8 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
     return fboTex;
 }
 
+static std::vector<ArPlane> arPlanes;
+void setArPlanes(const std::vector<ArPlane>& planes) { arPlanes = planes; }
 unsigned renderCameraPreview(const Project& p, int mi, int w, int h) {
     if (w < 8 || h < 8) return 0;
     // the editor's view is kept as it was drawn (the handles and clicks use it)
@@ -1360,6 +1362,30 @@ unsigned renderAR(const Project& p, const std::vector<ArAnchor>& anchors, const 
         pass(&p.markers[a.marker], v, first); first = false;
     }
     if (first) pass(nullptr, ident(), true);   // no anchor: just what rides with the camera
+    // the planes found: a see-through fill, a grid every 25 cm and the edge, over the camera's picture
+    if (!arPlanes.empty()) {
+        glBindFramebuffer_(GL_FRAMEBUFFER, hdrFbo); glViewport(0, 0, w, h);
+        glUseProgram_(prog);
+        glUniform1i_(uNL, 0); glUniform1i_(uSunShadowOn, 0); glUniform1i_(uCatcher, 0);
+        glEnable(GL_BLEND); blendFn(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDepthMask(GL_FALSE); glEnable(GL_DEPTH_TEST);
+        for (const ArPlane& pl : arPlanes) {
+            M4 v; std::memcpy(v.m, pl.view, sizeof v.m);
+            viewM = v; viewProj = mul(P, v);
+            const float lin[4] = {std::pow(pl.colour[0], 2.2f), std::pow(pl.colour[1], 2.2f), std::pow(pl.colour[2], 2.2f), pl.colour[3] * 0.35f};
+            const float fill[4] = {pl.colour[0], pl.colour[1], pl.colour[2], pl.colour[3] * 0.18f};
+            (void)lin;
+            setCommon(mul(translate(0, 0.002f, 0), scale(pl.size, 1, pl.size)), fill, 0, false); draw(mPicture);
+            const float lineC[4] = {pl.colour[0], pl.colour[1], pl.colour[2], std::min(1.0f, pl.colour[3] * 1.6f)};
+            const float hs = pl.size / 2;
+            for (float g = -hs; g <= hs + 1e-4f; g += 0.25f) {   // the grid
+                const float a0[3] = {g, 0.004f, -hs}, a1[3] = {g, 0.004f, hs}, b0[3] = {-hs, 0.004f, g}, b1[3] = {hs, 0.004f, g};
+                segment(a0, a1, 0.0025f, lineC); segment(b0, b1, 0.0025f, lineC);
+            }
+            const float c[4][3] = {{-hs, 0.005f, -hs}, {hs, 0.005f, -hs}, {hs, 0.005f, hs}, {-hs, 0.005f, hs}};
+            for (int k = 0; k < 4; ++k) segment(c[k], c[(k + 1) % 4], 0.007f, lineC);
+        }
+        glDepthMask(GL_TRUE);
+    }
     arPass = false; arMarker = nullptr;
     bgTexture = bg; for (int i = 0; i < 4; ++i) bgRectV[i] = bgRect[i];
     finish(p, w, h);

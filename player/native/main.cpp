@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
 #endif
     (void)argc; (void)argv;
     std::string gameArg, video, shot; int camIndex = 0; double after = 3; int winW = 1280, winH = 720;
-    double lockAfter = -1; std::vector<double> testTap;   // tests: lock a surface after some seconds; a tap (x, y in -1..1, seconds)
+    double lockAfter = -1, lockVAfter = -1; std::vector<double> testTap;   // tests: lock a surface after some seconds; a tap (x, y in -1..1, seconds)
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
         const bool more = i + 1 < args.size();
@@ -145,6 +145,7 @@ int main(int argc, char** argv) {
         else if (a == "--shot" && more) shot = args[++i];
         else if (a == "--after" && more) after = std::atof(args[++i].c_str());
         else if (a == "--lock-after" && more) lockAfter = std::atof(args[++i].c_str());
+        else if (a == "--lock-wall-after" && more) lockVAfter = std::atof(args[++i].c_str());
         else if (a == "--tap" && more) { std::stringstream ss(args[++i]); std::string part; while (std::getline(ss, part, ',')) testTap.push_back(std::atof(part.c_str())); }
         else if (a == "--size" && more) { const std::string v = args[++i]; const size_t x = v.find('x'); if (x != std::string::npos) { winW = std::atoi(v.c_str()); winH = std::atoi(v.c_str() + x + 1); } }
         else if (a.rfind("--", 0) != 0) gameArg = a;
@@ -206,6 +207,11 @@ int main(int argc, char** argv) {
     const bool calibrated = proj.calibW > 0 && proj.calibK[0] > 0;
     double fovDeg = 60;
     std::unique_ptr<MarkerTrack::Tracker> mt; std::unique_ptr<ArucoTrack::Tracker> at; std::unique_ptr<SurfaceTrack::Tracker> st;
+    // Surfaces: every plane locked (Space / a click: a floor or table; V: a wall), each with its own tracker; the scene's
+    // anchors ride on the first floor or table (else the first plane)
+    struct Plane { std::unique_ptr<SurfaceTrack::Tracker> tr; bool vertical = false; float view[16]; bool on = false; double at = -1; std::string id; bool sent = false; };
+    std::vector<Plane> planes; SurfaceTrack::Settings surfBase; int lockKind = -1;   // 0 a floor or table, 1 a wall
+    auto anchorPlane = [&]() -> int { for (size_t i = 0; i < planes.size(); ++i) if (!planes[i].vertical) return (int)i; return planes.empty() ? -1 : 0; };
     std::map<int, int> pattToMarker, barToMarker, arucoToMarker;
     auto makeTrackers = [&]() {
         mt.reset(); at.reset(); st.reset(); pattToMarker.clear(); barToMarker.clear(); arucoToMarker.clear();
@@ -219,7 +225,8 @@ int main(int argc, char** argv) {
         } else if (surfaces) {
             SurfaceTrack::Settings s; s.fovDeg = fovDeg;
             if (first) { s.tiltDeg = first->webcamTilt; s.height = first->webcamHeight; s.facing = first->webcamSurface == 2; }
-            st = std::make_unique<SurfaceTrack::Tracker>(s);
+            surfBase = s; planes.clear();
+            st = std::make_unique<SurfaceTrack::Tracker>(s);   // (the first floor's settings; planes[] does the tracking)
         } else {
             MarkerTrack::Settings s; s.fovDeg = fovDeg;
             if (calibrated) { s.K = cv::Matx33d(proj.calibK[0], 0, proj.calibK[2], 0, proj.calibK[1], proj.calibK[3], 0, 0, 1); s.dist = proj.calibDist; s.calibWidth = proj.calibW; }
@@ -253,7 +260,8 @@ int main(int argc, char** argv) {
         Scripts::Env env;
         env.proj = &proj; env.projection = P; env.sceneIndex = i;
         env.anchorView = [&](int a, float v[16]) { if (a < 0 || a >= (int)seen.size() || !seen[a].on) return false; std::memcpy(v, seen[a].view, 16 * sizeof(float)); return true; };
-        env.surface = [&](float v[16]) { if (!st || !st->locked() || seen.empty() || !seen[0].on) return false; std::memcpy(v, seen[0].view, 16 * sizeof(float)); return true; };
+        env.surface = [&](float v[16]) { const int a = anchorPlane(); if (a < 0 || !planes[a].on) return false; std::memcpy(v, planes[a].view, 16 * sizeof(float)); return true; };
+        env.planes = [&]() { std::vector<Scripts::Env::Plane> v; for (const auto& p : planes) if (p.on) { Scripts::Env::Plane q; q.id = p.id; q.vertical = p.vertical; std::memcpy(q.view, p.view, sizeof q.view); v.push_back(q); } return v; };
         env.loadScene = [&](int n) { pendingScene = n; };
         env.log = [&](const std::string& level, const std::string& text) {
             std::fprintf(stderr, "%s%s\n", level == "error" ? "Problem: " : "", text.c_str()); std::fflush(stderr);
@@ -270,7 +278,7 @@ int main(int argc, char** argv) {
     cv::Mat frame; long long frameNo = 0;
     bool lockWanted = false, fullscreen = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0, planesSent = false;
     int downX = -1, downY = -1; bool tapped = false; float tapX = 0, tapY = 0; int tapPx = -1, tapPy = -1;
-    std::string lastTitle;
+    std::string lastTitle, shownHint;
     bool running = true, shotDone = false, testTapDone = false;
     double last = clock();
     while (running) {
@@ -280,20 +288,23 @@ int main(int argc, char** argv) {
             if (e.type == SDL_QUIT) running = false;
             else if (e.type == SDL_KEYDOWN) {
                 if (e.key.keysym.sym == SDLK_ESCAPE) running = false;
-                else if (e.key.keysym.sym == SDLK_SPACE) lockWanted = true;
+                else if (e.key.keysym.sym == SDLK_SPACE || e.key.keysym.sym == SDLK_h) { lockWanted = true; lockKind = 0; }
+                else if (e.key.keysym.sym == SDLK_v) { lockWanted = true; lockKind = 1; }
+                else if (e.key.keysym.sym == SDLK_r && surfaces) { planes.clear(); planesSent = false; Scripts::planesChanged("{\"added\":[],\"updated\":[],\"removed\":[]}"); }
                 else if (e.key.keysym.sym == SDLK_F11) { fullscreen = !fullscreen; SDL_SetWindowFullscreen(win, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
             } else if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) { downX = e.button.x; downY = e.button.y; }
             else if (e.type == SDL_MOUSEBUTTONUP && e.button.button == SDL_BUTTON_LEFT) {
                 // a tap (not a drag, not on the UI): locks a surface first, then it's the game's
                 if (downX >= 0 && std::hypot(e.button.x - downX, e.button.y - downY) <= 8 && !Ui::wantsMouse()) {
-                    if (st && !st->locked()) lockWanted = true;
+                    if (surfaces && planes.empty()) { lockWanted = true; lockKind = 0; }
                     else { tapped = true; tapPx = e.button.x; tapPy = e.button.y; }
                 }
                 downX = downY = -1;
             }
         }
         const double t = clock(), dt = std::min(0.1, t - last); last = t;
-        if (lockAfter >= 0 && t >= lockAfter && st && !st->locked()) lockWanted = true;
+        if (lockAfter >= 0 && t >= lockAfter && surfaces && planes.empty()) { lockWanted = true; lockKind = 0; }
+        if (lockVAfter >= 0 && t >= lockVAfter && surfaces && planes.size() == 1) { lockWanted = true; lockKind = 1; }
         if (testTap.size() == 3 && !testTapDone && t >= testTap[2]) {   // a test's tap (--tap x,y,seconds: -1..1 across the window)
             int ww, wh; SDL_GetWindowSize(win, &ww, &wh);
             tapped = true; tapPx = (int)((testTap[0] * 0.5 + 0.5) * ww); tapPy = (int)((0.5 - testTap[1] * 0.5) * wh); testTapDone = true;
@@ -312,10 +323,21 @@ int main(int argc, char** argv) {
                 const auto it = map.find(f.id); if (it != map.end()) found(it->second, f.R, f.t, true);
             }
             if (at) for (const auto& f : at->detect(frame)) { const auto it = arucoToMarker.find(f.id); if (it != arucoToMarker.end()) found(it->second, f.R, f.t, true); }
-            if (st) {
-                if (lockWanted) { st->lock(frame); lockWanted = false; }
-                SurfaceTrack::Pose sp;
-                if (st->locked() && st->track(frame, sp)) for (size_t i = 0; i < seen.size(); ++i) found((int)i, sp.R, sp.t, false);
+            if (surfaces) {
+                if (lockWanted) {   // a new plane where the camera looks now
+                    lockWanted = false;
+                    Plane p; SurfaceTrack::Settings s = surfBase; s.facing = lockKind == 1; p.vertical = lockKind == 1;
+                    p.tr = std::make_unique<SurfaceTrack::Tracker>(s);
+                    if (p.tr->lock(frame)) { p.id = std::string(p.vertical ? "wall " : "floor ") + std::to_string(planes.size() + 1); planes.push_back(std::move(p)); }
+                    else { problem = "Not enough detail there to lock on: try a more textured surface"; problemUntil = t + 4; }
+                }
+                for (auto& p : planes) {
+                    SurfaceTrack::Pose sp;
+                    if (p.tr->track(frame, sp)) { toView(sp.R, sp.t, false, p.view); p.on = true; p.at = t; }
+                    else if (p.on && t - p.at > 0.35) p.on = false;
+                }
+                const int a = anchorPlane();
+                if (a >= 0 && planes[a].on) for (size_t i = 0; i < seen.size(); ++i) { std::memcpy(seen[i].view, planes[a].view, sizeof seen[i].view); seen[i].on = true; seen[i].at = t; now[i] = true; }
             }
             for (size_t i = 0; i < seen.size(); ++i) if (!now[i] && seen[i].on && t - seen[i].at > 0.35) seen[i].on = false;   // tracking flickers: a moment where it last was
         }
@@ -328,11 +350,24 @@ int main(int argc, char** argv) {
         projection(fx, fy, cx, cy, vidW, vidH, w, h, std::max(0.005f, proj.camNear), std::max(proj.camNear + 1.0f, proj.camFar), P, rect);
         // anchors found and lost: their objects' onFound / onLost; Surfaces: the plane, once (onPlanesChanged)
         for (size_t i = 0; i < seen.size(); ++i) if (seen[i].on != seen[i].was) { seen[i].was = seen[i].on; Scripts::seen((int)i, seen[i].on); }
-        if (st && st->locked() && !planesSent && !seen.empty() && seen[0].on) {
-            planesSent = true;
-            const float* V = seen[0].view;
-            char b[256]; std::snprintf(b, sizeof b, "{\"added\":[{\"id\":\"surface\",\"alignment\":\"horizontal\",\"center\":{\"x\":%.4f,\"y\":%.4f,\"z\":%.4f},\"size\":{\"x\":4,\"y\":4},\"boundary\":[]}],\"updated\":[],\"removed\":[]}", V[12], V[13], V[14]);
+        for (auto& p : planes) if (!p.sent && p.on) {   // a new plane: the scripts' onPlanesChanged
+            p.sent = true; planesSent = true;
+            const float* V = p.view;
+            char b[320]; std::snprintf(b, sizeof b, "{\"added\":[{\"id\":\"%s\",\"alignment\":\"%s\",\"center\":{\"x\":%.4f,\"y\":%.4f,\"z\":%.4f},\"size\":{\"x\":1.5,\"y\":1.5},\"boundary\":[]}],\"updated\":[],\"removed\":[]}",
+                                             p.id.c_str(), p.vertical ? "vertical" : "horizontal", V[12], V[13], V[14]);
             Scripts::planesChanged(b);
+        }
+        {   // the planes' look (the first anchor's AR Plane Manager: Show planes, its colour; walls in blue)
+            std::vector<Viewer::ArPlane> look;
+            const Scene::Marker* pm = proj.markers.empty() ? nullptr : &proj.markers[0];
+            if (!pm || pm->showPlanes)
+                for (const auto& p : planes) if (p.on) {
+                    Viewer::ArPlane a; std::memcpy(a.view, p.view, sizeof a.view); a.size = 1.5f;
+                    const float floorC[4] = {pm ? pm->planeColour[0] : 0.25f, pm ? pm->planeColour[1] : 0.95f, pm ? pm->planeColour[2] : 0.55f, 0.6f}, wallC[4] = {0.2f, 0.66f, 0.89f, 0.6f};
+                    std::memcpy(a.colour, p.vertical ? wallC : floorC, sizeof a.colour);
+                    look.push_back(a);
+                }
+            Viewer::setArPlanes(look);
         }
         // a tap: where (-1..1), and on which object (the nearest whose bounds hold it)
         if (tapped) {
@@ -369,6 +404,14 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame();
         std::vector<bool> on(seen.size()); for (size_t i = 0; i < seen.size(); ++i) on[i] = seen[i].on;
         Ui::draw(proj, on);
+        if (surfaces) {   // what to press, along the bottom
+            const ImVec2 ds = ImGui::GetIO().DisplaySize;
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            const float fs = std::max(14.0f, ds.y / 45);
+            const ImVec2 ts = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0, shownHint.c_str());
+            fg->AddRectFilled(ImVec2((ds.x - ts.x) / 2 - 10, ds.y - ts.y - 22), ImVec2((ds.x + ts.x) / 2 + 10, ds.y - 10), IM_COL32(0x1a, 0x1a, 0x1a, 200), 4);
+            fg->AddText(ImGui::GetFont(), fs, ImVec2((ds.x - ts.x) / 2, ds.y - ts.y - 16), IM_COL32(0xe6, 0xe6, 0xe6, 255), shownHint.c_str());
+        }
         ImGui::Render();
         glViewport(0, 0, w, h);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
@@ -376,10 +419,13 @@ int main(int argc, char** argv) {
         // the title says what's going on
         std::string names;
         for (size_t i = 0; i < seen.size(); ++i) if (seen[i].on) names += (names.empty() ? "" : ", ") + proj.markers[i].name;
-        if (surfaces && st && !st->locked()) hint = "Point at a table or the floor, then press Space (or click) to lock";
-        else if (names.empty()) hint = surfaces ? "Lost the surface: move back, or Space to lock again" : aruco ? "Point the camera at an ArUco marker" : "Point the camera at a marker";
+        int planesOn = 0, walls = 0; for (const auto& p : planes) { if (p.on) ++planesOn; if (p.vertical) ++walls; }
+        if (surfaces && planes.empty()) hint = "Point at a table or the floor and press Space (or click); at a wall and press V";
+        else if (surfaces) hint = std::to_string(planesOn) + " of " + std::to_string(planes.size()) + " planes seen (" + std::to_string(walls) + " wall" + (walls == 1 ? "" : "s") + ")   Space: a floor or table   V: a wall   R: start again   click: the game";
+        else if (names.empty()) hint = aruco ? "Point the camera at an ArUco marker" : "Point the camera at a marker";
         else hint = "Found: " + names;
         if (!problem.empty() && t < problemUntil) hint = "Problem: " + problem;
+        shownHint = hint;   // (drawn next frame: the UI is drawn before this is worked out)
         const std::string title = proj.title + "  -  " + hint;
         if (title != lastTitle) { SDL_SetWindowTitle(win, title.c_str()); lastTitle = title; }
 

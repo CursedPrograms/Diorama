@@ -293,29 +293,50 @@ FN(d_toCamera) {
     return jstr("{\"x\":" + fmt(d[0] * k) + ",\"y\":" + fmt(d[1] * k) + ",\"z\":" + fmt(d[2] * k) + ",\"distance\":" + fmt(len) + "}");
 }
 // the locked surface as AR Foundation's one plane (Surfaces with any camera)
-FN(d_planes) {
-    float V[16];
-    (void)argc; (void)argv;
-    if (!E.surface || !E.surface(V)) return jstr("[]");
-    return jstr("[{\"id\":\"surface\",\"alignment\":\"horizontal\",\"center\":{\"x\":" + fmt(V[12]) + ",\"y\":" + fmt(V[13]) + ",\"z\":" + fmt(V[14]) + "},\"size\":{\"x\":4,\"y\":4},\"boundary\":[]}]");
+// the planes locked (Surfaces with any camera: floors and tables, and walls), as AR Foundation's
+static std::vector<Env::Plane> planesNow() {
+    if (E.planes) return E.planes();
+    std::vector<Env::Plane> v; Env::Plane p; p.id = "surface"; p.vertical = false;
+    if (E.surface && E.surface(p.view)) v.push_back(p);
+    return v;
 }
-FN(d_raycast) {
-    float V[16];
-    if (argc < 2 || !E.surface || !E.surface(V) || !E.projection) return jstr("[]");
+FN(d_planes) {
+    (void)argc; (void)argv;
+    std::string s = "[";
+    for (const auto& p : planesNow()) {
+        const float* V = p.view;
+        s += std::string(s.size() > 1 ? "," : "") + "{\"id\":" + jsonQ(p.id) + ",\"alignment\":\"" + (p.vertical ? "vertical" : "horizontal") +
+             "\",\"center\":{\"x\":" + fmt(V[12]) + ",\"y\":" + fmt(V[13]) + ",\"z\":" + fmt(V[14]) + "},\"size\":{\"x\":1.5,\"y\":1.5},\"boundary\":[]}";
+    }
+    return jstr(s + "]");
+}
+FN(d_raycast) {   // where a screen point (-1..1) meets the planes: the nearest first
+    if (argc < 2 || !E.projection) return jstr("[]");
     const float* P = E.projection;
     const float x = (float)dbl(argv[0]), y = (float)dbl(argv[1]);
     const float d[3] = {(x + P[8]) / P[0], (y + P[9]) / P[5], -1};
-    float n[3] = {V[4], V[5], V[6]}; const float nl = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]); for (float& c : n) c /= nl;
-    const float o[3] = {V[12], V[13], V[14]};
-    const float den = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
-    if (std::fabs(den) < 1e-6f) return jstr("[]");
-    const float s = (n[0] * o[0] + n[1] * o[1] + n[2] * o[2]) / den;
-    if (s <= 0) return jstr("[]");
-    const float h[3] = {d[0] * s, d[1] * s, d[2] * s};
-    const float off[3] = {h[0] - o[0], h[1] - o[1], h[2] - o[2]};
-    if (off[0] * off[0] + off[1] * off[1] + off[2] * off[2] > 16) return jstr("[]");   // the surface: 4 m round where it was locked
-    const float dist = s * std::sqrt(d[0] * d[0] + d[1] * d[1] + 1);
-    return jstr("[{\"position\":{\"x\":" + fmt(h[0]) + ",\"y\":" + fmt(h[1]) + ",\"z\":" + fmt(h[2]) + "},\"distance\":" + fmt(dist) + ",\"plane\":\"surface\"}]");
+    std::vector<std::pair<float, std::string>> hits;
+    for (const auto& p : planesNow()) {
+        const float* V = p.view;
+        float n[3] = {V[4], V[5], V[6]}; const float nl = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]); for (float& c : n) c /= nl;
+        const float o[3] = {V[12], V[13], V[14]};
+        const float den = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
+        if (std::fabs(den) < 1e-6f) continue;
+        const float s = (n[0] * o[0] + n[1] * o[1] + n[2] * o[2]) / den;
+        if (s <= 0) continue;
+        const float h[3] = {d[0] * s, d[1] * s, d[2] * s};
+        // on the plane as drawn (1.5 m square round where it was locked)
+        float local[2] = {0, 0};
+        for (int k = 0; k < 2; ++k) { const int c = k == 0 ? 0 : 8; const float ax[3] = {V[c], V[c + 1], V[c + 2]}; const float al = std::sqrt(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+            local[k] = ((h[0] - o[0]) * ax[0] + (h[1] - o[1]) * ax[1] + (h[2] - o[2]) * ax[2]) / (al * al); }
+        if (std::fabs(local[0]) > 0.75f || std::fabs(local[1]) > 0.75f) continue;
+        const float dist = s * std::sqrt(d[0] * d[0] + d[1] * d[1] + 1);
+        hits.push_back({dist, "{\"position\":{\"x\":" + fmt(h[0]) + ",\"y\":" + fmt(h[1]) + ",\"z\":" + fmt(h[2]) + "},\"distance\":" + fmt(dist) + ",\"plane\":" + jsonQ(p.id) + ",\"alignment\":\"" + (p.vertical ? "vertical" : "horizontal") + "\"}"});
+    }
+    std::sort(hits.begin(), hits.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::string s = "[";
+    for (size_t i = 0; i < hits.size(); ++i) s += (i ? "," : "") + hits[i].second;
+    return jstr(s + "]");
 }
 FN(d_scene) {
     const auto& names = E.proj->scenes;
