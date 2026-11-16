@@ -325,6 +325,19 @@ static std::string lastFile() {   // remembers the project that was open last
     return (d / "last.txt").u8string();
 }
 static bool autosaveFolders = true;   // off for --capture / --build runs
+// Edit > Preferences, kept in %APPDATA%\Diorama\preferences.txt ("key value" lines)
+static struct Prefs { bool reopenLast = false; } prefs;   // reopenLast: the last project at the start (else a new scene)
+static bool showPrefs = false;
+static std::string prefsFile() { return (fs::u8path(lastFile()).parent_path() / "preferences.txt").u8string(); }
+static void loadPrefs() {
+    std::ifstream f(fs::u8path(prefsFile())); std::string k; int v;
+    while (f >> k >> v) if (k == "reopenLast") prefs.reopenLast = v != 0;
+}
+static void savePrefs() { std::ofstream(fs::u8path(prefsFile())) << "reopenLast " << (prefs.reopenLast ? 1 : 0) << "\n"; }
+static std::string lastProject() {
+    std::string last; { std::ifstream lf(fs::u8path(lastFile())); std::getline(lf, last); }
+    return !last.empty() && fs::exists(fs::u8path(last) / "project.diorama") ? last : "";
+}
 static void rememberProject() { if (!folder.empty() && autosaveFolders) std::ofstream(fs::u8path(lastFile())) << folder; }
 // the Plane detection demo's script: a tap on a plane puts a cube there (written beside the projects, then saved into the project)
 static std::string projectsHome();
@@ -768,6 +781,15 @@ static int bottomTab = 0;
 // the editor's dockable windows (Window menu): open or closed; Reset Layout puts them back as Unity has them
 static bool showHierarchy = true, showInspector = true, showSceneWin = true, showProject = true, showConsole = true, resetLayout = false;
 static bool showProfiler = false;
+static void prefsWindow() {
+    if (!showPrefs) return;
+    ImGui::SetNextWindowSize(ImVec2(420, 0), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Preferences", &showPrefs, ImGuiWindowFlags_NoDocking)) {
+        if (ImGui::Checkbox("Open the last project at the start", &prefs.reopenLast)) savePrefs();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Off: Diorama starts on a new scene, and the last project is in File > Open recent");
+    }
+    ImGui::End();
+}
 // ---------- the Profiler (Window > Profiler): frame time, the Scene view's CPU and GPU time, what's drawn, memory ----------
 static void profiler() {
     static float frameMs[240] = {0}, sceneMs[240] = {0}, gpuMs[240] = {0}; static int at = 0;
@@ -2126,6 +2148,11 @@ static void menuBar() {
             ImGui::EndMenu();
         }
         if (ImGui::MenuItem("Open...", "Ctrl+O")) { const std::string f = openDialog(L"Diorama project\0*.diorama\0\0"); if (!f.empty()) openProject(f); }
+        {   // the project that was open last, one click away
+            const std::string last = lastProject();
+            const bool ok = !last.empty() && last != folder;
+            if (ImGui::MenuItem(ok ? ("Open recent: " + fs::u8path(last).filename().u8string()).c_str() : "Open recent", nullptr, false, ok)) openProject(last);
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("New Scene")) newScene(false);
         if (ImGui::BeginMenu("Open Scene", proj.scenes.size() > 1)) {
@@ -2147,6 +2174,7 @@ static void menuBar() {
     }
     if (ImGui::BeginMenu("Edit")) {
         if (ImGui::MenuItem("Project Settings...")) showSettings = true;
+        if (ImGui::MenuItem("Preferences...")) showPrefs = true;
         ImGui::Separator();
         Marker* m = curMarker();
         if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, m && selObject >= 0)) selObject = duplicate(proj, *m, selObject);
@@ -3761,6 +3789,7 @@ static void frame() {
     buildSettings();
     buildProgress();
     profiler();
+    prefsWindow();
     // the status line
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + vp->Size.y - status)); ImGui::SetNextWindowSize(ImVec2(vp->Size.x, status));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 4));
@@ -3872,10 +3901,11 @@ int main(int argc, char** argv) {
     }
     Viewer::init(exeDir);
     autosaveFolders = capture.empty() && buildArg.empty();
-    std::string last;
-    if (autosaveFolders && openArg.empty()) { std::ifstream lf(fs::u8path(lastFile())); std::getline(lf, last); }
+    loadPrefs();
+    // the start: a new scene, unless Preferences say the last project (then it's opened)
+    const std::string last = autosaveFolders && openArg.empty() && prefs.reopenLast ? lastProject() : "";
     if (!openArg.empty()) openProject(openArg);
-    else if (!last.empty() && fs::exists(fs::u8path(last) / "project.diorama")) openProject(last);
+    else if (!last.empty()) openProject(last);
     else newFromTemplate(tmpl == "basic" ? 0 : tmpl == "navigation" ? 2 : tmpl == "planes" ? 3 : 1);
     if (!addVideoArg.empty() && !proj.markers.empty()) dropAsset(proj.markers[0], 0, -1, addVideoArg);
     if (!buildArg.empty()) { std::string err, apk; const bool ok = buildFor == "android" ? buildAndroid(buildArg, err, apk) : buildFor == "linux" ? buildLinux(buildArg, false, err) : buildFor == "pi" ? buildLinux(buildArg, true, err) : (buildWin || buildFor == "windows") ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
