@@ -11,6 +11,7 @@
 #include "markertrack.h"
 #include "scene.h"
 #include "surfacetrack.h"
+#include "slam.h"
 #include "viewer.h"
 #include "script.h"
 #include "ui.h"
@@ -39,6 +40,8 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <atomic>
+#include <set>
 #include <vector>
 #ifdef _WIN32
 #include <windows.h>
@@ -137,7 +140,7 @@ int main(int argc, char** argv) {
 #endif
     (void)argc; (void)argv;
     std::string gameArg, video, shot; int camIndex = 0; double after = 3; int winW = 1280, winH = 720;
-    double lockAfter = -1, lockVAfter = -1; std::vector<double> testTap; bool autoPlanes = true; bool recordAtStart = false;   // the first plane finds itself (--no-auto: only by hand)   // tests: lock a surface after some seconds; a tap (x, y in -1..1, seconds)
+    double lockAfter = -1, lockVAfter = -1; std::vector<double> testTap; bool slamOn = false; bool autoPlanes = true; bool recordAtStart = false;   // the first plane finds itself (--no-auto: only by hand)   // tests: lock a surface after some seconds; a tap (x, y in -1..1, seconds)
     for (size_t i = 0; i < args.size(); ++i) {
         const std::string& a = args[i];
         const bool more = i + 1 < args.size();
@@ -148,6 +151,7 @@ int main(int argc, char** argv) {
         else if (a == "--lock-after" && more) lockAfter = std::atof(args[++i].c_str());
         else if (a == "--lock-wall-after" && more) lockVAfter = std::atof(args[++i].c_str());
         else if (a == "--no-auto") autoPlanes = false;
+        else if (a == "--slam") slamOn = true;   // SLAM drives the planes (experimental: see tools/slamtest)
         else if (a == "--record") recordAtStart = true;   // the camera's frames and what was pressed, from the start (F8 toggles it)
         else if (a == "--tap" && more) { std::stringstream ss(args[++i]); std::string part; while (std::getline(ss, part, ',')) testTap.push_back(std::atof(part.c_str())); }
         else if (a == "--size" && more) { const std::string v = args[++i]; const size_t x = v.find('x'); if (x != std::string::npos) { winW = std::atoi(v.c_str()); winH = std::atoi(v.c_str() + x + 1); } }
@@ -212,6 +216,10 @@ int main(int argc, char** argv) {
     std::unique_ptr<MarkerTrack::Tracker> mt; std::unique_ptr<ArucoTrack::Tracker> at; std::unique_ptr<SurfaceTrack::Tracker> st;
     // Surfaces: every plane locked (Space / a click: a floor or table; V: a wall), each with its own tracker; the scene's
     // anchors ride on the first floor or table (else the first plane)
+    // SLAM (stella_vslam): one map of the room once it starts (move the camera slowly sideways); its planes take over
+    struct SlamPlane { int id; bool vertical; float view[16]; std::vector<float> boundary; };
+    Slam::Session slam; bool slamStarted = false, useSlam = false; double slamAt = -1; std::vector<SlamPlane> slamViews; std::set<int> slamSent;
+    std::atomic<int> vocabState{0}; std::string vocabPath;   // 0 not looked for, 1 looking/downloading, 2 found, 3 none
     struct Plane { std::unique_ptr<SurfaceTrack::Tracker> tr; bool vertical = false; float view[16]; bool on = false, tracked = false; double at = -1; std::string id; bool sent = false;
                    std::vector<float> boundary; bool related = false; float toAnchor[16]; };   // toAnchor: this plane -> the anchor plane's frame (learnt while both are seen)
     std::vector<Plane> planes; SurfaceTrack::Settings surfBase; int lockKind = -1;   // 0 a floor or table, 1 a wall
@@ -265,7 +273,9 @@ int main(int argc, char** argv) {
         env.proj = &proj; env.projection = P; env.sceneIndex = i;
         env.anchorView = [&](int a, float v[16]) { if (a < 0 || a >= (int)seen.size() || !seen[a].on) return false; std::memcpy(v, seen[a].view, 16 * sizeof(float)); return true; };
         env.surface = [&](float v[16]) { const int a = anchorPlane(); if (a < 0 || !planes[a].on) return false; std::memcpy(v, planes[a].view, 16 * sizeof(float)); return true; };
-        env.planes = [&]() { std::vector<Scripts::Env::Plane> v; for (const auto& p : planes) if (p.on) { Scripts::Env::Plane q; q.id = p.id; q.vertical = p.vertical; std::memcpy(q.view, p.view, sizeof q.view); q.boundary = p.boundary; v.push_back(q); } return v; };
+        env.planes = [&]() { std::vector<Scripts::Env::Plane> v;
+            if (useSlam) { for (const auto& p : slamViews) { Scripts::Env::Plane q; q.id = "map " + std::to_string(p.id); q.vertical = p.vertical; std::memcpy(q.view, p.view, sizeof q.view); q.boundary = p.boundary; v.push_back(q); } return v; }
+            for (const auto& p : planes) if (p.on) { Scripts::Env::Plane q; q.id = p.id; q.vertical = p.vertical; std::memcpy(q.view, p.view, sizeof q.view); q.boundary = p.boundary; v.push_back(q); } return v; };
         env.loadScene = [&](int n) { pendingScene = n; };
         env.log = [&](const std::string& level, const std::string& text) {
             std::fprintf(stderr, "%s%s\n", level == "error" ? "Problem: " : "", text.c_str()); std::fflush(stderr);
@@ -419,6 +429,37 @@ int main(int argc, char** argv) {
                 }
                 const int a = anchorPlane();
                 if (a >= 0 && planes[a].on) for (size_t i = 0; i < seen.size(); ++i) { std::memcpy(seen[i].view, planes[a].view, sizeof seen[i].view); seen[i].on = true; seen[i].at = t; now[i] = true; }
+                // SLAM: its vocabulary (found, or fetched once, on a thread), then every frame into it
+                if (slamOn && Slam::available() && vocabState == 0) { vocabState = 1; std::thread([&] { vocabPath = Slam::findVocabulary(exeDir.u8string(), true); vocabState = vocabPath.empty() ? 3 : 2; }).detach(); }
+                if (vocabState == 2 && !slamStarted) {
+                    slamStarted = true;
+                    const double sfx = calibrated ? proj.calibK[0] * frame.cols / proj.calibW : (frame.cols / 2.0) / std::tan(fovDeg * 3.14159265358979 / 360.0);
+                    const double sfy = calibrated ? proj.calibK[1] * frame.cols / proj.calibW : sfx;
+                    const double scx = calibrated ? proj.calibK[2] * frame.cols / proj.calibW : frame.cols / 2.0, scy = calibrated ? proj.calibK[3] * frame.cols / proj.calibW : frame.rows / 2.0;
+                    std::string se;
+                    if (!slam.start(frame.cols, frame.rows, sfx, sfy, scx, scy, vocabPath, surfBase.height, se)) { problem = "SLAM: " + se; problemUntil = t + 6; }
+                }
+                cv::Matx44d Tcw;
+                if (slamStarted && slam.feed(frame, t, Tcw) && !slam.planes().empty()) {
+                    slamViews.clear();
+                    for (const auto& sp : slam.planes()) {   // the plane -> the camera, as the trackers give it
+                        const cv::Matx44d M = Tcw * sp.toWorld;
+                        const cv::Matx33d R(M(0, 0), M(0, 1), M(0, 2), M(1, 0), M(1, 1), M(1, 2), M(2, 0), M(2, 1), M(2, 2));
+                        SlamPlane v; v.id = sp.id; v.vertical = sp.vertical;
+                        toView(R, cv::Vec3d(M(0, 3), M(1, 3), M(2, 3)), false, v.view);
+                        for (const auto& b : sp.boundary) { v.boundary.push_back(b.x); v.boundary.push_back(b.y); }
+                        slamViews.push_back(v);
+                    }
+                    useSlam = true; slamAt = t;
+                    int ap = 0; for (size_t i = 0; i < slamViews.size(); ++i) if (!slamViews[i].vertical) { ap = (int)i; break; }
+                    for (size_t i = 0; i < seen.size(); ++i) { std::memcpy(seen[i].view, slamViews[ap].view, sizeof seen[i].view); seen[i].on = true; seen[i].at = t; now[i] = true; }
+                    for (const auto& v : slamViews) if (!slamSent.count(v.id)) {   // a new plane: the scripts' onPlanesChanged
+                        slamSent.insert(v.id);
+                        char b[320]; std::snprintf(b, sizeof b, "{\"added\":[{\"id\":\"map %d\",\"alignment\":\"%s\",\"center\":{\"x\":%.4f,\"y\":%.4f,\"z\":%.4f},\"size\":{\"x\":1.5,\"y\":1.5},\"boundary\":[]}],\"updated\":[],\"removed\":[]}",
+                                                         v.id, v.vertical ? "vertical" : "horizontal", v.view[12], v.view[13], v.view[14]);
+                        Scripts::planesChanged(b);
+                    }
+                } else if (useSlam && t - slamAt > 1.0) useSlam = false;   // lost a while: the plane trackers again until it finds itself
             }
             for (size_t i = 0; i < seen.size(); ++i) if (!now[i] && seen[i].on && t - seen[i].at > 0.35) seen[i].on = false;   // tracking flickers: a moment where it last was
         }
@@ -441,7 +482,15 @@ int main(int argc, char** argv) {
         {   // the planes' look (the first anchor's AR Plane Manager: Show planes, its colour; walls in blue)
             std::vector<Viewer::ArPlane> look;
             const Scene::Marker* pm = proj.markers.empty() ? nullptr : &proj.markers[0];
-            if (!pm || pm->showPlanes)
+            if ((!pm || pm->showPlanes) && useSlam)
+                for (const auto& p : slamViews) {
+                    Viewer::ArPlane a; std::memcpy(a.view, p.view, sizeof a.view); a.size = 1.5f; a.boundary = p.boundary;
+                    const float op = pm ? pm->planeColour[3] : 0.35f;
+                    const float floorC[4] = {pm ? pm->planeColour[0] : 0.25f, pm ? pm->planeColour[1] : 0.95f, pm ? pm->planeColour[2] : 0.55f, op}, wallC[4] = {0.2f, 0.66f, 0.89f, op};
+                    std::memcpy(a.colour, p.vertical ? wallC : floorC, sizeof a.colour);
+                    look.push_back(a);
+                }
+            else if (!pm || pm->showPlanes)
                 for (const auto& p : planes) if (p.on) {
                     Viewer::ArPlane a; std::memcpy(a.view, p.view, sizeof a.view); a.size = 1.5f; a.boundary = p.boundary;
                     const float op = pm ? pm->planeColour[3] : 0.35f;   // the plane look's opacity (AR Plane Manager)
@@ -512,6 +561,12 @@ int main(int argc, char** argv) {
         else if (surfaces) hint = std::to_string(planesOn) + " of " + std::to_string(planes.size()) + " planes seen (" + std::to_string(walls) + " wall" + (walls == 1 ? "" : "s") + (measuring ? ", " + std::to_string(measuring) + " measuring: move the camera a little" : "") + ")   Space: a floor or table   V: a wall   R: start again   click: the game";
         else if (names.empty()) hint = aruco ? "Point the camera at an ArUco marker" : "Point the camera at a marker";
         else hint = "Found: " + names;
+        if (surfaces && slamOn && Slam::available()) {   // what the SLAM's doing
+            if (useSlam) { int w = 0; for (const auto& v : slamViews) if (v.vertical) ++w; hint = "Map: " + std::to_string(slamViews.size()) + " planes (" + std::to_string(w) + " walls), " + std::to_string(slam.mapPoints()) + " points   click: the game"; }
+            else if (vocabState == 1) hint = "Getting the map's vocabulary (once, 45 MB)...   " + hint;
+            else if (slamStarted && !slam.started()) hint = "Move the camera slowly sideways to start the map   " + hint;
+            else if (slamStarted) hint = "Map started: looking for planes in it   " + hint;
+        }
         if (!problem.empty() && t < problemUntil) hint = "Problem: " + problem;
         shownHint = hint;   // (drawn next frame: the UI is drawn before this is worked out)
         const std::string title = proj.title + "  -  " + hint;
