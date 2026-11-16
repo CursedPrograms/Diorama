@@ -395,7 +395,7 @@ static void create(int kind) {
     const int parent = curObject() ? selObject : -1;
     Object o = make(proj, kind, parent);
     if (kind == PICTURE || kind == SPRITES) {
-        const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0");
+        const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0");
         if (f.empty()) return;
         o.file = bring(f); o.name = fs::u8path(f).stem().u8string();
     } else if (kind == MODEL) {
@@ -570,11 +570,13 @@ static void consolePanel() {
 
 // ---------- the Project window: the project's assets folder ----------
 static std::string projectDir;   // the folder shown (inside assets)
+static std::string selAsset;     // a file selected in the Project window ("" none): the Inspector shows it
+static int selAssetMarker = 0, selAssetObject = -1;   // what was selected then (a new selection clears the file)
 static std::string renaming; static char renameBuf[128];
 static const char* assetKind(const fs::path& p) {
     std::string e = p.extension().u8string(); for (auto& c : e) c = (char)tolower((unsigned char)c);
     if (e == ".js") return "Script";
-    if (e == ".png" || e == ".jpg" || e == ".jpeg") return "Picture";
+    if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".jfif") return "Picture";
     if (e == ".glb" || e == ".gltf") return "Model";
     if (e == ".prefab") return "Prefab";
     if (e == ".mp3" || e == ".ogg" || e == ".wav") return "Audio";
@@ -632,8 +634,11 @@ static void projectPanel() {
         const ImVec2 a = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##it", ImVec2(cell - 8, 70));
         const bool hov = ImGui::IsItemHovered();
+        if (ImGui::IsItemClicked(0) || ImGui::IsItemClicked(1)) { selAsset = pth.u8string(); selAssetMarker = selMarker; selAssetObject = selObject; }
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        if (hov) dl->AddRectFilled(a, ImVec2(a.x + cell - 8, a.y + 70), IM_COL32(0x2e, 0x2e, 0x2e, 255), 4);
+        const bool picked = selAsset == pth.u8string();
+        if (picked) dl->AddRectFilled(a, ImVec2(a.x + cell - 8, a.y + 70), IM_COL32(0x00, 0x5c, 0x8a, 255), 4);
+        else if (hov) dl->AddRectFilled(a, ImVec2(a.x + cell - 8, a.y + 70), IM_COL32(0x2e, 0x2e, 0x2e, 255), 4);
         const char* icon = dir ? "\xe2\x96\xb0" : assetIcon(kind);
         ImGui::PushFont(boldFont);
         const ImVec2 is = ImGui::CalcTextSize(icon);
@@ -658,7 +663,7 @@ static void projectPanel() {
             if (!dir && !strcmp(kind, "Script") && ImGui::MenuItem("Edit")) openScript(pth.u8string());
             if (ImGui::MenuItem("Show in Explorer")) openInExplorer(pth.parent_path().u8string());
             if (ImGui::MenuItem("Rename")) { renaming = pth.u8string(); snprintf(renameBuf, sizeof renameBuf, "%s", pth.filename().u8string().c_str()); }
-            if (ImGui::MenuItem("Delete")) { std::error_code e2; fs::remove_all(pth, e2); say(e2 ? "Couldn't delete it" : "Deleted " + pth.filename().u8string()); }
+            if (ImGui::MenuItem("Delete")) { std::error_code e2; fs::remove_all(pth, e2); say(e2 ? "Couldn't delete it" : "Deleted " + pth.filename().u8string()); if (selAsset == pth.u8string()) selAsset.clear(); }
             ImGui::EndPopup();
         }
         ImGui::EndGroup();
@@ -1445,10 +1450,10 @@ static void buildSettings() {
     { char b[128]; snprintf(b, sizeof b, "%s", proj.title.c_str()); labelled("Game name"); if (ImGui::InputText("##gname", b, sizeof b) && b[0]) proj.title = b; }
     text("Company", proj.company);
     text("Version", proj.version);
-    fileRow("Icon", proj.icon, L"Pictures\0*.png;*.jpg;*.jpeg\0\0");
+    fileRow("Icon", proj.icon, L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0");
     ImGui::Checkbox("Skip the splash screen", &proj.skipSplash); tip("Off: the game opens on its splash (picture, name, intro words, Tap to start)");
     if (!proj.skipSplash) {
-        fileRow("Splash", proj.splash, L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); tip("Empty: the icon");
+        fileRow("Splash", proj.splash, L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0"); tip("Empty: the icon");
         char b[1024]; snprintf(b, sizeof b, "%s", proj.intro.c_str());
         ImGui::TextUnformatted("Intro words");
         if (ImGui::InputTextMultiline("##intro", b, sizeof b, ImVec2(-1, 70))) proj.intro = b;
@@ -1614,7 +1619,7 @@ static void markerMaker() {
         if (mk.source == 2) { labelled("Letters"); ImGui::InputText("##mkl2", mk.letters, sizeof mk.letters); tip("One to three letters print best"); }
         if (mk.source == 3) {
             if (ImGui::Button(mk.picture.empty() ? "Choose a picture..." : fs::u8path(mk.picture).filename().u8string().c_str(), ImVec2(-1, 0))) {
-                const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); if (!f.empty()) mk.picture = f;
+                const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0"); if (!f.empty()) mk.picture = f;
             }
             ImGui::TextDisabled("Bold, high-contrast pictures track best;\nthe middle half of the square is used.");
         }
@@ -1805,7 +1810,7 @@ static void createUI(int type) {
     case UI_BUTTON: o.uiText = "Button"; break;
     case UI_SLIDER: o.uiRect[2] = 240; o.uiRect[3] = 32; break;
     case UI_TOGGLE: o.uiText = "Toggle"; o.uiRect[2] = 200; o.uiRect[3] = 32; break;
-    case UI_IMAGE: { const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); o.uiFile = f.empty() ? "" : bring(f); o.uiRect[2] = o.uiRect[3] = 120; break; }
+    case UI_IMAGE: { const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0"); o.uiFile = f.empty() ? "" : bring(f); o.uiRect[2] = o.uiRect[3] = 120; break; }
     case UI_PANEL: o.uiRect[2] = 320; o.uiRect[3] = 200; o.uiBg[0] = 0.1f; o.uiBg[1] = 0.1f; o.uiBg[2] = 0.11f; o.uiBg[3] = 0.85f; break;
     }
     m->objects.push_back(o);
@@ -1937,6 +1942,24 @@ static void sceneManager() {
 }
 
 // ---------- the menus ----------
+// the Hierarchy's clipboard: an object and everything under it (Copy, then Paste / Paste As Child, as Unity's)
+static std::vector<Object> objClip;
+static int renamingObj = -1; static char objNameBuf[128];
+static void copyObject(const Scene::Marker& m, int id) {
+    objClip.clear();
+    for (const Object& o : m.objects) if (isUnder(m, o.id, id)) objClip.push_back(o);
+    say("Copied " + (objClip.empty() ? std::string("nothing") : objClip[0].name));
+}
+// a copy of the clipboard under parent (-1: the top level), new ids; returns the copy's id
+static int pasteObject(Scene::Marker& m, int parent) {
+    if (objClip.empty()) return -1;
+    beginEdit();
+    std::map<int, int> ids; for (const auto& o : objClip) ids[o.id] = newId(proj);
+    for (Object o : objClip) { o.parent = o.id == objClip[0].id ? parent : ids[o.parent]; o.id = ids[o.id]; m.objects.push_back(o); }
+    const int root = ids[objClip[0].id];
+    reparent(m, root, parent);
+    return root;
+}
 static void gameObjectItems() {
     if (ImGui::MenuItem("Create Empty", "Ctrl+Shift+N")) create(EMPTY);
     if (ImGui::BeginMenu("3D Object")) {
@@ -2073,7 +2096,7 @@ static void dropAsset(Scene::Marker& m, int mi, int onto, const std::string& fil
         giveVideo(m.objects[i], file); selMarker = mi; selObject = onto; return;
     }
     int kind = -1;
-    if (e == ".png" || e == ".jpg" || e == ".jpeg") kind = PICTURE;
+    if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".jfif") kind = PICTURE;
     if (e == ".glb" || e == ".gltf") kind = MODEL;
     if (kind < 0) { say("Diorama can't place that kind of file yet"); return; }
     Object o = make(proj, kind, onto);
@@ -2110,11 +2133,19 @@ static void objectNode(Scene::Marker& m, int mi, int index, int& moveId, int& mo
         ImGui::EndDragDropTarget();
     }
     if (ImGui::BeginPopupContextItem()) {
-        selMarker = mi; selObject = o.id;
-        gameObjectItems();
+        selMarker = mi; selObject = o.id; selAsset.clear();
+        if (ImGui::MenuItem("Copy", "Ctrl+C")) copyObject(m, o.id);
+        if (ImGui::MenuItem("Paste", "Ctrl+V", false, !objClip.empty())) { const int id = pasteObject(m, o.parent); if (id >= 0) selObject = id; }
+        if (ImGui::MenuItem("Paste As Child", nullptr, false, !objClip.empty())) { const int id = pasteObject(m, o.id); if (id >= 0) selObject = id; }
         ImGui::Separator();
-        if (ImGui::MenuItem("Duplicate")) selObject = duplicate(proj, m, o.id);
-        if (ImGui::MenuItem("Delete")) { moveId = o.id; moveTo = -99; }
+        if (ImGui::MenuItem("Rename", "F2")) { renamingObj = o.id; snprintf(objNameBuf, sizeof objNameBuf, "%s", o.name.c_str()); }
+        if (ImGui::MenuItem("Duplicate", "Ctrl+D")) { beginEdit(); selObject = duplicate(proj, m, o.id); }
+        if (ImGui::MenuItem("Delete", "Del")) { beginEdit(); moveId = o.id; moveTo = -99; }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Make Prefab", nullptr, false, !folder.empty())) savePrefab(m, o.id, projectDir.empty() ? (fs::u8path(folder) / "assets").u8string() : projectDir);
+        if (folder.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Save the project first: prefabs go in its assets");
+        ImGui::Separator();
+        if (ImGui::BeginMenu("Create Under It")) { gameObjectItems(); ImGui::EndMenu(); }
         ImGui::EndPopup();
     }
     if (open) {
@@ -2122,7 +2153,9 @@ static void objectNode(Scene::Marker& m, int mi, int index, int& moveId, int& mo
         ImGui::TreePop();
     }
 }
-static void hierarchy() {
+static void hierarchyItems();
+static void hierarchy() { hierarchyItems(); }
+static void hierarchyItems() {
     ImGui::PushFont(boldFont); ImGui::TextUnformatted("Hierarchy"); ImGui::PopFont();
     ImGui::SameLine(); ImGui::TextDisabled("%s", proj.scene.c_str());
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("The open scene (Window > Scenes)");
@@ -2183,6 +2216,42 @@ static void hierarchy() {
         ImGui::PopID();
     }
     if (proj.markers.empty()) ImGui::TextDisabled("No markers: GameObject > AR > AR Marker.");
+    if (renamingObj >= 0) { ImGui::OpenPopup("Rename object"); }
+    if (ImGui::BeginPopupModal("Rename object", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::SetNextItemWidth(300);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool enter = ImGui::InputText("##on", objNameBuf, sizeof objNameBuf, ImGuiInputTextFlags_EnterReturnsTrue);
+        Object* ro = nullptr;
+        for (int a = -1; a < (int)proj.markers.size() && !ro; ++a) { Scene::Marker& rm = a < 0 ? proj.camera : proj.markers[a]; const int k = indexOfId(rm, renamingObj); if (k >= 0) ro = &rm.objects[k]; }
+        if ((enter || ImGui::Button("Rename", ImVec2(145, 0))) && ro && objNameBuf[0]) { beginEdit(); ro->name = objNameBuf; renamingObj = -1; ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(145, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape) || !ro) { renamingObj = -1; ImGui::CloseCurrentPopup(); }
+        ImGui::EndPopup();
+    }
+    // what's left of the window: files and objects dropped there go to the selected anchor's top level
+    const ImVec2 rest = ImGui::GetContentRegionAvail();
+    if (rest.x > 4 && rest.y > 4) {
+        ImGui::InvisibleButton("##hrest", rest, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+        if (ImGui::IsItemClicked(0)) selAsset.clear();
+        if (ImGui::BeginPopupContextItem("##hctx")) {
+            if (selMarker < 0 && selMarker != -2 && !proj.markers.empty()) selMarker = 0;
+            selObject = -1; selAsset.clear();
+            Scene::Marker* pm = curMarker();
+            if (ImGui::MenuItem("Paste", "Ctrl+V", false, pm && !objClip.empty())) { const int id = pasteObject(*pm, -1); if (id >= 0) selObject = id; }
+            ImGui::Separator();
+            gameObjectItems();
+            ImGui::EndPopup();
+        }
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) {
+                Scene::Marker* dm = curMarker(); int dmi = selMarker;
+                if (!dm && !proj.markers.empty()) { dm = &proj.markers[0]; dmi = 0; }
+                if (dm) dropAsset(*dm, dmi, -1, std::string((const char*)pl->Data));
+            }
+            ImGui::EndDragDropTarget();
+        }
+    }
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(0) && ImGui::IsAnyItemHovered()) selAsset.clear();
     ImGui::EndChild();
 }
 
@@ -2235,7 +2304,7 @@ static void markerInspector(Scene::Marker& m) {
     ImGui::SetNextItemWidth(-1); if (ImGui::InputText("##name", name, sizeof name)) m.name = name;
     ImGui::TextDisabled("%s anchor (Edit > Project Settings: what the game tracks)", anchorWord());
     if (proj.tracking == TRACK_IMAGES && section("Picture to look for")) {
-        fileRow("Picture", m.target, L"Pictures\0*.png;*.jpg;*.jpeg\0\0");
+        fileRow("Picture", m.target, L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0");
         ImGui::TextDisabled("Any photo, poster or page; it's 1 across in the scene.\nDetailed pictures with corners and texture track best;\nplain or repeating ones don't.");
     }
     if (proj.tracking == TRACK_FACES && section("Face")) {
@@ -2289,7 +2358,7 @@ static void markerInspector(Scene::Marker& m) {
                 if (ImGui::Selectable("Kanji", m.preset == "kanji")) { m.preset = "kanji"; m.letter.clear(); }
                 if (ImGui::Selectable("A letter or word", m.preset.empty() && !m.letter.empty())) { m.preset.clear(); if (m.letter.empty()) m.letter = "A"; }
                 if (ImGui::Selectable("A picture...", m.preset.empty() && m.letter.empty())) {
-                    const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0");
+                    const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0");
                     if (!f.empty()) { m.picture = bring(f); m.preset.clear(); m.letter.clear(); }
                 }
                 ImGui::EndCombo();
@@ -2332,6 +2401,61 @@ static void markerInspector(Scene::Marker& m) {
 
 // a component's header, Unity's way: open/close, its tick (when it has one), its name, and a menu (Reset, Remove)
 enum { C_KEEP, C_RESET, C_REMOVE };
+// Unity's component clipboard: Copy Component, Paste Component Values (onto the same kind), Paste Component As New
+static Object* hdrObj = nullptr;            // the object whose Inspector is being drawn (nullptr: the Main Camera)
+static const char* hdrKey = nullptr;        // this header's component, when its title says something else (the look, a script)
+static int hdrScript = -1;                  // a script header: which of its scripts
+static struct { std::string key; Object snap; std::string script; } compClip;
+template <class T, size_t N> static void cpa(T (&a)[N], const T (&b)[N]) { for (size_t i = 0; i < N; ++i) a[i] = b[i]; }
+// the fields of one component, from one object onto another
+static void copyComponent(const std::string& key, const Object& f, Object& t) {
+    if (key == "Transform") { cpa(t.pos, f.pos); cpa(t.rot, f.rot); cpa(t.scl, f.scl); }
+    else if (key == "Look") {
+        t.kind = f.kind; t.lookOn = f.lookOn; t.file = f.file; cpa(t.colour, f.colour); t.lit = f.lit; t.glow = f.glow; t.billboard = f.billboard;
+        t.metallic = f.metallic; t.roughness = f.roughness; cpa(t.emissive, f.emissive); t.emissiveStrength = f.emissiveStrength;
+        t.castShadows = f.castShadows; t.receiveShadows = f.receiveShadows; t.occluder = f.occluder;
+        t.count = f.count; t.spriteSize = f.spriteSize; t.flap = f.flap; t.clip = f.clip; t.clipSpeed = f.clipSpeed; t.clipLoop = f.clipLoop; t.rays = f.rays; t.text = f.text;
+    } else if (key == "Animate") { t.hasAnim = true; t.animOn = f.animOn; t.anim = f.anim; t.animSpeed = f.animSpeed; t.animAmount = f.animAmount; }
+    else if (key == "Canvas") { t.hasCanvas = true; t.canvasWithAnchor = f.canvasWithAnchor; t.canvasCss = f.canvasCss; }
+    else if (key == "UI") {
+        t.ui = f.ui; t.uiOn = f.uiOn; t.uiAnchor = f.uiAnchor; cpa(t.uiRect, f.uiRect); t.uiText = f.uiText; t.uiFont = f.uiFont; t.uiAlign = f.uiAlign;
+        cpa(t.uiColour, f.uiColour); cpa(t.uiBg, f.uiBg); t.uiMin = f.uiMin; t.uiMax = f.uiMax; t.uiValue = f.uiValue; t.uiChecked = f.uiChecked;
+        t.uiFile = f.uiFile; t.uiClass = f.uiClass; t.uiOnClick = f.uiOnClick;
+    } else if (key == "Light") {
+        t.hasLight = true; t.lightOn = f.lightOn; t.lightType = f.lightType; cpa(t.lightColour, f.lightColour); t.lightIntensity = f.lightIntensity;
+        t.lightRange = f.lightRange; t.spotAngle = f.spotAngle; t.lightShadows = f.lightShadows;
+    } else if (key == "Audio Source") {
+        t.hasAudio = true; t.audioOn = f.audioOn; t.audioFile = f.audioFile; t.volume = f.volume; t.audioLoop = f.audioLoop; t.playOnStart = f.playOnStart;
+        t.spatial = f.spatial; t.audioNear = f.audioNear; t.audioFar = f.audioFar;
+    } else if (key == "Particle System") {
+        t.hasParticles = true; t.particlesOn = f.particlesOn; t.particleFile = f.particleFile; t.pRate = f.pRate; t.pLife = f.pLife; t.pSpeed = f.pSpeed;
+        t.pSpread = f.pSpread; t.pSizeStart = f.pSizeStart; t.pSizeEnd = f.pSizeEnd; t.pGravity = f.pGravity; cpa(t.pColourStart, f.pColourStart);
+        cpa(t.pColourEnd, f.pColourEnd); t.pGlow = f.pGlow;
+    } else if (key == "Line Renderer") { t.hasLine = true; t.lineOn = f.lineOn; t.lineLoop = f.lineLoop; t.linePoints = f.linePoints; t.lineWidth = f.lineWidth; cpa(t.lineColour, f.lineColour); }
+    else if (key == "AR Path") {
+        t.hasPath = true; t.pathOn = f.pathOn; t.pathLoop = f.pathLoop; t.pathLine = f.pathLine; t.pathName = f.pathName; t.pathPoints = f.pathPoints;
+        t.arrowSpacing = f.arrowSpacing; t.arrowSize = f.arrowSize; cpa(t.pathColour, f.pathColour);
+    } else if (key == "AR Path Follower") { t.hasFollower = true; t.followerOn = f.followerOn; t.followLoop = f.followLoop; t.followOnStart = f.followOnStart; t.followPath = f.followPath; t.followSpeed = f.followSpeed; }
+    else if (key == "Video Player") {
+        t.hasVideo = true; t.videoOn = f.videoOn; t.videoFile = f.videoFile; t.videoLoop = f.videoLoop; t.videoPlayOnStart = f.videoPlayOnStart; t.videoMuted = f.videoMuted;
+        t.videoVolume = f.videoVolume; t.videoSpeed = f.videoSpeed; t.videoAlpha = f.videoAlpha; cpa(t.videoKey, f.videoKey); t.videoKeyTol = f.videoKeyTol; t.videoKeySoft = f.videoKeySoft;
+    } else if (key == "Trail Renderer") { t.hasTrail = true; t.trailOn = f.trailOn; t.trailTime = f.trailTime; t.trailWidth = f.trailWidth; cpa(t.trailColour, f.trailColour); }
+}
+static bool hasComponent(const std::string& key, const Object& o) {
+    if (key == "Transform") return true; if (key == "Look") return o.kind != EMPTY; if (key == "Animate") return o.hasAnim; if (key == "Canvas") return o.hasCanvas;
+    if (key == "UI") return o.ui != UI_NONE; if (key == "Light") return o.hasLight; if (key == "Audio Source") return o.hasAudio; if (key == "Particle System") return o.hasParticles;
+    if (key == "Line Renderer") return o.hasLine; if (key == "AR Path") return o.hasPath; if (key == "AR Path Follower") return o.hasFollower;
+    if (key == "Video Player") return o.hasVideo; if (key == "Trail Renderer") return o.hasTrail;
+    return false;
+}
+static void pasteAsNew(Object& t) {   // the copied component onto this object (one of a kind: its values, if it has one already)
+    if (compClip.key.empty()) return;
+    beginEdit();
+    if (compClip.key == "Script") { t.scripts.push_back({compClip.script, true}); say("Pasted the script " + fs::u8path(compClip.script).filename().u8string()); return; }
+    const bool had = hasComponent(compClip.key, t);
+    copyComponent(compClip.key, compClip.snap, t);
+    say(had ? t.name + " has a " + compClip.key + " already: its values were pasted" : "Pasted " + compClip.key + " onto " + t.name);
+}
 static int componentHeader(const char* name, bool* on, bool removable) {
     ImGui::Spacing();
     ImGui::PushID(name);
@@ -2359,6 +2483,21 @@ static int componentHeader(const char* name, bool* on, bool removable) {
         if (ImGui::MenuItem("Reset")) act = C_RESET;
         if (ImGui::MenuItem("Remove Component", nullptr, false, removable)) act = C_REMOVE;
         if (!removable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Every object has a Transform");
+        ImGui::Separator();
+        const std::string key = hdrKey ? hdrKey : std::string(name).rfind("UI ", 0) == 0 ? "UI" : name;
+        if (ImGui::MenuItem("Copy Component", nullptr, false, hdrObj != nullptr) && hdrObj) {
+            compClip.key = key; compClip.snap = *hdrObj;
+            compClip.script = key == "Script" && hdrScript >= 0 && hdrScript < (int)hdrObj->scripts.size() ? hdrObj->scripts[hdrScript].file : "";
+            say("Copied " + key + (compClip.script.empty() ? "" : " (" + fs::u8path(compClip.script).filename().u8string() + ")"));
+        }
+        const bool sameKind = hdrObj && compClip.key == key && key != "Script";
+        if (ImGui::MenuItem("Paste Component Values", nullptr, false, sameKind) && sameKind) {
+            beginEdit(); copyComponent(key, compClip.snap, *hdrObj); say("Pasted the " + key + "'s values");
+        }
+        if (!sameKind && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(compClip.key.empty() ? "Copy a component first" : "The copied one is a %s: values go onto the same kind", compClip.key.c_str());
+        std::string asNew = compClip.key.empty() ? "Paste Component As New" : "Paste " + compClip.key + " As New";
+        if (ImGui::MenuItem(asNew.c_str(), nullptr, false, hdrObj && !compClip.key.empty()) && hdrObj) pasteAsNew(*hdrObj);
         ImGui::EndPopup();
     }
     ImGui::SetCursorScreenPos(after);
@@ -2370,7 +2509,7 @@ static int componentHeader(const char* name, bool* on, bool removable) {
 static bool giveLook(Object& o, int kind) {
     const Object fresh = make(proj, kind, o.parent);
     std::string file;
-    if (kind == PICTURE || kind == SPRITES) { file = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); if (file.empty()) return false; file = bring(file); }
+    if (kind == PICTURE || kind == SPRITES) { file = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0"); if (file.empty()) return false; file = bring(file); }
     if (kind == MODEL) { file = openDialog(L"3D models (glTF)\0*.glb;*.gltf\0\0"); if (file.empty()) return false; file = bring(file); }
     o.kind = kind; o.lookOn = true; o.file = file;
     memcpy(o.colour, fresh.colour, sizeof o.colour); o.lit = fresh.lit; o.glow = fresh.glow; o.billboard = fresh.billboard;
@@ -2551,7 +2690,7 @@ static void addComponentMenu(Object& o) {
         if (ImGui::MenuItem("Canvas", nullptr, false, !o.hasCanvas && o.ui == UI_NONE)) o.hasCanvas = true;
         for (int k = 1; k < UI_COUNT; ++k) if (ImGui::MenuItem(UI_NAMES[k], nullptr, false, o.ui == UI_NONE && !o.hasCanvas)) {
             o.ui = k; o.uiText = k == UI_TEXT ? "New Text" : UI_NAMES[k];
-            if (k == UI_IMAGE) { const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg\0\0"); if (!f.empty()) o.uiFile = bring(f); }
+            if (k == UI_IMAGE) { const std::string f = openDialog(L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0"); if (!f.empty()) o.uiFile = bring(f); }
         }
         ImGui::EndMenu();
     }
@@ -2563,6 +2702,7 @@ static void addComponentMenu(Object& o) {
 }
 
 static void objectInspector(Scene::Marker& m, Object& o) {
+    hdrObj = &o; hdrKey = nullptr; hdrScript = -1;
     ImGui::Checkbox("##active", &o.active); tip("Active: off hides it and everything under it");
     ImGui::SameLine();
     char name[96]; snprintf(name, sizeof name, "%s", o.name.c_str());
@@ -2572,11 +2712,11 @@ static void objectInspector(Scene::Marker& m, Object& o) {
     if ((h & 0xff) == C_RESET) for (int k = 0; k < 3; ++k) { o.pos[k] = 0; o.rot[k] = 0; o.scl[k] = 1; }
     if (h & 0x100) { vec3Row("Position", o.pos, 0.005f); vec3Row("Rotation", o.rot, 0.5f); vec3Row("Scale", o.scl, 0.005f); }
 
-    const wchar_t* PICS = L"Pictures\0*.png;*.jpg;*.jpeg\0\0";
+    const wchar_t* PICS = L"Pictures\0*.png;*.jpg;*.jpeg;*.jfif\0\0";
     // the look, with its material
     if (o.kind != EMPTY) {
         const std::string title = isPrimitive(o.kind) ? std::string("Mesh: ") + KIND_NAMES[o.kind] : KIND_NAMES[o.kind];
-        h = componentHeader(title.c_str(), &o.lookOn, true);
+        hdrKey = "Look"; h = componentHeader(title.c_str(), &o.lookOn, true); hdrKey = nullptr;
         if ((h & 0xff) == C_REMOVE) { o.kind = EMPTY; o.file.clear(); }
         else {
             if ((h & 0xff) == C_RESET) { const int k = o.kind; const std::string f = o.file; const Object fresh = make(proj, k, o.parent);
@@ -2898,7 +3038,7 @@ static void objectInspector(Scene::Marker& m, Object& o) {
         ImGui::PushID((int)si);
         Script& sc = o.scripts[si];
         const std::string title = "Script: " + fs::u8path(sc.file).filename().u8string();
-        h = componentHeader(title.c_str(), &sc.on, true);
+        hdrKey = "Script"; hdrScript = (int)si; h = componentHeader(title.c_str(), &sc.on, true); hdrKey = nullptr; hdrScript = -1;
         if ((h & 0xff) == C_REMOVE) { o.scripts.erase(o.scripts.begin() + si); ImGui::PopID(); break; }
         if (h & 0x100) {
             fileRow("File", sc.file, L"JavaScript\0*.js\0\0");
@@ -2916,12 +3056,19 @@ static void objectInspector(Scene::Marker& m, Object& o) {
         if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) dropAsset(m, selMarker, o.id, std::string((const char*)pl->Data));
         ImGui::EndDragDropTarget();
     }
-    if (ImGui::BeginPopup("addcomp")) { addComponentMenu(o); ImGui::EndPopup(); }
+    if (ImGui::BeginPopup("addcomp")) {
+        if (!compClip.key.empty()) {   // the copied component (Copy Component in a component's ... menu)
+            if (ImGui::MenuItem(("Paste " + compClip.key + (compClip.key == "Script" ? " (" + fs::u8path(compClip.script).filename().u8string() + ")" : "") + " As New").c_str())) pasteAsNew(o);
+            ImGui::Separator();
+        }
+        addComponentMenu(o); ImGui::EndPopup();
+    }
     (void)m;
 }
 
 // the Main Camera: Unity's Camera component (and its Audio Listener), for the phone or webcam
 static void cameraInspector() {
+    hdrObj = nullptr; hdrKey = nullptr;
     ImGui::PushFont(boldFont); ImGui::TextUnformatted("\xe2\x97\x89 Main Camera"); ImGui::PopFont();
     ImGui::TextDisabled("Every scene has one: the phone (or the webcam).");
     int h = componentHeader("Camera", nullptr, false);
@@ -2940,13 +3087,78 @@ static void cameraInspector() {
     ImGui::TextWrapped("Objects under the Main Camera ride with it: a torch, a held thing, a sight in the middle of the view. "
                        "Make one with the Camera selected (GameObject menu), or drag one onto it.");
 }
+// a file selected in the Project window: what it is, a look at it, and what can be done with it
+static void assetInspector() {
+    const fs::path f = fs::u8path(selAsset);
+    std::error_code ec;
+    if (!fs::exists(f, ec)) { selAsset.clear(); return; }
+    const bool dir = fs::is_directory(f, ec);
+    const char* kind = dir ? "Folder" : assetKind(f);
+    ImGui::PushFont(boldFont); ImGui::Text("%s  %s", dir ? "\xe2\x96\xb0" : assetIcon(kind), f.filename().u8string().c_str()); ImGui::PopFont();
+    const auto size = dir ? 0 : fs::file_size(f, ec);
+    const fs::path assets = fs::u8path(folder) / "assets";
+    const fs::path rel = fs::relative(f, fs::u8path(folder), ec);
+    ImGui::TextDisabled("%s%s   %s", kind, dir ? "" : size >= 1048576 ? ("   " + std::to_string(size / 1048576) + "." + std::to_string(size % 1048576 * 10 / 1048576) + " MB").c_str() : ("   " + std::to_string((size + 1023) / 1024) + " KB").c_str(),
+                        rel.generic_u8string().c_str());
+    (void)assets;
+    ImGui::Separator(); ImGui::Spacing();
+    Scene::Marker* m = curMarker();
+    Object* o = curObject();
+    const float w = ImGui::GetContentRegionAvail().x;
+    if (!strcmp(kind, "Picture")) {
+        int iw = 0, ih = 0; const unsigned t = Viewer::pictureTexture(selAsset, &iw, &ih);
+        if (t && iw > 0) { const float k = std::min(w / iw, 260.0f / ih); ImGui::Image((ImTextureID)(intptr_t)t, ImVec2(iw * k, ih * k)); ImGui::TextDisabled("%d x %d pixels", iw, ih); }
+    } else if (!strcmp(kind, "Model")) {
+        const auto clips = Viewer::clipsOf(selAsset);
+        ImGui::Text("Animation clips: %d", (int)clips.size());
+        for (const auto& c : clips) ImGui::BulletText("%s", c.c_str());
+    } else if (!strcmp(kind, "Script")) {
+        if (ImGui::Button("Edit Script", ImVec2(-1, 0))) openScript(selAsset);
+        std::ifstream in(f, std::ios::binary); std::string code, line; int n = 0;
+        while (n < 200 && std::getline(in, line)) { if (!line.empty() && line.back() == '\r') line.pop_back(); code += line + "\n"; ++n; }
+        ImGui::BeginChild("##code", ImVec2(0, 280), true, ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::TextUnformatted(code.c_str());
+        ImGui::EndChild();
+    } else if (!strcmp(kind, "Prefab")) {
+        std::vector<Object> objs;
+        if (loadPrefab(selAsset, objs)) { ImGui::Text("%d object%s:", (int)objs.size(), objs.size() == 1 ? "" : "s"); for (const auto& q : objs) ImGui::BulletText("%s%s", q.parent == -1 ? "" : "   ", q.name.c_str()); }
+    } else if (!strcmp(kind, "Video")) {
+        const fs::path poster = f.parent_path() / fs::u8path(f.stem().u8string() + ".poster.png");
+        int iw = 0, ih = 0; const unsigned t = fs::exists(poster, ec) ? Viewer::pictureTexture(poster.u8string(), &iw, &ih) : 0;
+        if (t && iw > 0) { const float k = std::min(w / iw, 220.0f / ih); ImGui::Image((ImTextureID)(intptr_t)t, ImVec2(iw * k, ih * k)); }
+        if (ImGui::Button("Play it", ImVec2(-1, 0))) openInExplorer(selAsset);
+    } else if (!strcmp(kind, "Audio")) {
+        if (ImGui::Button("Play it", ImVec2(-1, 0))) openInExplorer(selAsset);
+    } else if (!strcmp(kind, "Marker") && f.extension() == ".marker" && m && selMarker >= 0) {
+        if (ImGui::Button(("Use on " + m->name).c_str(), ImVec2(-1, 0))) { beginEdit(); applyMarkerFile(*m, selAsset); shownMarker = -1; }
+    }
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    // what can be done with it in the scene (as dragging it onto the Scene view or the Hierarchy)
+    if (!dir && m) {
+        const bool needsObject = !strcmp(kind, "Script") || !strcmp(kind, "Audio");
+        if (!needsObject && (!strcmp(kind, "Picture") || !strcmp(kind, "Model") || !strcmp(kind, "Prefab") || !strcmp(kind, "Video"))) {
+            if (ImGui::Button(("Add to " + (selMarker == -2 ? std::string("the Main Camera") : m->name)).c_str(), ImVec2(-1, 0))) { const std::string a = selAsset; dropAsset(*m, selMarker, -1, a); selAsset.clear(); return; }
+        }
+        if (o && strcmp(kind, "Marker") && strcmp(kind, "Prefab")) {
+            const std::string what = !strcmp(kind, "Script") ? "Add to " : !strcmp(kind, "Audio") ? "Give a sound to " : !strcmp(kind, "Video") ? "Play it on " : "Put under ";
+            if (ImGui::Button((what + o->name).c_str(), ImVec2(-1, 0))) { const std::string a = selAsset; dropAsset(*m, selMarker, o->id, a); selAsset.clear(); return; }
+        }
+        if (needsObject && !o) ImGui::TextDisabled("Select an object to give it this %s (or drag it onto one).", !strcmp(kind, "Script") ? "script" : "sound");
+    }
+    if (ImGui::Button("Show in Explorer", ImVec2(-1, 0))) openInExplorer(f.parent_path().u8string());
+    if (ImGui::Button("Rename...", ImVec2(-1, 0))) { renaming = selAsset; snprintf(renameBuf, sizeof renameBuf, "%s", f.filename().u8string().c_str()); }
+    ImGui::Spacing();
+    ImGui::TextDisabled("Drag it onto the Scene view, the Hierarchy or an object.");
+}
 static void inspector() {
     ImGui::PushFont(boldFont); ImGui::TextUnformatted("Inspector"); ImGui::PopFont();
     ImGui::Separator();
     ImGui::BeginChild("##insp");
     ImGui::PushItemWidth(-1);
     Scene::Marker* m = curMarker();
-    if (Object* o = curObject()) objectInspector(*m, *o);
+    if (!selAsset.empty() && (selMarker != selAssetMarker || selObject != selAssetObject)) selAsset.clear();   // something else was selected since
+    if (!selAsset.empty()) assetInspector();
+    else if (Object* o = curObject()) objectInspector(*m, *o);
     else if (selMarker == -2) cameraInspector();
     else if (m) markerInspector(*m);
     else ImGui::TextDisabled("Nothing selected.");
@@ -3119,8 +3331,32 @@ static void sceneView() {
     int picked = -1;
     static bool uiHasMouse = false;
     const unsigned tex = Viewer::render(proj, selMarker, selObject, (int)avail.x, (int)avail.y, hov && !handleHasMouse && !uiHasMouse, picked);
-    if (!uiHasMouse) { if (picked >= 0) { selMarker = ownerOf(picked); selObject = picked; } else if (picked == -2 && !handleHasMouse) selObject = -1; }
-    ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)tex, a, ImVec2(a.x + avail.x, a.y + avail.y), ImVec2(0, 1), ImVec2(1, 0));
+    if (!uiHasMouse) {
+        if (picked >= 0) { selMarker = ownerOf(picked); selObject = picked; }
+        else if (picked == -3) { selMarker = -2; selObject = -1; }   // the Main Camera
+        else if (picked == -2 && !handleHasMouse) selObject = -1;
+        if (picked != -1) selAsset.clear();
+    }
+    if (ImGui::BeginDragDropTarget()) {   // a file from the Project window: into the scene (onto the selected object, or the anchor)
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload("ASSET")) {
+            Scene::Marker* dm = curMarker(); const int dmi = dm ? selMarker : 0;
+            if (!dm && !proj.markers.empty()) dm = &proj.markers[0];
+            if (dm) dropAsset(*dm, dmi, selObject, std::string((const char*)pl->Data));
+        }
+        ImGui::EndDragDropTarget();
+    }
+    ImDrawList* vdl = ImGui::GetWindowDrawList();
+    vdl->AddImage((ImTextureID)(intptr_t)tex, a, ImVec2(a.x + avail.x, a.y + avail.y), ImVec2(0, 1), ImVec2(1, 0));
+    // the Main Camera selected (or something riding with it): what it sees, in the bottom right corner, as Unity does
+    const bool camSel = selMarker == -2;
+    if (camSel && lk.gizmo && avail.x > 200 && avail.y > 200) {
+        const float ph = std::min(avail.y * 0.42f, 320.0f), pw = ph * 9.0f / 16.0f;
+        const unsigned pt = Viewer::renderCameraPreview(proj, selMarker, (int)pw, (int)ph);
+        const ImVec2 p1(a.x + avail.x - pw - 12, a.y + avail.y - ph - 12), p2(a.x + avail.x - 12, a.y + avail.y - 12);
+        vdl->AddRectFilled(ImVec2(p1.x - 3, p1.y - 22), ImVec2(p2.x + 3, p2.y + 3), IM_COL32(0x22, 0x22, 0x22, 240), 4);
+        vdl->AddText(ImVec2(p1.x + 4, p1.y - 19), C_TEXT, "Camera Preview");
+        if (pt) vdl->AddImage((ImTextureID)(intptr_t)pt, p1, p2, ImVec2(0, 1), ImVec2(1, 0));
+    }
     const Object* so = curObject();
     handleHasMouse = (so && so->ui != UI_NONE) ? false : handles(a, avail);   // UI elements move on the phone, not in 3D
     uiHasMouse = !handleHasMouse && uiOverlay(a, avail);
@@ -3232,6 +3468,12 @@ static void keys() {
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_P)) playInBrowser();
     if (m && selObject >= 0 && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D)) { beginEdit(); selObject = duplicate(proj, *m, selObject); }
     if (m && selObject >= 0 && ImGui::IsKeyPressed(ImGuiKey_Delete)) { beginEdit(); remove(*m, selObject); selObject = -1; }
+    if (m && selObject >= 0 && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C)) copyObject(*m, selObject);
+    if (m && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V) && !objClip.empty()) {   // as Unity: beside the selected object (or on the anchor)
+        const int k = selObject >= 0 ? indexOfId(*m, selObject) : -1;
+        const int id = pasteObject(*m, k >= 0 ? m->objects[k].parent : -1); if (id >= 0) selObject = id;
+    }
+    if (m && selObject >= 0 && ImGui::IsKeyPressed(ImGuiKey_F2)) { const int k = indexOfId(*m, selObject); if (k >= 0) { renamingObj = selObject; snprintf(objNameBuf, sizeof objNameBuf, "%s", m->objects[k].name.c_str()); } }
 }
 
 static void frame() {
@@ -3300,6 +3542,8 @@ int main(int argc, char** argv) {
             Serve::start(args[i + 1], 8796); SDL_Delay((Uint32)(atof(args[i + 2].c_str()) * 1000)); return 0;
         }
         else if (args[i] == "--scenes") showScenes = true;
+        else if (args[i] == "--select-camera") selectArg = -100;   // tests: the Main Camera selected
+        else if (args[i] == "--select-asset" && i + 1 < args.size()) { selAsset = args[++i]; selAssetMarker = 0; selAssetObject = -1; }   // tests: a file selected in the Project window
         else if (args[i] == "--add-video" && i + 1 < args.size()) addVideoArg = args[++i];   // tests: a video, as dropped on the first anchor   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
         else if (args[i] == "--pick" && i + 2 < args.size()) { pickX = atoi(args[i + 1].c_str()); pickY = atoi(args[i + 2].c_str()); i += 2; }
         else openArg = args[i];
@@ -3366,6 +3610,7 @@ int main(int argc, char** argv) {
     if (!addVideoArg.empty() && !proj.markers.empty()) dropAsset(proj.markers[0], 0, -1, addVideoArg);
     if (!buildArg.empty()) { std::string err, apk; const bool ok = buildFor == "android" ? buildAndroid(buildArg, err, apk) : buildFor == "linux" ? buildLinux(buildArg, false, err) : buildFor == "pi" ? buildLinux(buildArg, true, err) : (buildWin || buildFor == "windows") ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
+    if (selectArg == -100) { selMarker = -2; selObject = -1; }
     if (capture.empty()) { SDL_ShowWindow(window); SDL_MaximizeWindow(window); SDL_RaiseWindow(window); }
 
     int frames = 0;
@@ -3384,7 +3629,7 @@ int main(int argc, char** argv) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         if (pickX >= 0 && frames == 20) Viewer::clickAt(pickX, pickY);
         if (!capture.empty() && ++frames >= 40) {
-            if (pickX >= 0) { std::ofstream(fs::u8path(capture + ".txt")) << (curObject() ? curObject()->name : std::string("(nothing)")) << "\n"; }
+            if (pickX >= 0) { std::ofstream(fs::u8path(capture + ".txt")) << (curObject() ? curObject()->name : selMarker == -2 ? std::string("Main Camera") : std::string("(nothing)")) << "\n"; }
             std::vector<unsigned char> px((size_t)w * h * 4);
             glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
             std::vector<unsigned char> flip(px.size());

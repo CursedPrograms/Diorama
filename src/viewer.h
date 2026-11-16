@@ -22,7 +22,9 @@ void setAnchorMode(int mode, const float head[3]);
 void reload(const std::string& file);    // a picture or model changed on disk
 void frameMarker();                      // look at the marker from the front, a little above
 std::vector<std::string> clipsOf(const std::string& modelFile);
-unsigned pictureTexture(const std::string& file, int* w, int* h);   // a picture's GL texture (the UI overlay's images)   // a model's animation clips (for the Inspector)
+unsigned pictureTexture(const std::string& file, int* w, int* h);
+// the Main Camera's view of the same scene (as the phone would see it), into its own texture (draw it with uv (0,1)-(1,0))
+unsigned renderCameraPreview(const Scene::Project& p, int marker, int w, int h);   // a picture's GL texture (the UI overlay's images)   // a model's animation clips (for the Inspector)
 void readPixels(std::vector<unsigned char>& rgba, int& w, int& h);
 
 // ---- the native AR player: the real camera's picture with each found anchor's world on it

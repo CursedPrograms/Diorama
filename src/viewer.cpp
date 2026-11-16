@@ -585,6 +585,14 @@ void frameMarker() {
 
 static GLuint fbo = 0, fboTex = 0, fboDepth = 0; static int fbW = 0, fbH = 0;
 static GLuint hdrFbo = 0, hdrTex = 0, hdrDepth = 0, bloomFbo[2] = {0, 0}, bloomTex[2] = {0, 0};
+// another set of these (the Main Camera's preview): swapped in while it's drawn, then back
+struct Target { GLuint fbo = 0, fboTex = 0, fboDepth = 0, hdrFbo = 0, hdrTex = 0, hdrDepth = 0, bloomFbo[2] = {0, 0}, bloomTex[2] = {0, 0}; int w = 0, h = 0; };
+static void swapTarget(Target& t) {
+    std::swap(fbo, t.fbo); std::swap(fboTex, t.fboTex); std::swap(fboDepth, t.fboDepth); std::swap(fbW, t.w); std::swap(fbH, t.h);
+    std::swap(hdrFbo, t.hdrFbo); std::swap(hdrTex, t.hdrTex); std::swap(hdrDepth, t.hdrDepth);
+    for (int i = 0; i < 2; ++i) { std::swap(bloomFbo[i], t.bloomFbo[i]); std::swap(bloomTex[i], t.bloomTex[i]); }
+}
+static Target previewTarget;
 static GLuint shadowFbo = 0, shadowTex[3] = {0, 0, 0}; static int shadowSize = 0;   // 0 the sun, 1 and 2 spot lights
 static void ensureShadows(int size) {
     if (shadowFbo && size == shadowSize) return;
@@ -917,6 +925,8 @@ static void finish(const Project& p, int w, int h) {
 }
 // the AR player's pass: this anchor (the view: its pose), the camera's objects with the first
 static bool arPass = false, arCamera = false; static const Marker* arMarker = nullptr;
+static bool previewing = false;   // drawing the Main Camera's preview
+static M4 lastCamWorld;
 static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, int& picked, float t);
 static M4 rigidInverse(const M4& a) {   // a rotation and a move, undone
     M4 r = ident();
@@ -960,6 +970,7 @@ unsigned render(const Project& p, int mi, int selected, int w, int h, bool hover
 
 static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, int& picked, float t) {
     const Marker* m = arPass ? arMarker : mi >= 0 && mi < (int)p.markers.size() ? &p.markers[mi] : nullptr;
+    if (!m && !arPass && mi == -2 && !p.markers.empty()) m = &p.markers[0];   // the Main Camera selected: the first anchor's world round it (its window too)
     curMarker = m;
     glUseProgram_(prog);
     glUniform1i_(uTex, 0); glUniform4f_(uClip, 0, 0, 0, 1); glUniform1i_(uPick, 0);
@@ -995,6 +1006,13 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
         for (int k = 0; k < 3; ++k) { camWorld.m[k] = r[k]; camWorld.m[4 + k] = u[k]; camWorld.m[8 + k] = -f[k]; camWorld.m[12 + k] = eyeP[k]; }
     }
     if (arPass) camWorld = rigidInverse(viewM);   // the real camera
+    lastCamWorld = camWorld;
+    if (previewing) {   // the Main Camera's preview: the view from it (portrait, as a phone held up)
+        viewM = rigidInverse(camWorld);
+        viewProj = mul(perspective(p.camFov * D2R, (float)w / h, std::max(0.005f, p.camNear), std::max(p.camNear + 0.1f, p.camFar)), viewM);
+        eye[0] = camWorld.m[12]; eye[1] = camWorld.m[13]; eye[2] = camWorld.m[14];
+        glUseProgram_(prog); glUniform3f_(uCamPos, eye[0], eye[1], eye[2]);
+    }
     auto placeAll = [&](const Marker& mk, const M4& base) {
         std::map<int, M4> worldOf;
         for (const Object& o : mk.objects) {
@@ -1175,7 +1193,7 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
     curMat = Mat();
     glDisable(GL_CLIP_DISTANCE0); glUniform4f_(uClip, 0, 0, 0, 1);
     glDisable(GL_STENCIL_TEST);
-    if (lk.gizmo && !arPass) {   // the Main Camera: a phone's view (portrait), from where it'd be held
+    if (lk.gizmo && !arPass && !previewing) {   // the Main Camera: a phone's view (portrait), from where it'd be held
         const float th = std::tan(p.camFov * 0.5f * D2R), d = 0.22f, hh = th * d, hw = hh * 9.0f / 16.0f;
         const float c[4] = {cameraSel ? 0.2f : 0.85f, cameraSel ? 0.66f : 0.85f, cameraSel ? 0.89f : 0.85f, 1};
         const float local[5][3] = {{0, 0, 0}, {-hw, -hh, -d}, {hw, -hh, -d}, {hw, hh, -d}, {-hw, hh, -d}};
@@ -1184,6 +1202,15 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
         const float up0[3] = {-hw * 0.4f, hh * 1.15f, -d}, up1[3] = {hw * 0.4f, hh * 1.15f, -d}, up2[3] = {0, hh * 1.45f, -d};   // which way is up
         float a0[3], a1[3], a2[3]; apply(camWorld, up0, a0); apply(camWorld, up1, a1); apply(camWorld, up2, a2);
         segment(a0, a2, 0.006f, c); segment(a2, a1, 0.006f, c); segment(a1, a0, 0.006f, c);
+        if (cameraSel) {   // its axes (red x, green y, blue z), over everything
+            glDisable(GL_DEPTH_TEST);
+            const float rc[4] = {0.9f, 0.25f, 0.25f, 1}, gc[4] = {0.35f, 0.85f, 0.35f, 1}, bc[4] = {0.3f, 0.55f, 1, 1};
+            const float o0[3] = {0, 0, 0}, ax[3][3] = {{0.3f, 0, 0}, {0, 0.3f, 0}, {0, 0, 0.3f}};
+            float wo[3]; apply(camWorld, o0, wo);
+            const float* cs[3] = {rc, gc, bc};
+            for (int k = 0; k < 3; ++k) { float wa[3]; apply(camWorld, ax[k], wa); segment(wo, wa, 0.012f, cs[k]); }
+            glEnable(GL_DEPTH_TEST);
+        }
     }
 
     // a click: draw again in id colours and read the pixel under the mouse (0: nothing)
@@ -1217,10 +1244,16 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
             } else drawObject(d, t);
         }
         glDisable(GL_CLIP_DISTANCE0); glUniform4f_(uClip, 0, 0, 0, 1); glDisable(GL_STENCIL_TEST);
+        if (lk.gizmo && !previewing) {   // the Main Camera: a box round its frustum, in its own colour
+            glUniform3f_(uPickCol, 254 / 255.0f, 1, 1);
+            const float th = std::tan(p.camFov * 0.5f * D2R), d = 0.22f, hh = th * d, hw = hh * 9.0f / 16.0f;
+            const float c[4] = {1, 1, 1, 1};
+            setCommon(mul(camWorld, mul(translate(0, 0, -d * 0.5f), scale(hw * 2 + 0.05f, hh * 2 + 0.05f, d + 0.04f))), c, 0, false); draw(mCube);
+        }
         unsigned char px[4] = {0, 0, 0, 0};
         glReadPixels(clickX, h - 1 - clickY, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
         const int id = px[0] | (px[1] << 8) | (px[2] << 16);
-        picked = id > 0 ? id : -2;   // -2: clicked on nothing
+        picked = id == 0xfffffe ? -3 : id > 0 ? id : -2;   // -2: clicked on nothing; -3: the Main Camera
         glUniform1i_(uPick, 0);
         glEnable(GL_BLEND);
         // the picture as it was (the pick pass drew over it)
@@ -1232,7 +1265,7 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
     clickX = clickY = -1;
 
     // the selected object: its axes (red x, green y, blue z), drawn over everything
-    if (lk.gizmo && selected >= 0) {
+    if (lk.gizmo && selected >= 0 && !previewing) {
         for (const Draw& d : draws) if (d.o->id == selected) {
             glDisable(GL_DEPTH_TEST);
             M4 at = translate(d.world.m[12], d.world.m[13], d.world.m[14]);
@@ -1245,6 +1278,33 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
     if (!arPass) finish(p, w, h);
     (void)lastPicked;
     return fboTex;
+}
+
+unsigned renderCameraPreview(const Project& p, int mi, int w, int h) {
+    if (w < 8 || h < 8) return 0;
+    // the editor's view is kept as it was drawn (the handles and clicks use it)
+    const M4 keepVP = viewProj, keepV = viewM; float keepEye[3] = {eye[0], eye[1], eye[2]};
+    const auto keepWorld = lastWorld; const auto keepCentres = screenCentres;
+    const int keepCX = clickX, keepCY = clickY; clickX = clickY = -1;
+    const bool keepGizmo = lk.gizmo;
+    swapTarget(previewTarget);
+    ensureTarget(w, h);
+    glBindFramebuffer_(GL_FRAMEBUFFER, hdrFbo);
+    glViewport(0, 0, w, h);
+    const float* cc = p.camColour;
+    if (p.camClear == 1) glClearColor(std::pow(cc[0], 2.2f), std::pow(cc[1], 2.2f), std::pow(cc[2], 2.2f), 1); else glClearColor(0.10f, 0.10f, 0.10f, 1);
+    glClearStencil(0); glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST); glEnable(GL_BLEND); blendFn(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); glDisable(GL_CULL_FACE);
+    previewing = true; bgTexture = 0;
+    int picked = -1;
+    scenePass(p, mi, -1, w, h, picked, lk.time);
+    previewing = false;
+    const unsigned tex = fboTex;
+    swapTarget(previewTarget);
+    viewProj = keepVP; viewM = keepV; eye[0] = keepEye[0]; eye[1] = keepEye[1]; eye[2] = keepEye[2];
+    lastWorld = keepWorld; screenCentres = keepCentres; clickX = keepCX; clickY = keepCY; lk.gizmo = keepGizmo;
+    glBindFramebuffer_(GL_FRAMEBUFFER, 0);
+    return tex;
 }
 
 unsigned renderAR(const Project& p, const std::vector<ArAnchor>& anchors, const float proj[16], unsigned bg, const float bgRect[4], int w, int h, float t) {
