@@ -7,6 +7,7 @@
 #include "model.h"
 #include "physics.h"
 #include "scene.h"
+#include "uifonts.h"
 #include "splash.h"
 #include "serve.h"
 #include "viewer.h"
@@ -303,8 +304,8 @@ static std::string bring(const std::string& file) {   // a file into the project
 }
 static void forEachFile(Project& p, const std::function<void(std::string&)>& f) {
     f(p.icon); f(p.splash);
-    for (auto& o : p.camera.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); f(o.uiFile); f(o.canvasCss); for (auto& sc : o.scripts) f(sc.file); }
-    for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); f(o.uiFile); f(o.canvasCss); for (auto& sc : o.scripts) f(sc.file); } }
+    for (auto& o : p.camera.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); f(o.uiFile); f(o.uiFontFile); f(o.canvasCss); for (auto& sc : o.scripts) f(sc.file); }
+    for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); f(o.uiFile); f(o.uiFontFile); f(o.canvasCss); for (auto& sc : o.scripts) f(sc.file); } }
 }
 static bool saveProject(bool askFolder) {
     stopSimulate();   // what's saved is the scene as made, not where things fell
@@ -996,13 +997,13 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
         const std::string key = f; f = "assets/" + name; done[key] = f;
     };
     std::string splashFile = proj.splash; if (si == 0) take(splashFile);
-    for (auto& ob : b.camera.objects) { take(ob.file); take(ob.audioFile); take(ob.particleFile); take(ob.videoFile); take(ob.uiFile); take(ob.canvasCss); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
+    for (auto& ob : b.camera.objects) { take(ob.file); take(ob.audioFile); take(ob.particleFile); take(ob.videoFile); take(ob.uiFile); take(ob.uiFontFile); take(ob.canvasCss); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
     // the markers: their pattern files (made from their pictures), their printable pictures, a sheet of them all
     for (size_t i = 0; i < b.markers.size(); ++i) {
         Scene::Marker& m = b.markers[i];
         const Scene::Marker orig = m;
         const std::string slug = sceneSlug + slugOf(m.name) + "-" + std::to_string(i + 1);
-        for (auto& ob : m.objects) { take(ob.file); take(ob.audioFile); take(ob.particleFile); take(ob.videoFile); take(ob.uiFile); take(ob.canvasCss); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
+        for (auto& ob : m.objects) { take(ob.file); take(ob.audioFile); take(ob.particleFile); take(ob.videoFile); take(ob.uiFile); take(ob.uiFontFile); take(ob.canvasCss); for (auto& sc : ob.scripts) { scriptSrc[sc.file.empty() ? "" : sc.file] = sc.file; take(sc.file); } }
         if (proj.tracking == TRACK_IMAGES) {   // the picture to look for: in the build, and on the sheet to print
             if (m.target.empty()) { err = m.name + " has no picture to look for (its Inspector)"; return false; }
             Markers::Image im;
@@ -1059,7 +1060,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
                 if (e.path().extension() != ".prefab") continue;
                 std::vector<Object> objs;
                 if (!loadPrefab(e.path().u8string(), objs)) continue;
-                for (auto& o : objs) { take(o.file); take(o.audioFile); take(o.particleFile); take(o.videoFile); take(o.uiFile); take(o.canvasCss); for (auto& sc : o.scripts) take(sc.file); }
+                for (auto& o : objs) { take(o.file); take(o.audioFile); take(o.particleFile); take(o.videoFile); take(o.uiFile); take(o.uiFontFile); take(o.canvasCss); for (auto& sc : o.scripts) take(sc.file); }
                 Project tmp; Scene::Marker k; k.objects = objs; tmp.markers.push_back(k);
                 {   // and as a file (the native player's spawn("Name"))
                     std::error_code pd; fs::create_directories(o / "prefabs", pd);
@@ -1900,7 +1901,7 @@ static void drawUiTree(ImDrawList* dl, const Scene::Marker& m, int mi, int paren
             r = uiRectIn(o, pr, s);
             const ImVec2 a(r.x, r.y), b(r.z, r.w);
             const float fs = std::max(6.0f, o.uiFont * s);
-            ImFont* f = ImGui::GetFont();
+            ImFont* f = UiFonts::get(o.uiFontFile);
             auto text = [&](const std::string& t, ImVec2 lo, ImVec2 hi, int align) {
                 const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, t.c_str());
                 const float x = align == 0 ? lo.x + 4 * s : align == 2 ? hi.x - ts.x - 4 * s : (lo.x + hi.x - ts.x) / 2;
@@ -1956,21 +1957,43 @@ static bool uiOverlay(ImVec2 a, ImVec2 avail) {
     for (const auto& hh : hits) if (hh.marker == selMarker && hh.id == selObject)
         dl->AddRect(ImVec2(hh.r.x - 1, hh.r.y - 1), ImVec2(hh.r.z + 1, hh.r.w + 1), C_BLUE, 0, 0, 2);
     // pick (the topmost: drawn last) and drag
-    static int dragId = -1, dragMarker = -1;
+    static int dragId = -1, dragMarker = -1, dragAxis = 2;   // dragAxis: 0 x only, 1 y only, 2 both
     const ImVec2 mp = ImGui::GetMousePos();
+    const bool inView = mp.x >= a.x && mp.y >= a.y && mp.x < a.x + avail.x && mp.y < a.y + avail.y && ImGui::IsWindowHovered();
+    // the selected element's move arrows, as Unity's: red x (right), green y (up), the square in the middle both
+    int arrow = -1;
+    for (const auto& hh : hits) if (hh.marker == selMarker && hh.id == selObject) {
+        const ImVec2 c((hh.r.x + hh.r.z) / 2, (hh.r.y + hh.r.w) / 2);
+        const float L = 46, hw = 7;
+        const float dx = mp.x - c.x, dy = mp.y - c.y;
+        if (std::fabs(dx) <= hw && std::fabs(dy) <= hw) arrow = 2;
+        else if (dx > hw && dx <= L + 10 && std::fabs(dy) <= 7) arrow = 0;
+        else if (-dy > hw && -dy <= L + 10 && std::fabs(dx) <= 7) arrow = 1;
+        if (dragId >= 0) arrow = dragAxis;
+        const ImU32 red = arrow == 0 ? IM_COL32(255, 220, 90, 255) : IM_COL32(230, 64, 64, 255);
+        const ImU32 green = arrow == 1 ? IM_COL32(255, 220, 90, 255) : IM_COL32(90, 215, 90, 255);
+        const ImU32 both = arrow == 2 ? IM_COL32(255, 220, 90, 230) : IM_COL32(80, 140, 255, 200);
+        dl->AddLine(c, ImVec2(c.x + L, c.y), red, 2.5f);
+        dl->AddTriangleFilled(ImVec2(c.x + L + 10, c.y), ImVec2(c.x + L, c.y - 6), ImVec2(c.x + L, c.y + 6), red);
+        dl->AddLine(c, ImVec2(c.x, c.y - L), green, 2.5f);
+        dl->AddTriangleFilled(ImVec2(c.x, c.y - L - 10), ImVec2(c.x - 6, c.y - L), ImVec2(c.x + 6, c.y - L), green);
+        dl->AddRectFilled(ImVec2(c.x - hw, c.y - hw), ImVec2(c.x + hw, c.y + hw), both);
+        break;
+    }
     int over = -1;
     for (int i = (int)hits.size() - 1; i >= 0; --i) if (mp.x >= hits[i].r.x && mp.x <= hits[i].r.z && mp.y >= hits[i].r.y && mp.y <= hits[i].r.w) { over = i; break; }
-    const bool inView = mp.x >= a.x && mp.y >= a.y && mp.x < a.x + avail.x && mp.y < a.y + avail.y && ImGui::IsWindowHovered();
-    if (inView && over >= 0 && ImGui::IsMouseClicked(0)) { beginEdit(); selMarker = hits[over].marker; selObject = hits[over].id; dragId = selObject; dragMarker = selMarker; }
+    if (inView && arrow >= 0 && dragId < 0 && ImGui::IsMouseClicked(0)) { beginEdit(); dragId = selObject; dragMarker = selMarker; dragAxis = arrow; }
+    else if (inView && over >= 0 && ImGui::IsMouseClicked(0)) { beginEdit(); selMarker = hits[over].marker; selObject = hits[over].id; dragId = selObject; dragMarker = selMarker; dragAxis = 2; }
     if (dragId >= 0) {
         if (!ImGui::IsMouseDown(0)) dragId = -1;
         else if (Scene::Marker* m = dragMarker < (int)proj.markers.size() ? &proj.markers[dragMarker] : nullptr) {
             const int i = indexOfId(*m, dragId);
             const ImVec2 d = ImGui::GetIO().MouseDelta;
-            if (i >= 0) { m->objects[i].uiRect[0] += d.x / s; m->objects[i].uiRect[1] += d.y / s; }
+            if (i >= 0) { if (dragAxis != 1) m->objects[i].uiRect[0] += d.x / s; if (dragAxis != 0) m->objects[i].uiRect[1] += d.y / s; }
         }
         return true;
     }
+    if (inView && arrow >= 0) return true;
     return inView && over >= 0;
 }
 // a UI element: under the selected Canvas (or its elements), else in a new Canvas, like Unity
@@ -2279,7 +2302,7 @@ static bool savePrefab(const Scene::Marker& m, int rootId, const std::string& di
     const fs::path base = fs::u8path(folder);
     for (auto& o : k.objects) {
         auto rel = [&](std::string& f) { if (f.empty()) return; std::error_code ec; const fs::path r = fs::relative(fs::u8path(f), base, ec); if (!ec && r.u8string().rfind("..", 0) != 0) f = r.generic_u8string(); };
-        rel(o.file); rel(o.audioFile); rel(o.particleFile); rel(o.videoFile); rel(o.uiFile); rel(o.canvasCss); for (auto& sc : o.scripts) rel(sc.file);
+        rel(o.file); rel(o.audioFile); rel(o.particleFile); rel(o.videoFile); rel(o.uiFile); rel(o.uiFontFile); rel(o.canvasCss); for (auto& sc : o.scripts) rel(sc.file);
     }
     tmp.markers.push_back(k);
     std::string name = k.objects[0].name; for (auto& c : name) if (strchr("<>:\"/\\|?*", c)) c = '_';
@@ -2296,7 +2319,7 @@ static bool loadPrefab(const std::string& file, std::vector<Object>& out) {
     const fs::path base = fs::u8path(folder);
     for (auto& o : out) {
         auto abs = [&](std::string& f) { if (!f.empty() && fs::u8path(f).is_relative()) f = (base / fs::u8path(f)).u8string(); };
-        abs(o.file); abs(o.audioFile); abs(o.particleFile); abs(o.videoFile); abs(o.uiFile); abs(o.canvasCss); for (auto& sc : o.scripts) abs(sc.file);
+        abs(o.file); abs(o.audioFile); abs(o.particleFile); abs(o.videoFile); abs(o.uiFile); abs(o.uiFontFile); abs(o.canvasCss); for (auto& sc : o.scripts) abs(sc.file);
     }
     return !out.empty();
 }
@@ -2678,7 +2701,7 @@ static void copyComponent(const std::string& key, const Object& f, Object& t) {
     else if (key == "UI") {
         t.ui = f.ui; t.uiOn = f.uiOn; t.uiAnchor = f.uiAnchor; cpa(t.uiRect, f.uiRect); t.uiText = f.uiText; t.uiFont = f.uiFont; t.uiAlign = f.uiAlign;
         cpa(t.uiColour, f.uiColour); cpa(t.uiBg, f.uiBg); t.uiMin = f.uiMin; t.uiMax = f.uiMax; t.uiValue = f.uiValue; t.uiChecked = f.uiChecked;
-        t.uiFile = f.uiFile; t.uiClass = f.uiClass; t.uiOnClick = f.uiOnClick;
+        t.uiFile = f.uiFile; t.uiFontFile = f.uiFontFile; t.uiClass = f.uiClass; t.uiOnClick = f.uiOnClick;
     } else if (key == "Light") {
         t.hasLight = true; t.lightOn = f.lightOn; t.lightType = f.lightType; cpa(t.lightColour, f.lightColour); t.lightIntensity = f.lightIntensity;
         t.lightRange = f.lightRange; t.spotAngle = f.spotAngle; t.lightShadows = f.lightShadows;
@@ -3153,6 +3176,8 @@ static void objectInspector(Scene::Marker& m, Object& o) {
             if (o.ui == UI_TEXT || o.ui == UI_BUTTON || o.ui == UI_TOGGLE) {
                 char t[512]; snprintf(t, sizeof t, "%s", o.uiText.c_str());
                 labelled("Text"); if (ImGui::InputText("##uit", t, sizeof t)) o.uiText = t;
+                fileRow("Font", o.uiFontFile, L"Fonts\0*.ttf;*.otf\0\0");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("A .ttf or .otf font, as Unity's Font: it's copied into the project and goes into the builds");
                 labelled("Size"); ImGui::SliderFloat("##uif", &o.uiFont, 6, 96, "%.0f");
                 if (o.ui == UI_TEXT) { const char* al[] = {"Left", "Centre", "Right"}; labelled("Align"); ImGui::Combo("##uia", &o.uiAlign, al, 3); }
                 labelled("Text colour"); ImGui::ColorEdit4("##uic", o.uiColour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
@@ -3965,7 +3990,7 @@ static void frame() {
 }
 
 int main(int argc, char** argv) {
-    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false; std::string buildFor, addVideoArg; float simulateArg = -1;
+    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false; std::string buildFor, addVideoArg, uiFontArg; float simulateArg = -1;
     std::vector<std::string> args;
 #ifdef _WIN32
     { int n; LPWSTR* wa = CommandLineToArgvW(GetCommandLineW(), &n); if (wa) { for (int i = 1; i < n; ++i) args.push_back(fs::path(wa[i]).u8string()); LocalFree(wa); } }
@@ -3991,6 +4016,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--profiler") showProfiler = true;
         else if (args[i] == "--2d") Viewer::look().view2D = true;   // tests: the 2D view   // tests: the Profiler open
         else if (args[i] == "--simulate" && i + 1 < args.size()) simulateArg = (float)atof(args[++i].c_str());   // tests: Simulate, run this long
+        else if (args[i] == "--ui-font" && i + 1 < args.size()) uiFontArg = args[++i];   // tests: this font on every UI element
         else if (args[i] == "--select-camera") selectArg = -100;   // tests: the Main Camera selected
         else if (args[i] == "--select-asset" && i + 1 < args.size()) { selAsset = args[++i]; selAssetMarker = 0; selAssetObject = -1; }   // tests: a file selected in the Project window
         else if (args[i] == "--add-video" && i + 1 < args.size()) addVideoArg = args[++i];   // tests: a video, as dropped on the first anchor   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
@@ -4067,6 +4093,7 @@ int main(int argc, char** argv) {
     if (!addVideoArg.empty() && !proj.markers.empty()) dropAsset(proj.markers[0], 0, -1, addVideoArg);
     if (!buildArg.empty()) { std::string err, apk; const bool ok = buildFor == "android" ? buildAndroid(buildArg, err, apk) : buildFor == "linux" ? buildLinux(buildArg, false, err) : buildFor == "pi" ? buildLinux(buildArg, true, err) : (buildWin || buildFor == "windows") ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
+    if (!uiFontArg.empty() && curMarker()) for (auto& o : curMarker()->objects) if (o.ui != UI_NONE) o.uiFontFile = uiFontArg;
     if (simulateArg >= 0) {   // tests: Simulate, stepped this many seconds at 60 a second
         startSimulate();
         for (int k = 1; k <= (int)std::lround(simulateArg * 60); ++k) Physics::step(simWorld, proj, 1.0f / 60, k / 60.0f);
@@ -4083,6 +4110,7 @@ int main(int argc, char** argv) {
             if (e.type == SDL_QUIT) quit = true;
             if (e.type == SDL_DROPFILE) { const std::string f = e.drop.file; SDL_free(e.drop.file); if (fs::u8path(f).extension() == ".diorama") openProject(f); else importFiles({f}); }
         }
+        if (UiFonts::load()) { ImGui_ImplOpenGL3_DestroyFontsTexture(); ImGui_ImplOpenGL3_CreateFontsTexture(); }   // the UI's fonts, as asked for
         ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame();
         frame();
         ImGui::Render();

@@ -4,6 +4,7 @@
 #include "viewer.h"
 
 #include <imgui.h>
+#include "uifonts.h"
 
 #include <algorithm>
 #include <map>
@@ -18,8 +19,8 @@ bool wantsMouse() { return overUi; }
 static ImU32 col(const float* c) { return IM_COL32((int)(std::clamp(c[0], 0.f, 1.f) * 255), (int)(std::clamp(c[1], 0.f, 1.f) * 255), (int)(std::clamp(c[2], 0.f, 1.f) * 255), (int)(std::clamp(c[3], 0.f, 1.f) * 255)); }
 
 struct Rect { float x, y, w, h; };
-static void drawText(ImDrawList* dl, const Rect& r, const std::string& text, float size, int align, ImU32 c) {
-    ImFont* f = ImGui::GetFont();
+static void drawText(ImDrawList* dl, const Rect& r, const std::string& text, float size, int align, ImU32 c, const std::string& font = "") {
+    ImFont* f = UiFonts::get(font);
     const ImVec2 ts = f->CalcTextSizeA(size, FLT_MAX, r.w, text.c_str());
     const float x = align == 0 ? r.x : align == 2 ? r.x + r.w - ts.x : r.x + (r.w - ts.x) / 2;
     dl->AddText(f, size, ImVec2(x, r.y + (r.h - ts.y) / 2), c, text.c_str(), nullptr, r.w);
@@ -57,7 +58,7 @@ void draw(Scene::Project& p, const std::vector<bool>& seen) {
             ImGui::PushID(o.id);
             ImGui::SetCursorScreenPos(ImVec2(r.x, r.y));
             switch (o.ui) {
-            case Scene::UI_TEXT: drawText(dl, r, o.uiText, font, o.uiAlign, col(o.uiColour)); break;
+            case Scene::UI_TEXT: drawText(dl, r, o.uiText, font, o.uiAlign, col(o.uiColour), o.uiFontFile); break;
             case Scene::UI_PANEL: dl->AddRectFilled(ImVec2(r.x, r.y), ImVec2(r.x + r.w, r.y + r.h), col(o.uiBg), s * 6); ImGui::InvisibleButton("##p", ImVec2(std::max(1.f, r.w), std::max(1.f, r.h))); break;
             case Scene::UI_IMAGE: {
                 int iw = 0, ih = 0; const unsigned t = o.uiFile.empty() ? 0 : Viewer::pictureTexture(o.uiFile, &iw, &ih);
@@ -72,7 +73,7 @@ void draw(Scene::Project& p, const std::vector<bool>& seen) {
                 float bg[4] = {o.uiBg[0], o.uiBg[1], o.uiBg[2], o.uiBg[3]};
                 if (ImGui::IsItemActive()) for (int k = 0; k < 3; ++k) bg[k] *= 0.85f;   // :active
                 dl->AddRectFilled(ImVec2(r.x, r.y), ImVec2(r.x + r.w, r.y + r.h), col(bg), s * 6);
-                drawText(dl, r, o.uiText, font, 1, col(o.uiColour));
+                drawText(dl, r, o.uiText, font, 1, col(o.uiColour), o.uiFontFile);
                 if (pressed) Scripts::ui(o.id, "onClick", 0, false);
                 break;
             }
@@ -96,7 +97,7 @@ void draw(Scene::Project& p, const std::vector<bool>& seen) {
                 const float white[4] = {1, 1, 1, 1};
                 dl->AddRectFilled(ImVec2(r.x, by), ImVec2(r.x + b, by + b), o.uiChecked ? col(o.uiBg) : col(white), s * 3);
                 if (o.uiChecked) dl->AddText(ImGui::GetFont(), b, ImVec2(r.x + b * 0.18f, by - b * 0.05f), IM_COL32(255, 255, 255, 255), "\xe2\x9c\x93");
-                drawText(dl, Rect{r.x + b + s * 8, r.y, r.w - b - s * 8, r.h}, o.uiText, font, 0, col(o.uiColour));
+                drawText(dl, Rect{r.x + b + s * 8, r.y, r.w - b - s * 8, r.h}, o.uiText, font, 0, col(o.uiColour), o.uiFontFile);
                 break;
             }
             default: break;

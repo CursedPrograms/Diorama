@@ -73,7 +73,8 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
 - **Components:** Light (point, spot, directional), Audio Source (3D), **Video Player** (with alpha: WebM, MOV ProRes
   4444 / PNG, GIF; or a green screen), Particle System, Line Renderer, Trail Renderer, Occluder, Animate, **AR Path**
   (route marking with arrows) and **AR Path Follower** (a guide that walks it), **Canvas UI** (Text, Button, Slider,
-  Toggle, Image, Panel as real HTML/CSS), **Scripts**.
+  Toggle, Image, Panel as real HTML/CSS; each with Unity's move arrows when selected, and its own **Font**: a .ttf or
+  .otf copied into the project and into the builds), **Scripts**.
 - **Physics** like Unity's: **Rigidbody** (mass, drag, gravity, kinematic, freeze position and rotation) and **Box,
   Sphere, Capsule and Mesh (convex) Colliders**, triggers, friction and bounciness, all as sliders. Things land on the
   real paper, table or floor (each anchor's **Physics floor**), moved things push, and **Simulate** in the Scene view
@@ -348,7 +349,7 @@ PC's camera, and the C++ twins of the game's trackers.
   `loadScene`. Not yet native: sound and video (their components answer but stay quiet) and walked `nav` paths
   (paths drawn in the editor are drawn and followed). `log()` goes to `game\log.txt`; a problem shows in the title.
 - **The Canvas** is drawn over the camera, laid out as on the phone: Text, Button (with On Click), Slider, Toggle,
-  Image, Panel.
+  Image, Panel, in their own fonts.
 - The camera's **calibration** (Project Settings) sets its lens. F11 full screen, Esc quits.
 - **Planes:** found by themselves, outlined, measured, merged and kept in place (see Surfaces above); Space adds a
   floor or table, V a wall, R starts again; a hint along the bottom says what to press.

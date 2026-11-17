@@ -165,7 +165,7 @@ static std::string markersJson(const std::vector<Marker>& list) {
               .s("followPath", o.followPath).f("followSpeed", o.followSpeed)
               .b("hasCanvas", o.hasCanvas).b("canvasWithAnchor", o.canvasWithAnchor).s("canvasCss", o.canvasCss)
               .s("ui", UI_NAMES[std::clamp(o.ui, 0, UI_COUNT - 1)]).b("uiOn", o.uiOn).i("uiAnchor", o.uiAnchor).s("uiText", o.uiText).f("uiFont", o.uiFont).i("uiAlign", o.uiAlign)
-              .f("uiMin", o.uiMin).f("uiMax", o.uiMax).f("uiValue", o.uiValue).b("uiChecked", o.uiChecked).s("uiFile", o.uiFile).s("uiClass", o.uiClass).s("uiOnClick", o.uiOnClick)
+              .f("uiMin", o.uiMin).f("uiMax", o.uiMax).f("uiValue", o.uiValue).b("uiChecked", o.uiChecked).s("uiFile", o.uiFile).s("uiFontFile", o.uiFontFile).s("uiClass", o.uiClass).s("uiOnClick", o.uiOnClick)
               .b("hasParticles", o.hasParticles).b("particlesOn", o.particlesOn).s("particleFile", o.particleFile).f("pRate", o.pRate).f("pLife", o.pLife).f("pSpeed", o.pSpeed)
               .f("pSpread", o.pSpread).f("pSizeStart", o.pSizeStart).f("pSizeEnd", o.pSizeEnd).f("pGravity", o.pGravity).b("pGlow", o.pGlow)
               .b("hasLine", o.hasLine).b("lineOn", o.lineOn).b("lineLoop", o.lineLoop).f("lineWidth", o.lineWidth)
@@ -254,7 +254,7 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
             { const std::string u = ov.str("ui"); o.ui = UI_NONE; for (int k = 1; k < UI_COUNT; ++k) if (u == UI_NAMES[k]) o.ui = k; }
             o.uiOn = readBool(ov, "uiOn", true); o.uiAnchor = (int)ov.num("uiAnchor", 4); o.uiText = ov.str("uiText", o.uiText); o.uiFont = (float)ov.num("uiFont", 20);
             o.uiAlign = (int)ov.num("uiAlign", 1); o.uiMin = (float)ov.num("uiMin", 0); o.uiMax = (float)ov.num("uiMax", 1); o.uiValue = (float)ov.num("uiValue", 0.5);
-            o.uiChecked = readBool(ov, "uiChecked", false); o.uiFile = ov.str("uiFile"); o.uiClass = ov.str("uiClass"); o.uiOnClick = ov.str("uiOnClick");
+            o.uiChecked = readBool(ov, "uiChecked", false); o.uiFile = ov.str("uiFile"); o.uiFontFile = ov.str("uiFontFile", ""); o.uiClass = ov.str("uiClass"); o.uiOnClick = ov.str("uiOnClick");
             readArr(ov, "uiRect", o.uiRect, 4); readArr(ov, "uiColour", o.uiColour, 4); readArr(ov, "uiBg", o.uiBg, 4);
             o.hasParticles = readBool(ov, "hasParticles", false); o.particlesOn = readBool(ov, "particlesOn", true); o.particleFile = ov.str("particleFile");
             o.pRate = (float)ov.num("pRate", o.pRate); o.pLife = (float)ov.num("pLife", o.pLife); o.pSpeed = (float)ov.num("pSpeed", o.pSpeed); o.pSpread = (float)ov.num("pSpread", o.pSpread);

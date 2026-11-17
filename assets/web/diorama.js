@@ -331,13 +331,24 @@
     function css(c) { return 'rgba(' + Math.round(c[0] * 255) + ',' + Math.round(c[1] * 255) + ',' + Math.round(c[2] * 255) + ',' + c[3] + ')'; }
     function uiPlace(el, o) {   // where it sits on its parent: anchor + offset, its size
       var ax = o.uiAnchor % 3, ay = Math.floor(o.uiAnchor / 3), r = o.uiRect;
-      var key = o.uiAnchor + ',' + r.join(',') + ',' + o.uiFont;
+      var key = o.uiAnchor + ',' + r.join(',') + ',' + o.uiFont + ',' + (o.uiFontFile || '');
       if (el.userData === key) return; el.userData = key;
       el.style.left = 'calc(' + (ax * 50) + '% + var(--s) * ' + r[0] + 'px)';
       el.style.top = 'calc(' + (ay * 50) + '% + var(--s) * ' + r[1] + 'px)';
       el.style.width = 'calc(var(--s) * ' + r[2] + 'px)'; el.style.height = 'calc(var(--s) * ' + r[3] + 'px)';
       el.style.transform = 'translate(' + (-ax * 50) + '%,' + (-ay * 50) + '%)';
       el.style.fontSize = 'calc(var(--s) * ' + o.uiFont + 'px)';
+      el.style.fontFamily = o.uiFontFile ? uiFontFamily(o.uiFontFile) : '';
+    }
+    var uiFonts = {};
+    function uiFontFamily(file) {   // a font file (Unity's Font asset) as a CSS family, loaded once with @font-face
+      if (!uiFonts[file]) {
+        uiFonts[file] = 'dio-font-' + Object.keys(uiFonts).length;
+        var st = document.createElement('style');
+        st.textContent = '@font-face{font-family:"' + uiFonts[file] + '";src:url("' + encodeURI(file) + '");font-display:swap}';
+        document.head.appendChild(st);
+      }
+      return '"' + uiFonts[file] + '", system-ui, sans-serif';
     }
     var cssLinked = {};
     function uiElement(o, node) {

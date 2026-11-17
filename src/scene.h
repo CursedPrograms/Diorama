@@ -88,6 +88,7 @@ struct Object {
     float uiMin = 0, uiMax = 1, uiValue = 0.5f;
     bool uiChecked = false;
     std::string uiFile;                // Image's picture
+    std::string uiFontFile;            // Text, Button, Toggle: its font (a .ttf or .otf in the project; "" the default), as Unity's Font
     std::string uiClass;               // extra CSS classes
     std::string uiOnClick;             // Button: Unity's On Click, as a line of script (nav, find, loadScene, log, button)
     // AR Path: a route on the floor (drawn here, or walked and saved in the game), marked with arrows (path marking)

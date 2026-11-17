@@ -16,6 +16,7 @@
 #include "viewer.h"
 #include "script.h"
 #include "ui.h"
+#include "uifonts.h"
 
 #include <imgui.h>
 #include <imgui_impl_opengl3.h>
@@ -536,6 +537,7 @@ int main(int argc, char** argv) {
         Viewer::renderAR(proj, anchors, P, bgTex, rect, w, h, (float)t);
         Viewer::present(w, h);
         // the UI over it
+        if (UiFonts::load()) { ImGui_ImplOpenGL3_DestroyFontsTexture(); ImGui_ImplOpenGL3_CreateFontsTexture(); }   // the UI's fonts
         ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame();
         std::vector<bool> on(seen.size()); for (size_t i = 0; i < seen.size(); ++i) on[i] = seen[i].on;
         Ui::draw(proj, on);
