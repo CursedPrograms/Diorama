@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Diorama VERSION 0.1.0 LANGUAGES C CXX)
+project(Diorama VERSION 0.2.0 LANGUAGES C CXX)
 # Diorama: little worlds on AR markers, laid out like Unity; exports jsartoolkit5 web packages. Part of Atelier.
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
