@@ -1884,6 +1884,32 @@ static int canvasOf(const Scene::Marker& m, int id) {   // the Canvas an object 
     return -1;
 }
 // an element's rectangle (screen) inside its parent's
+// the slider a Fill or Handle belongs to: its value along the bar (0..1), or -1
+static float sliderT(const Scene::Marker& m, const Object& o) {
+    for (int id = o.parent, guard = 0; id >= 0 && guard < 64; ++guard) {
+        const int i = indexOfId(m, id);
+        if (i < 0) break;
+        const Object& p = m.objects[i];
+        if (p.ui == UI_SLIDER) return std::clamp((p.uiValue - p.uiMin) / std::max(1e-6f, p.uiMax - p.uiMin), 0.0f, 1.0f);
+        id = p.parent;
+    }
+    return -1;
+}
+// a slider made of parts (Unity's: Background, Fill Area > Fill, Handle Slide Area > Handle) draws nothing itself
+static bool sliderHasParts(const Scene::Marker& m, const Object& o) {
+    for (const Object& c : m.objects) if (c.parent == o.id) return true;
+    return false;
+}
+static ImVec4 uiRectRole(const Scene::Marker& m, const Object& o, const ImVec4& p, float s) {
+    const float t = o.uiRole >= 2 ? std::max(0.0f, sliderT(m, o)) : 0;
+    switch (o.uiRole) {
+    case 1: return ImVec4(p.x + o.uiRect[0] * s, p.y + o.uiRect[1] * s, p.z - o.uiRect[0] * s, p.w - o.uiRect[1] * s);
+    case 2: return ImVec4(p.x, p.y + o.uiRect[1] * s, p.x + (p.z - p.x) * t, p.w - o.uiRect[1] * s);
+    case 3: { const float cx = p.x + (p.z - p.x) * t, cy = (p.y + p.w) / 2, hw = o.uiRect[2] * s / 2, hh = o.uiRect[3] * s / 2;
+              return ImVec4(cx - hw, cy - hh, cx + hw, cy + hh); }
+    }
+    return ImVec4(0, 0, 0, 0);
+}
 static ImVec4 uiRectIn(const Object& o, const ImVec4& p, float s) {
     const int ax = o.uiAnchor % 3, ay = o.uiAnchor / 3;
     const float w = o.uiRect[2] * s, h = o.uiRect[3] * s;
@@ -1898,7 +1924,7 @@ static void drawUiTree(ImDrawList* dl, const Scene::Marker& m, int mi, int paren
         if (o.parent != parentId || !o.active) continue;
         ImVec4 r = pr;
         if (o.ui != UI_NONE && o.uiOn) {
-            r = uiRectIn(o, pr, s);
+            r = o.uiRole ? uiRectRole(m, o, pr, s) : uiRectIn(o, pr, s);
             const ImVec2 a(r.x, r.y), b(r.z, r.w);
             const float fs = std::max(6.0f, o.uiFont * s);
             ImFont* f = UiFonts::get(o.uiFontFile);
@@ -1913,6 +1939,7 @@ static void drawUiTree(ImDrawList* dl, const Scene::Marker& m, int mi, int paren
             case UI_TEXT: text(o.uiText, a, b, o.uiAlign); break;
             case UI_BUTTON: dl->AddRectFilled(a, b, u32(o.uiBg), rad); text(o.uiText, a, b, 1); break;
             case UI_SLIDER: {
+                if (sliderHasParts(m, o)) break;   // its Background, Fill and Handle draw it
                 const float cy = (a.y + b.y) / 2, t = std::clamp((o.uiValue - o.uiMin) / std::max(1e-6f, o.uiMax - o.uiMin), 0.0f, 1.0f);
                 dl->AddRectFilled(ImVec2(a.x, cy - 3 * s), ImVec2(b.x, cy + 3 * s), IM_COL32(255, 255, 255, 90), 3 * s);
                 dl->AddRectFilled(ImVec2(a.x, cy - 3 * s), ImVec2(a.x + (b.x - a.x) * t, cy + 3 * s), u32(o.uiBg), 3 * s);
@@ -1935,7 +1962,7 @@ static void drawUiTree(ImDrawList* dl, const Scene::Marker& m, int mi, int paren
             }
             hits.push_back({mi, o.id, r});
         }
-        if (o.ui != UI_NONE || o.hasCanvas) drawUiTree(dl, m, mi, o.id, r, s, hits);
+        drawUiTree(dl, m, mi, o.id, r, s, hits);   // (an empty passes its parent's rectangle on, as Unity's Fill Area)
     }
 }
 // the overlay; true when the mouse is on the UI (it picks and drags UI elements, not the 3D view)
@@ -2022,6 +2049,21 @@ static void createUI(int type) {
     m->objects.push_back(o);
     reparent(*m, o.id, parent);
     selObject = o.id;
+    if (type == UI_SLIDER) {   // Unity's Slider: Background, Fill Area > Fill, Handle Slide Area > Handle, each its own part
+        auto part = [&](const char* name, int ui, int role, int under, float x, float y, float w, float h, const float* bg) {
+            Object c = make(proj, EMPTY, under); c.name = name; c.ui = ui; c.uiRole = role;
+            c.uiRect[0] = x; c.uiRect[1] = y; c.uiRect[2] = w; c.uiRect[3] = h;
+            if (bg) for (int k = 0; k < 4; ++k) c.uiBg[k] = bg[k];
+            m->objects.push_back(c); reparent(*m, c.id, under);
+            return c.id;
+        };
+        const float grey[4] = {0.85f, 0.85f, 0.85f, 0.9f}, white[4] = {1, 1, 1, 1};
+        part("Background", UI_PANEL, 1, o.id, 0, 11, 0, 0, grey);
+        const int fillArea = part("Fill Area", UI_NONE, 0, o.id, 0, 0, 0, 0, nullptr);
+        part("Fill", UI_PANEL, 2, fillArea, 0, 11, 0, 0, o.uiBg);
+        const int handleArea = part("Handle Slide Area", UI_NONE, 0, o.id, 0, 0, 0, 0, nullptr);
+        part("Handle", UI_PANEL, 3, handleArea, 0, 0, 20, 20, white);
+    }
 }
 static void uiMenuItems() {
     if (ImGui::MenuItem("Canvas")) createUI(0);
@@ -2701,7 +2743,7 @@ static void copyComponent(const std::string& key, const Object& f, Object& t) {
     else if (key == "UI") {
         t.ui = f.ui; t.uiOn = f.uiOn; t.uiAnchor = f.uiAnchor; cpa(t.uiRect, f.uiRect); t.uiText = f.uiText; t.uiFont = f.uiFont; t.uiAlign = f.uiAlign;
         cpa(t.uiColour, f.uiColour); cpa(t.uiBg, f.uiBg); t.uiMin = f.uiMin; t.uiMax = f.uiMax; t.uiValue = f.uiValue; t.uiChecked = f.uiChecked;
-        t.uiFile = f.uiFile; t.uiFontFile = f.uiFontFile; t.uiClass = f.uiClass; t.uiOnClick = f.uiOnClick;
+        t.uiFile = f.uiFile; t.uiFontFile = f.uiFontFile; t.uiRole = f.uiRole; t.uiClass = f.uiClass; t.uiOnClick = f.uiOnClick;
     } else if (key == "Light") {
         t.hasLight = true; t.lightOn = f.lightOn; t.lightType = f.lightType; cpa(t.lightColour, f.lightColour); t.lightIntensity = f.lightIntensity;
         t.lightRange = f.lightRange; t.spotAngle = f.spotAngle; t.lightShadows = f.lightShadows;
@@ -3181,6 +3223,11 @@ static void objectInspector(Scene::Marker& m, Object& o) {
                 labelled("Size"); ImGui::SliderFloat("##uif", &o.uiFont, 6, 96, "%.0f");
                 if (o.ui == UI_TEXT) { const char* al[] = {"Left", "Centre", "Right"}; labelled("Align"); ImGui::Combo("##uia", &o.uiAlign, al, 3); }
                 labelled("Text colour"); ImGui::ColorEdit4("##uic", o.uiColour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+            }
+            {
+                const char* roles[] = {"Own rectangle", "Stretch (fill the parent)", "Slider Fill", "Slider Handle"};
+                labelled("Layout"); ImGui::Combo("##uirole", &o.uiRole, roles, 4);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stretch fills its parent (X and Y in from the sides); a Slider's Fill runs to the slider's value, its Handle sits at it, as Unity's");
             }
             if (o.ui == UI_IMAGE) {
                 fileRow("Picture", o.uiFile, PICS);
@@ -3990,7 +4037,7 @@ static void frame() {
 }
 
 int main(int argc, char** argv) {
-    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false; std::string buildFor, addVideoArg, uiFontArg; float simulateArg = -1;
+    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false; std::string buildFor, addVideoArg, uiFontArg; float simulateArg = -1; bool addSliderArg = false;
     std::vector<std::string> args;
 #ifdef _WIN32
     { int n; LPWSTR* wa = CommandLineToArgvW(GetCommandLineW(), &n); if (wa) { for (int i = 1; i < n; ++i) args.push_back(fs::path(wa[i]).u8string()); LocalFree(wa); } }
@@ -4017,6 +4064,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--2d") Viewer::look().view2D = true;   // tests: the 2D view   // tests: the Profiler open
         else if (args[i] == "--simulate" && i + 1 < args.size()) simulateArg = (float)atof(args[++i].c_str());   // tests: Simulate, run this long
         else if (args[i] == "--ui-font" && i + 1 < args.size()) uiFontArg = args[++i];   // tests: this font on every UI element
+        else if (args[i] == "--add-slider") addSliderArg = true;   // tests: a Slider made (Unity's parts), at 60%
         else if (args[i] == "--select-camera") selectArg = -100;   // tests: the Main Camera selected
         else if (args[i] == "--select-asset" && i + 1 < args.size()) { selAsset = args[++i]; selAssetMarker = 0; selAssetObject = -1; }   // tests: a file selected in the Project window
         else if (args[i] == "--add-video" && i + 1 < args.size()) addVideoArg = args[++i];   // tests: a video, as dropped on the first anchor   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
@@ -4093,6 +4141,13 @@ int main(int argc, char** argv) {
     if (!addVideoArg.empty() && !proj.markers.empty()) dropAsset(proj.markers[0], 0, -1, addVideoArg);
     if (!buildArg.empty()) { std::string err, apk; const bool ok = buildFor == "android" ? buildAndroid(buildArg, err, apk) : buildFor == "linux" ? buildLinux(buildArg, false, err) : buildFor == "pi" ? buildLinux(buildArg, true, err) : (buildWin || buildFor == "windows") ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
+    if (addSliderArg && curMarker()) {
+        for (const auto& o : curMarker()->objects) if (o.hasCanvas) { selObject = o.id; break; }
+        createUI(UI_SLIDER);
+        const int i = indexOfId(*curMarker(), selObject);
+        if (i >= 0) { auto& sl = curMarker()->objects[i]; sl.uiValue = 0.6f; sl.uiAnchor = 4; sl.uiRect[1] = 120; }
+        fprintf(stderr, "slider: %d parts\n", (int)std::count_if(curMarker()->objects.begin(), curMarker()->objects.end(), [](const Object& o) { return o.uiRole != 0; }));
+    }
     if (!uiFontArg.empty() && curMarker()) for (auto& o : curMarker()->objects) if (o.ui != UI_NONE) o.uiFontFile = uiFontArg;
     if (simulateArg >= 0) {   // tests: Simulate, stepped this many seconds at 60 a second
         startSimulate();

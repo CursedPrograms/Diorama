@@ -88,6 +88,10 @@ struct Object {
     float uiMin = 0, uiMax = 1, uiValue = 0.5f;
     bool uiChecked = false;
     std::string uiFile;                // Image's picture
+    // its layout, as Unity's RectTransform stretch and the Slider's Fill and Handle: 0 its own rectangle (Anchor, X, Y,
+    // Width, Height); 1 Stretch: fills its parent, X and Y in from the sides; 2 Slider Fill: from its parent's left to
+    // the slider's value, Y in from top and bottom; 3 Slider Handle: Width x Height, centred at the slider's value
+    int uiRole = 0;
     std::string uiFontFile;            // Text, Button, Toggle: its font (a .ttf or .otf in the project; "" the default), as Unity's Font
     std::string uiClass;               // extra CSS classes
     std::string uiOnClick;             // Button: Unity's On Click, as a line of script (nav, find, loadScene, log, button)

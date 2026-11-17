@@ -51,7 +51,19 @@ void draw(Scene::Project& p, const std::vector<bool>& seen) {
             if (!canvasHere || o.ui == Scene::UI_NONE) { rectOf[o.id] = parent; continue; }
             const int ax = o.uiAnchor % 3, ay = o.uiAnchor / 3;
             const float w = s * o.uiRect[2], h = s * o.uiRect[3];
-            const Rect r{parent.x + ax * parent.w / 2 + s * o.uiRect[0] - ax * w / 2, parent.y + ay * parent.h / 2 + s * o.uiRect[1] - ay * h / 2, w, h};
+            Rect r{parent.x + ax * parent.w / 2 + s * o.uiRect[0] - ax * w / 2, parent.y + ay * parent.h / 2 + s * o.uiRect[1] - ay * h / 2, w, h};
+            if (o.uiRole) {   // Stretch, and a Slider's Fill and Handle (at its slider's value)
+                float t = 0;
+                for (int id = o.parent, guard = 0; id >= 0 && guard < 64; ++guard) {
+                    const Object* p = nullptr; for (const Object& q : m.objects) if (q.id == id) p = &q;
+                    if (!p) break;
+                    if (p->ui == Scene::UI_SLIDER) { t = std::clamp((p->uiValue - p->uiMin) / std::max(1e-6f, p->uiMax - p->uiMin), 0.0f, 1.0f); break; }
+                    id = p->parent;
+                }
+                if (o.uiRole == 1) r = Rect{parent.x + s * o.uiRect[0], parent.y + s * o.uiRect[1], parent.w - 2 * s * o.uiRect[0], parent.h - 2 * s * o.uiRect[1]};
+                else if (o.uiRole == 2) r = Rect{parent.x, parent.y + s * o.uiRect[1], parent.w * t, parent.h - 2 * s * o.uiRect[1]};
+                else r = Rect{parent.x + parent.w * t - w / 2, parent.y + parent.h / 2 - h / 2, w, h};
+            }
             rectOf[o.id] = r;
             if (!on) continue;
             const float font = s * o.uiFont;
@@ -59,7 +71,10 @@ void draw(Scene::Project& p, const std::vector<bool>& seen) {
             ImGui::SetCursorScreenPos(ImVec2(r.x, r.y));
             switch (o.ui) {
             case Scene::UI_TEXT: drawText(dl, r, o.uiText, font, o.uiAlign, col(o.uiColour), o.uiFontFile); break;
-            case Scene::UI_PANEL: dl->AddRectFilled(ImVec2(r.x, r.y), ImVec2(r.x + r.w, r.y + r.h), col(o.uiBg), s * 6); ImGui::InvisibleButton("##p", ImVec2(std::max(1.f, r.w), std::max(1.f, r.h))); break;
+            case Scene::UI_PANEL:
+                dl->AddRectFilled(ImVec2(r.x, r.y), ImVec2(r.x + r.w, r.y + r.h), col(o.uiBg), o.uiRole == 3 ? std::min(r.w, r.h) / 2 : s * 6);
+                if (!o.uiRole) ImGui::InvisibleButton("##p", ImVec2(std::max(1.f, r.w), std::max(1.f, r.h)));   // (a slider's parts leave the clicks to it)
+                break;
             case Scene::UI_IMAGE: {
                 int iw = 0, ih = 0; const unsigned t = o.uiFile.empty() ? 0 : Viewer::pictureTexture(o.uiFile, &iw, &ih);
                 if (t && iw > 0 && ih > 0) {   // object-fit: contain
@@ -84,6 +99,8 @@ void draw(Scene::Project& p, const std::vector<bool>& seen) {
                     const float v = lo + std::clamp((io.MousePos.x - r.x) / std::max(1.f, r.w), 0.f, 1.f) * (hi - lo);
                     if (v != o.uiValue) { o.uiValue = v; Scripts::ui(o.id, "onChange", v, false); }
                 }
+                bool parts = false; for (const Object& c : m.objects) if (c.parent == o.id) parts = true;
+                if (parts) break;   // Unity's prefab: its Background, Fill and Handle draw it
                 const float u = std::clamp((o.uiValue - lo) / (hi - lo), 0.f, 1.f), cy = r.y + r.h / 2, th = std::max(3.f, s * 4);
                 const float grey[4] = {0.8f, 0.8f, 0.8f, 0.9f};
                 dl->AddRectFilled(ImVec2(r.x, cy - th / 2), ImVec2(r.x + r.w, cy + th / 2), col(grey), th / 2);

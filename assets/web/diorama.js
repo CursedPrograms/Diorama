@@ -329,7 +329,27 @@
       return uiRoot;
     }
     function css(c) { return 'rgba(' + Math.round(c[0] * 255) + ',' + Math.round(c[1] * 255) + ',' + Math.round(c[2] * 255) + ',' + c[3] + ')'; }
+    var sceneObjects = [];   // (every object of the scene, for a slider's parts to find their slider)
+    function uiObject(id) { for (var i = 0; i < sceneObjects.length; ++i) if (sceneObjects[i].id === id) return sceneObjects[i]; return null; }
+    function sliderHasParts(o) { for (var i = 0; i < sceneObjects.length; ++i) if (sceneObjects[i].parent === o.id) return true; return false; }
+    function sliderT(o) {
+      for (var p = uiObject(o.parent), g = 0; p && g < 64; p = uiObject(p.parent), ++g)
+        if (p.ui === 'Slider') return Math.max(0, Math.min(1, (p.uiValue - p.uiMin) / Math.max(1e-6, p.uiMax - p.uiMin)));
+      return 0;
+    }
     function uiPlace(el, o) {   // where it sits on its parent: anchor + offset, its size
+      if (o.uiRole) {   // Stretch, and a Slider's Fill and Handle (at its slider's value), as Unity's
+        var t = o.uiRole >= 2 ? sliderT(o) : 0, rr = o.uiRect;
+        var k2 = 'role' + o.uiRole + ',' + rr.join(',') + ',' + t;
+        if (el.userData === k2) return; el.userData = k2;
+        var px = function (v) { return 'calc(var(--s) * ' + v + 'px)'; };
+        el.style.transform = ''; el.style.right = ''; el.style.bottom = '';
+        if (o.uiRole === 1) { el.style.left = px(rr[0]); el.style.right = px(rr[0]); el.style.top = px(rr[1]); el.style.bottom = px(rr[1]); el.style.width = 'auto'; el.style.height = 'auto'; }
+        else if (o.uiRole === 2) { el.style.left = '0'; el.style.top = px(rr[1]); el.style.bottom = px(rr[1]); el.style.height = 'auto'; el.style.width = (t * 100) + '%'; }
+        else { el.style.left = (t * 100) + '%'; el.style.top = '50%'; el.style.width = px(rr[2]); el.style.height = px(rr[3]); el.style.transform = 'translate(-50%,-50%)'; el.style.borderRadius = '50%'; }
+        el.style.pointerEvents = 'none';
+        return;
+      }
       var ax = o.uiAnchor % 3, ay = Math.floor(o.uiAnchor / 3), r = o.uiRect;
       var key = o.uiAnchor + ',' + r.join(',') + ',' + o.uiFont + ',' + (o.uiFontFile || '');
       if (el.userData === key) return; el.userData = key;
@@ -367,7 +387,21 @@
           if (o.uiOnClick) try { new Function('nav', 'find', 'loadScene', 'log', 'button', o.uiOnClick)(nav, function (p) { return find(p); }, loadScene, function () { console.log.apply(console, arguments); }, node.userData.go); }
             catch (e) { report('error', o.name + ' On Click', 0, e.message); }
         }); break;
-      case 'Slider': el = document.createElement('input'); el.type = 'range'; el.min = o.uiMin; el.max = o.uiMax; el.step = 'any'; el.value = o.uiValue; el.style.accentColor = css(o.uiBg);
+      case 'Slider':
+        if (sliderHasParts(o)) {   // Unity's prefab: a box its Background, Fill and Handle sit in; dragging on it sets the value
+          el = document.createElement('div');
+          var setFrom = function (ev) {
+            var b = el.getBoundingClientRect(), x = (ev.touches ? ev.touches[0].clientX : ev.clientX) - b.left;
+            var v = o.uiMin + Math.max(0, Math.min(1, x / Math.max(1, b.width))) * (o.uiMax - o.uiMin);
+            if (v !== o.uiValue) { o.uiValue = v; fire('onChange', v); }
+          };
+          el.addEventListener('pointerdown', function (ev) { ev.stopPropagation(); el.setPointerCapture(ev.pointerId); el.dragging = true; setFrom(ev); });
+          el.addEventListener('pointermove', function (ev) { if (el.dragging) setFrom(ev); });
+          el.addEventListener('pointerup', function () { el.dragging = false; });
+          el.style.pointerEvents = 'auto'; el.style.touchAction = 'none';
+          break;
+        }
+        el = document.createElement('input'); el.type = 'range'; el.min = o.uiMin; el.max = o.uiMax; el.step = 'any'; el.value = o.uiValue; el.style.accentColor = css(o.uiBg);
         el.addEventListener('input', function () { o.uiValue = +el.value; fire('onChange', o.uiValue); }); break;
       case 'Toggle': el = document.createElement('label'); var box = document.createElement('input'); box.type = 'checkbox'; box.checked = !!o.uiChecked; box.style.accentColor = css(o.uiBg);
         var sp = document.createElement('span'); sp.textContent = o.uiText; el.appendChild(box); el.appendChild(sp); el.style.color = css(o.uiColour);
@@ -396,7 +430,7 @@
     function animateUI(node) {
       var el = node.userData.el, o = node.userData.o; if (!el) return;
       if (!el.parentNode) {   // its place: in its parent element, or on the screen
-        var pe = node.parent && node.parent.userData && node.parent.userData.el;
+        var pe = null; for (var up = node.parent; up && up.userData && up.userData.o && !pe; up = up.parent) pe = up.userData.el;
         (pe || uiLayer()).appendChild(el);
       }
       if (!o.hasCanvas) uiPlace(el, o);
@@ -406,6 +440,7 @@
 
     // lights fade to nothing at their Range (decay 0: no inverse square), as the editor draws them
     function components(o, node) {
+      sceneObjects.push(o);
       if (o.hasCanvas || o.ui) { var ue = uiElement(o, node); if (ue) node.userData.el = ue; }
       if (o.occluder) occlude(node);
       if (o.hasLight) {
