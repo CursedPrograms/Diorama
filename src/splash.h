@@ -1,4 +1,4 @@
-// Terminus - the splash: shown in its own small window while Terminus starts, and in Help > About.
+// Diorama - the splash: shown in its own small window while Diorama starts, and in Help > About.
 #pragma once
 
 struct ImDrawList;
