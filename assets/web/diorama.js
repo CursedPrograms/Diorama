@@ -5,6 +5,9 @@
 (function () {
   'use strict';
   var D2R = Math.PI / 180;
+  var HERE = (document.currentScript && document.currentScript.src) || window.location.href;   // lib/diorama.js: Jolt is beside it (lib/jolt)
+  // jsartoolkit5 swaps WebAssembly.instantiate for a shim of its own (loaded after this): Jolt gets the real one back
+  var WASM_INSTANTIATE = window.WebAssembly && WebAssembly.instantiate;
 
   function loadJSON(url, cb) {
     var x = new XMLHttpRequest();
@@ -770,7 +773,9 @@
       this.node = node; this.id = o.id; this.name = o.name; this.data = o;
       this.transform = { position: vec(o.position), rotation: vec(o.rotation), scale: vec(o.scale) };
       this.position = this.transform.position; this.rotation = this.transform.rotation; this.scale = this.transform.scale;
-      this.velocity = vec([0, 0, 0]);
+      this._vel = vec([0, 0, 0]);   // moves it by itself; with a Rigidbody, velocity is the body's
+      Object.defineProperty(this, 'velocity', { get: function () { return o.hasBody ? rigidbody(self).velocity : self._vel; },
+        set: function (v) { var to = self.velocity; to.set(v.x, v.y, v.z); }, enumerable: true });
       Object.defineProperty(this, 'active', { get: function () { return node.visible; }, set: function (v) { node.visible = !!v; } });
       this.scripts = [];
     }
@@ -820,6 +825,8 @@
             [0, 1, 2].forEach(function (k) { Object.defineProperty(view, k, { get: function () { return lp[i * 3 + k]; }, set: function (v) { lp[i * 3 + k] = v; } }); });
             return vec(view); },
           get count() { return o.linePoints.length / 3; } } : null;
+      case 'rigidbody': case 'body': return o.hasBody ? rigidbody(this) : null;
+      case 'collider': case 'boxcollider': case 'spherecollider': case 'capsulecollider': case 'meshcollider': return o.hasCollider ? collider(o) : null;
       case 'trail': case 'trailrenderer': return o.hasTrail ? { get on() { return o.trailOn !== false; }, set on(v) { o.trailOn = !!v; },
           get time() { return o.trailTime; }, set time(v) { o.trailTime = +v; }, get width() { return o.trailWidth; }, set width(v) { o.trailWidth = +v; },
           clear: function () { node.userData.trail.past.length = 0; } } : null;
@@ -845,6 +852,136 @@
     GameObject.prototype.find = function (path) { return find(path, this.node); };
     GameObject.prototype.toString = function () { return '[' + this.name + ']'; };
 
+    // ---------- physics: Jolt (WASM) under the Rigidbody and Collider components (physics.js; the native player runs
+    // the same engine in C++). Loaded only when the game has colliders; things wait where they are until it's ready.
+    var PHYS = { world: null, loading: false, failed: false, byId: {} };
+    function physicsLists() {   // each anchor's objects, parents first, and whether they're shown
+      var proj = window.DIORAMA_PROJECT, lists = [], byId = {};
+      (proj.markers || []).forEach(function (m) {
+        var root = R.roots[m.name], list = [];
+        if (root) root.traverse(function (c) {
+          var o = c.userData && c.userData.o; if (!o || (c.userData.go && c.userData.go.dead)) return;
+          var on = true; for (var n = c; n && n !== root; n = n.parent) if (n.visible === false) { on = false; break; }
+          list.push({ o: o, on: on }); byId[o.id] = c;
+        });
+        lists.push(list);
+      });
+      PHYS.byId = byId;
+      return lists;
+    }
+    function modelPoints(o) {   // a model's points in its own space (its mesh collider's hull); null until it's loaded
+      var node = PHYS.byId[o.id]; if (!node) return null;
+      var pts = [], inv = new THREE.Matrix4(), m = new THREE.Matrix4(), v = new THREE.Vector3();
+      node.updateMatrixWorld(true);
+      if (inv.invert) inv.copy(node.matrixWorld).invert(); else inv.getInverse(node.matrixWorld);
+      node.traverse(function (c) {
+        if (!c.isMesh || !c.geometry || !c.geometry.attributes.position || (c.userData && c.userData.o && c !== node)) return;
+        m.multiplyMatrices(inv, c.matrixWorld);
+        var a = c.geometry.attributes.position;
+        for (var i = 0; i < a.count; ++i) { v.fromBufferAttribute(a, i).applyMatrix4(m); pts.push(v.x, v.y, v.z); }
+      });
+      return pts.length >= 12 ? pts : null;
+    }
+    function physicsStep(dt, t) {
+      var proj = window.DIORAMA_PROJECT;
+      if (!proj || PHYS.failed || !window.DioramaPhysics) return;
+      if (!PHYS.world) {
+        if (PHYS.loading || !window.DioramaPhysics.any(proj)) return;
+        PHYS.loading = true;
+        var url = new URL('jolt/jolt.js', HERE).href, shim = WebAssembly.instantiate;
+        if (WASM_INSTANTIATE) WebAssembly.instantiate = WASM_INSTANTIATE;
+        var giveBack = function () { WebAssembly.instantiate = shim; };
+        new Function('u', 'return import(u)')(url).then(function (m) { return m.default(); }).then(function (Jolt) {
+          giveBack();
+          PHYS.world = window.DioramaPhysics.create(Jolt, proj, { modelPoints: modelPoints });
+        }).catch(function (e) { giveBack(); PHYS.failed = true; report('error', '', 0, 'Physics could not start: ' + (e && e.message || e)); });
+        return;
+      }
+      PHYS.world.step(dt, t, physicsLists());
+      PHYS.world.takeContacts().forEach(function (c) {
+        var na = PHYS.byId[c.a], nb = c.b >= 0 ? PHYS.byId[c.b] : null;
+        var hook = c.trigger ? (c.enter ? 'onTriggerEnter' : 'onTriggerExit') : (c.enter ? 'onCollisionEnter' : 'onCollisionExit');
+        var tell = function (node, otherNode, floor, flip) {
+          if (!node) return;
+          var g = wrap(node), n = c.normal || [0, 1, 0], k = flip ? -1 : 1, pt = c.point || [0, 0, 0];
+          var info = { gameObject: otherNode ? wrap(otherNode) : null, floor: floor, point: { x: pt[0], y: pt[1], z: pt[2] },
+                       normal: { x: n[0] * k, y: n[1] * k, z: n[2] * k }, speed: c.speed || 0 };
+          if (!g.dead) g.scripts.forEach(function (sc) { call(g, sc, hook, info); });
+        };
+        tell(na, nb, c.b === -1, false);
+        tell(nb, na, false, true);
+      });
+    }
+    function anchorIndexOf(node) {   // which anchor (project.markers) an object is under
+      var root = anchorOf(node), proj = window.DIORAMA_PROJECT || { markers: [] };
+      for (var i = 0; i < proj.markers.length; ++i) if (R.roots[proj.markers[i].name] === root) return i;
+      return -1;
+    }
+    function xyz(x, y, z) { return x && typeof x === 'object' ? [+x.x || 0, +x.y || 0, +x.z || 0] : [+x || 0, +y || 0, +z || 0]; }
+    function liveVec(get, set) {   // x, y, z read and written through functions
+      var v = {};
+      ['x', 'y', 'z'].forEach(function (k, i) { Object.defineProperty(v, k, { get: function () { return get()[i]; }, set: function (n) { var a = get().slice(); a[i] = +n; set(a); }, enumerable: true }); });
+      v.set = function (x, y, z) { set(xyz(x, y, z)); return v; };
+      v.toArray = function () { return get().slice(); };
+      return v;
+    }
+    var FORCE_MODES = { force: 0, impulse: 1, acceleration: 2, velocitychange: 3 };
+    function rigidbody(go) {   // Unity's Rigidbody, for scripts
+      var o = go.data, id = o.id;
+      var W = function () { return PHYS.world; };
+      var vel = function (angular) {
+        return liveVec(function () { return (W() && W().velocity(id, angular)) || [0, 0, 0]; }, function (a) { if (W()) W().setVelocity(id, angular, a); });
+      };
+      var push = function (torque) {
+        return function (x, y, z, mode) {
+          if (x && typeof x === 'object') mode = y;
+          var m = typeof mode === 'number' ? mode : FORCE_MODES[String(mode || 'force').toLowerCase().replace(/[^a-z]/g, '')] || 0;
+          if (W()) W().addForce(id, xyz(x, y, z), m, torque);
+        };
+      };
+      var rb = { addForce: push(false), addTorque: push(true),
+        sleep: function () { if (W()) W().wake(id, false); }, wakeUp: function () { if (W()) W().wake(id, true); },
+        movePosition: function (x, y, z) { var p = xyz(x, y, z); o.position[0] = p[0]; o.position[1] = p[1]; o.position[2] = p[2]; },
+        moveRotation: function (x, y, z) { var r = xyz(x, y, z); o.rotation[0] = r[0]; o.rotation[1] = r[1]; o.rotation[2] = r[2]; } };
+      Object.defineProperty(rb, 'velocity', { get: function () { return vel(false); }, set: function (v) { vel(false).set(v); } });
+      Object.defineProperty(rb, 'angularVelocity', { get: function () { return vel(true); }, set: function (v) { vel(true).set(v); } });
+      Object.defineProperty(rb, 'isSleeping', { get: function () { return !!W() && W().sleeping(id); } });
+      Object.defineProperty(rb, 'ready', { get: function () { return !!W(); } });
+      [['mass', 'mass', Number], ['drag', 'drag', Number], ['angularDrag', 'angularDrag', Number], ['useGravity', 'useGravity', Boolean],
+       ['isKinematic', 'isKinematic', Boolean], ['constraints', 'freeze', Number]].forEach(function (k) {
+        Object.defineProperty(rb, k[0], { get: function () { return o[k[1]]; }, set: function (v) { o[k[1]] = k[2](v); }, enumerable: true });
+      });
+      rb.go = go;
+      return rb;
+    }
+    function collider(o) {
+      var c = { get enabled() { return o.colliderOn !== false; }, set enabled(v) { o.colliderOn = !!v; },
+        get isTrigger() { return !!o.isTrigger; }, set isTrigger(v) { o.isTrigger = !!v; },
+        get friction() { return o.friction; }, set friction(v) { o.friction = +v; },
+        get bounciness() { return o.bounciness; }, set bounciness(v) { o.bounciness = +v; },
+        get radius() { return o.colRadius; }, set radius(v) { o.colRadius = +v; },
+        get height() { return o.colHeight; }, set height(v) { o.colHeight = +v; },
+        get shape() { return ['Box', 'Sphere', 'Capsule', 'Mesh'][o.colShape | 0]; },
+        size: vec(o.colSize), centre: vec(o.colCentre) };
+      c.center = c.centre;
+      return c;
+    }
+    function physicsApi(go) {   // a script's physics: rays in its anchor's space, the gravity
+      var api = {
+        raycast: function (from, dir, maxDistance) {
+          if (!PHYS.world) return null;
+          var h = PHYS.world.raycast(anchorIndexOf(go.node), xyz(from), xyz(dir), maxDistance > 0 ? maxDistance : 1e4);
+          if (!h) return null;
+          var node = h.id >= 0 ? PHYS.byId[h.id] : null;
+          return { gameObject: node ? wrap(node) : null, floor: h.floor, point: { x: h.point[0], y: h.point[1], z: h.point[2] },
+                   normal: { x: h.normal[0], y: h.normal[1], z: h.normal[2] }, distance: h.distance };
+        }
+      };
+      Object.defineProperty(api, 'gravity', { get: function () { var p = window.DIORAMA_PROJECT || {}; if (!p.gravity) p.gravity = [0, -9.81, 0]; return vec(p.gravity); },
+        set: function (v) { var p = window.DIORAMA_PROJECT || {}; p.gravity = xyz(v); } });
+      Object.defineProperty(api, 'ready', { get: function () { return !!PHYS.world; } });
+      return api;
+    }
     function wrap(node) { if (!node.userData.go) node.userData.go = new GameObject(node); return node.userData.go; }
     function rebuild(go) {   // a look that changed (words, a clip): built again in place
       var node = go.node, o = go.data, fresh = build(o, R.players);
@@ -876,11 +1013,13 @@
         if (code === undefined) { report('error', sc.file, 0, 'not found'); return; }
         var name = sc.file.split('/').pop().replace(/\.js$/, '');
         try {
-          var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input', 'loadScene', 'scene', 'nav', 'planes',
-            '"use strict";\n' + code + '\n;return { start: typeof start === "function" ? start : null, update: typeof update === "function" ? update : null,' +
+          var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input', 'loadScene', 'scene', 'nav', 'planes', 'physics',
+            '"use strict";\n' + code + '\n;return { onCollisionEnter: typeof onCollisionEnter === "function" ? onCollisionEnter : null,' +
+            ' onCollisionExit: typeof onCollisionExit === "function" ? onCollisionExit : null, onTriggerEnter: typeof onTriggerEnter === "function" ? onTriggerEnter : null,' +
+            ' onTriggerExit: typeof onTriggerExit === "function" ? onTriggerExit : null, start: typeof start === "function" ? start : null, update: typeof update === "function" ? update : null,' +
             ' onTap: typeof onTap === "function" ? onTap : null, onFound: typeof onFound === "function" ? onFound : null, onLost: typeof onLost === "function" ? onLost : null, onClick: typeof onClick === "function" ? onClick : null, onChange: typeof onChange === "function" ? onChange : null, onPlanesChanged: typeof onPlanesChanged === "function" ? onPlanesChanged : null, onArrived: typeof onArrived === "function" ? onArrived : null };\n//# sourceURL=' + sc.file);
           var log = function () { report('log', sc.file, 0, Array.prototype.map.call(arguments, function (a) { return typeof a === 'object' ? JSON.stringify(a) : String(a); }).join(' ')); };
-          var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, R.cameraApi, R.input, loadScene, sceneInfo(), nav, PLANES);
+          var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, R.cameraApi, R.input, loadScene, sceneInfo(), nav, PLANES, physicsApi(go));
           go.scripts.push({ name: name, file: sc.file, fns: api, self: go, started: false });
         } catch (e) { report('error', sc.file, lineOf(e, sc.file), e.message); }
       });
@@ -1047,9 +1186,10 @@
         R.objects.forEach(function (g) {
           if (g.dead) return;
           g.scripts.forEach(function (s) { if (!s.started) { s.started = true; call(g, s, 'start'); } call(g, s, 'update', dt); });
-          var v = g.velocity; if (v.x || v.y || v.z) { var p = g.data.position; p[0] += v.x * dt; p[1] += v.y * dt; p[2] += v.z * dt; }
+          var v = g._vel; if (!g.data.hasBody && (v.x || v.y || v.z)) { var p = g.data.position; p[0] += v.x * dt; p[1] += v.y * dt; p[2] += v.z * dt; }
         });
         R.objects = R.objects.filter(function (g) { return !g.dead; });
+        physicsStep(dt, t);
         R.input.tapped = false; R.input.hit = null;
       }
     };
@@ -1132,7 +1272,10 @@
     c.fovDeg = 2 * Math.atan(c.width / 2 / c.K[0]) * 180 / Math.PI;
     return c;
   }
-  function withScene(cb) { if (window.DIORAMA_SCENE) cb(window.DIORAMA_SCENE); else loadJSON('scene.json', cb); }
+  function withScene(cb) {
+    var go = function (p) { window.DIORAMA_PROJECT = p; cb(p); };   // physics reads it (its gravity, anchors, floors)
+    if (window.DIORAMA_SCENE) go(window.DIORAMA_SCENE); else loadJSON('scene.json', go);
+  }
 
   // ---- Markers: jsartoolkit5 (three r103, loaded as plain scripts)
   // the splash screen (Player Settings): its picture, the game's name, the intro words, Tap to start. Once per visit.

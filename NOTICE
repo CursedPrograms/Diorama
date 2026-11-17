@@ -8,6 +8,8 @@ Shipped inside the games Diorama builds (assets/web), each with its licence besi
 - MindAR 1.2.5 and three.js 0.160, https://github.com/hiukim/mind-ar-js, MIT (lib/mindar), in Images and Faces games.
 - OpenCV.js 4.10 (the @techstark/opencv-js build), https://opencv.org, Apache License 2.0 (lib/opencv/LICENSE),
   in Surfaces games: the surface tracker for cameras without ARCore.
+- JoltPhysics.js 1.1.1 (Jolt Physics 5.6 as WASM), https://github.com/jrouwe/JoltPhysics.js, MIT (lib/jolt/LICENSE),
+  in games with colliders. Copyright (c) Jorrit Rouwe.
 - camera_para.dat, ARToolKit's default camera calibration (from jsartoolkit5's examples).
 - The Hiro and Kanji pictures (from AR.js's markers).
 - Windows builds: DioramaGame.exe, Diorama's own player, which runs Microsoft Edge WebView2 (the WebView2 runtime is
@@ -25,6 +27,7 @@ Built into Diorama:
 - ImGuiColorTextEdit (MIT), https://github.com/BalazsJako/ImGuiColorTextEdit
 - OpenCV 4.10 (Apache License 2.0), https://opencv.org: the native trackers (surfaces, ArUco, ARToolKit-style markers,
   calibration), the native player and the tools (optional).
+- Jolt Physics 5.6.0 (MIT), https://github.com/jrouwe/JoltPhysics: the editor's Simulate and the native player's physics.
 - QuickJS (quickjs-ng 0.10.1, MIT), https://github.com/quickjs-ng/quickjs: the native player's scripts.
 - OpenCV's ArUco dictionaries as bits (src/aruco_dicts.h, from OpenCV 4.10, Apache License 2.0).
 

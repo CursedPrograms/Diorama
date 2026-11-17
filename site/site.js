@@ -12,6 +12,7 @@
     ['Made like Unity, more', 'Docking windows, a Profiler, material assets, component copy and paste, behaviours ready to use, template scenes, frustum culling.'],
     ['ArUco markers', "OpenCV's square markers, 4x4 to 6x6: many on the table at once, each number its own model, printed from the editor."],
     ['Camera calibration', "Print the ChArUco board, show it to the game's Calibrate page from 15 angles: the lens's own numbers, so things sit exactly where they are."],
+    ['Physics', 'Rigidbodies and Box, Sphere, Capsule and Mesh Colliders: things fall onto the real table, bounce, get pushed and trigger scripts. Simulate in the editor; Jolt Physics everywhere.'],
     ['Light like a PC game', 'PBR materials (metallic, roughness, glow), up to 16 lights, soft shadows onto the real table, HDR with bloom and filmic tone mapping.'],
     ['Video, UI and scenes', "A Video Player with see-through video, a Canvas of buttons and words, scenes like Unity's (scene 0 is the start), a Main Camera."],
     ['Build for everything', "Build Settings like Unity's: Web (WebGL or WebGPU), Windows, Linux, Raspberry Pi and Android, with Build And Run."],

@@ -5,3 +5,4 @@ external/imgui-*/
 *.log
 external/webview2/
 external/quickjs/
+external/JoltPhysics-*/

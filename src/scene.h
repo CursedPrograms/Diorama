@@ -104,6 +104,18 @@ struct Object {
     bool hasTrail = false, trailOn = true;
     float trailTime = 0.5f, trailWidth = 0.03f;
     float trailColour[4] = {0.2f, 0.66f, 0.89f, 1};
+    // Rigidbody (Jolt Physics: the same engine in the editor's Simulate, the native player and the web game)
+    bool hasBody = false;
+    float mass = 1, drag = 0, angularDrag = 0.05f;   // kg; drag slows it in the air (0: none)
+    bool useGravity = true, isKinematic = false;     // kinematic: moved by its Transform and scripts, pushes others, isn't pushed
+    int freeze = 0;                    // Constraints: bits 0-2 freeze position X Y Z, bits 3-5 rotation X Y Z
+    // Collider: Box, Sphere, Capsule or Mesh (convex), in the object's own space (scaled with it). Without a Rigidbody it
+    // stays where its Transform puts it (moved things still push); Is Trigger: things pass through and scripts hear it
+    bool hasCollider = false, colliderOn = true, isTrigger = false;
+    int colShape = 0;                  // 0 box, 1 sphere, 2 capsule (along Y), 3 mesh (convex: the hull of its points)
+    float colCentre[3] = {0, 0, 0}, colSize[3] = {1, 1, 1};
+    float colRadius = 0.5f, colHeight = 2;
+    float friction = 0.6f, bounciness = 0;
     bool expanded = true;              // open in the hierarchy
     // Transform
     float pos[3] = {0, 0, 0};
@@ -152,7 +164,8 @@ struct Marker {
     bool portal = false;
     float portalSize[2] = {0.9f, 0.9f};
     bool sunShadows = true;            // the sun casts shadows
-    bool shadowCatcher = true;         // shadows fall on the real paper, table or floor (an invisible plane that only shows them)
+    bool shadowCatcher = true;
+    bool physicsFloor = true;          // physics: things with a Rigidbody land on the real paper, table or floor (y = 0)         // shadows fall on the real paper, table or floor (an invisible plane that only shows them)
     // Surfaces: AR Foundation's AR Plane Manager (and where this anchor's things go). In metres: 1 = 1 m.
     int planeDetect = 2;               // 0 horizontal (floors, tables), 1 vertical (walls), 2 both
     bool showPlanes = true;            // the dotted look on what's found
@@ -197,6 +210,8 @@ struct Project {
     bool shadows = true; int shadowQuality = 1;        // 0 1024, 1 2048, 2 4096
     bool bloom = true; float bloomStrength = 0.6f, bloomThreshold = 0.9f;
     int toneMapping = 1; float exposure = 1;          // 0 none, 1 PBR Neutral (colours kept), 2 ACES (filmic)
+    // Physics (Project Settings > Physics): gravity in each anchor's space (Y is up out of a marker, or up from the floor)
+    float gravity[3] = {0, -9.81f, 0};
     // Player Settings
     std::string company = "Cursed Entertainment", version = "1.0";
     std::string packageId;             // Android; "" = com.cursedentertainment.<game>
@@ -207,6 +222,9 @@ struct Project {
 };
 
 int newId(Project& p);
+enum { COL_BOX, COL_SPHERE, COL_CAPSULE, COL_MESH, COL_COUNT };
+extern const char* COLLIDER_NAMES[COL_COUNT];   // "Box Collider", ...
+void fitCollider(Object& o, int shape, const float lo[3] = nullptr, const float hi[3] = nullptr);   // Unity's fit for its look (a model: its bounds lo..hi)
 enum { UI_NONE, UI_TEXT, UI_BUTTON, UI_SLIDER, UI_TOGGLE, UI_IMAGE, UI_PANEL, UI_COUNT };
 extern const char* UI_NAMES[UI_COUNT];
 Object make(Project& p, int kind, int parent);   // a new object of a kind, with Unity's default size for it
@@ -227,6 +245,7 @@ int duplicate(Project& p, Marker& m, int id);          // with its children; ret
 Project galleryTemplate(const std::string& assetsDir);
 Project basicTemplate();
 Project navigationTemplate();
+Project physicsTemplate();     // physics: a stack, balls, a spinning paddle, a trigger zone; a tap drops a ball (Drop.js, Zone.js)
 Project planeDemoTemplate();    // Surfaces: planes found, tap one to place a cube (its script: PlaceCubes.js)   // Surfaces: indoor navigation (plane detection, path marking, path following)
 
 }

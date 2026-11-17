@@ -91,6 +91,7 @@ static Arr arrOf(Object& o, const std::string& k) {
     else if (k == "lightColour") { a.f = o.lightColour; a.n = 3; } else if (k == "pColourStart") { a.f = o.pColourStart; a.n = 4; }
     else if (k == "pColourEnd") { a.f = o.pColourEnd; a.n = 4; } else if (k == "lineColour") { a.f = o.lineColour; a.n = 4; }
     else if (k == "linePoints") a.v = &o.linePoints;
+    else if (k == "colSize") { a.f = o.colSize; a.n = 3; } else if (k == "colCentre") { a.f = o.colCentre; a.n = 3; }
     return a;
 }
 static float* floatOf(Object& o, const std::string& k) {
@@ -98,7 +99,8 @@ static float* floatOf(Object& o, const std::string& k) {
         {"metallic", &Object::metallic}, {"roughness", &Object::roughness}, {"emissiveStrength", &Object::emissiveStrength}, {"animSpeed", &Object::animSpeed},
         {"animAmount", &Object::animAmount}, {"lightIntensity", &Object::lightIntensity}, {"lightRange", &Object::lightRange}, {"pSpeed", &Object::pSpeed},
         {"pGravity", &Object::pGravity}, {"lineWidth", &Object::lineWidth}, {"trailTime", &Object::trailTime}, {"trailWidth", &Object::trailWidth},
-        {"uiValue", &Object::uiValue}, {"volume", &Object::volume}};
+        {"uiValue", &Object::uiValue}, {"volume", &Object::volume}, {"mass", &Object::mass}, {"drag", &Object::drag}, {"angularDrag", &Object::angularDrag},
+        {"friction", &Object::friction}, {"bounciness", &Object::bounciness}, {"colRadius", &Object::colRadius}, {"colHeight", &Object::colHeight}};
     const auto it = F.find(k); return it == F.end() ? nullptr : &(o.*(it->second));
 }
 static bool* boolOf(Object& o, const std::string& k) {
@@ -106,7 +108,9 @@ static bool* boolOf(Object& o, const std::string& k) {
         {"active", &Object::active}, {"hasAnim", &Object::hasAnim}, {"animOn", &Object::animOn}, {"hasLight", &Object::hasLight}, {"lightOn", &Object::lightOn},
         {"hasParticles", &Object::hasParticles}, {"particlesOn", &Object::particlesOn}, {"hasLine", &Object::hasLine}, {"lineOn", &Object::lineOn},
         {"hasTrail", &Object::hasTrail}, {"trailOn", &Object::trailOn}, {"hasCanvas", &Object::hasCanvas}, {"uiOn", &Object::uiOn}, {"uiChecked", &Object::uiChecked},
-        {"hasAudio", &Object::hasAudio}, {"hasVideo", &Object::hasVideo}, {"lookOn", &Object::lookOn}};
+        {"hasAudio", &Object::hasAudio}, {"hasVideo", &Object::hasVideo}, {"lookOn", &Object::lookOn}, {"hasBody", &Object::hasBody},
+        {"useGravity", &Object::useGravity}, {"isKinematic", &Object::isKinematic}, {"hasCollider", &Object::hasCollider}, {"colliderOn", &Object::colliderOn},
+        {"isTrigger", &Object::isTrigger}};
     const auto it = B.find(k); return it == B.end() ? nullptr : &(o.*(it->second));
 }
 static std::string* strOf(Object& o, const std::string& k) {
@@ -148,6 +152,8 @@ FN(d_get) {
     if (k == "anim") return jstr(Scene::ANIM_NAMES[std::clamp(o->anim, 0, (int)Scene::ANIM_COUNT - 1)]);
     if (k == "ui") return jstr(uiName(o->ui));
     if (k == "linePointCount") return JS_NewInt32(ctx, (int)o->linePoints.size() / 3);
+    if (k == "freeze") return JS_NewInt32(ctx, o->freeze);
+    if (k == "colShape") return JS_NewInt32(ctx, o->colShape);
     return JS_UNDEFINED;
 }
 FN(d_set) {
@@ -158,6 +164,7 @@ FN(d_set) {
     else if (bool* b = boolOf(*o, k)) *b = JS_ToBool(ctx, argv[2]) != 0;
     else if (std::string* s = strOf(*o, k)) { if (k != "name") *s = str(argv[2]); }
     else if (k == "anim") { const std::string v = str(argv[2]); for (int i = 0; i < Scene::ANIM_COUNT; ++i) if (v == Scene::ANIM_NAMES[i]) o->anim = i; }
+    else if (k == "freeze") o->freeze = num(argv[2]) & 63;
     return JS_UNDEFINED;
 }
 FN(d_getv) {
@@ -312,6 +319,51 @@ FN(d_planes) {
     }
     return jstr(s + "]");
 }
+// ---- physics (physics.h): the Rigidbody's velocities and pushes, rays, gravity
+static JSValue arr3(const float v[3]) {
+    JSValue a = JS_NewArray(ctx);
+    for (int i = 0; i < 3; ++i) JS_SetPropertyUint32(ctx, a, i, JS_NewFloat64(ctx, v[i]));
+    return a;
+}
+FN(d_physReady) { (void)argc; (void)argv; return JS_NewBool(ctx, E.physics != nullptr); }
+FN(d_physVel) {   // (id, angular) -> [x, y, z] or null
+    float v[3];
+    if (argc < 2 || !Physics::velocity(E.physics, num(argv[0]), JS_ToBool(ctx, argv[1]) != 0, v)) return JS_NULL;
+    return arr3(v);
+}
+FN(d_physSetVel) {   // (id, angular, x, y, z)
+    if (argc < 5) return JS_FALSE;
+    const float v[3] = {(float)dbl(argv[2]), (float)dbl(argv[3]), (float)dbl(argv[4])};
+    return JS_NewBool(ctx, Physics::setVelocity(E.physics, num(argv[0]), JS_ToBool(ctx, argv[1]) != 0, v));
+}
+FN(d_physForce) {   // (id, x, y, z, mode, torque)
+    if (argc < 6) return JS_FALSE;
+    const float f[3] = {(float)dbl(argv[1]), (float)dbl(argv[2]), (float)dbl(argv[3])};
+    return JS_NewBool(ctx, Physics::addForce(E.physics, num(argv[0]), f, num(argv[4]), JS_ToBool(ctx, argv[5]) != 0));
+}
+FN(d_physSleeping) { return JS_NewBool(ctx, argc > 0 && Physics::sleeping(E.physics, num(argv[0]))); }
+FN(d_physWake) { return JS_NewBool(ctx, argc > 1 && Physics::wake(E.physics, num(argv[0]), JS_ToBool(ctx, argv[1]) != 0)); }
+FN(d_physRay) {   // (anchor, fx, fy, fz, dx, dy, dz, max) -> { id, floor, point, normal, distance } or null
+    if (argc < 8) return JS_NULL;
+    const float f[3] = {(float)dbl(argv[1]), (float)dbl(argv[2]), (float)dbl(argv[3])}, d[3] = {(float)dbl(argv[4]), (float)dbl(argv[5]), (float)dbl(argv[6])};
+    Physics::Hit h;
+    if (!Physics::raycast(E.physics, num(argv[0]), f, d, (float)dbl(argv[7]), h)) return JS_NULL;
+    JSValue o = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, o, "id", JS_NewInt32(ctx, h.id)); JS_SetPropertyStr(ctx, o, "floor", JS_NewBool(ctx, h.floor));
+    JS_SetPropertyStr(ctx, o, "point", arr3(h.point)); JS_SetPropertyStr(ctx, o, "normal", arr3(h.normal));
+    JS_SetPropertyStr(ctx, o, "distance", JS_NewFloat64(ctx, h.distance));
+    return o;
+}
+FN(d_anchorOf) {   // which anchor an object is under (-1: the Main Camera's, or none)
+    Where w;
+    if (argc < 1 || !object(num(argv[0]), &w)) return JS_NewInt32(ctx, -1);
+    return JS_NewInt32(ctx, w.anchor);
+}
+FN(d_gravity) {   // () -> [x, y, z]; (x, y, z) sets it
+    if (argc >= 3) for (int i = 0; i < 3; ++i) E.proj->gravity[i] = (float)dbl(argv[i]);
+    return arr3(E.proj->gravity);
+}
+
 FN(d_raycast) {   // where a screen point (-1..1) meets the planes: the nearest first
     if (argc < 2 || !E.projection) return jstr("[]");
     const float* P = E.projection;
@@ -391,7 +443,10 @@ bool start(const Env& env, std::string& err) {
         {"get", d_get, 2}, {"set", d_set, 3}, {"getv", d_getv, 3}, {"setv", d_setv, 4}, {"children", d_children, 1}, {"parent", d_parent, 1},
         {"descendants", d_descendants, 1}, {"roots", d_roots, 0}, {"scripts", d_scripts, 1}, {"source", d_source, 1}, {"startObjects", d_startObjects, 0},
         {"spawn", d_spawn, 2}, {"destroy", d_destroy, 1}, {"worldToParent", d_worldToParent, 4}, {"toCamera", d_toCamera, 1}, {"planes", d_planes, 0},
-        {"raycast", d_raycast, 2}, {"scene", d_scene, 0}, {"loadScene", d_loadScene, 1}, {"log", d_log, 4}};
+        {"raycast", d_raycast, 2}, {"scene", d_scene, 0}, {"loadScene", d_loadScene, 1}, {"log", d_log, 4},
+        {"physReady", d_physReady, 0}, {"physVel", d_physVel, 2}, {"physSetVel", d_physSetVel, 5}, {"physForce", d_physForce, 6},
+        {"physSleeping", d_physSleeping, 1}, {"physWake", d_physWake, 2}, {"physRay", d_physRay, 8}, {"anchorOf", d_anchorOf, 1},
+        {"gravity", d_gravity, 3}};
     for (const auto& f : fns) JS_SetPropertyStr(ctx, d, f.name, JS_NewCFunction(ctx, f.fn, f.name, f.n));
     JS_SetPropertyStr(ctx, g, "__dio", d);
     JS_FreeValue(ctx, g);
@@ -412,6 +467,18 @@ void seen(int anchor, bool on) { if (!ctx) return; JSValue a[2] = {JS_NewInt32(c
 void tap(int id) { if (!ctx) return; JSValue a[1] = {JS_NewInt32(ctx, id)}; callGlobal("__tap", 1, a); }
 void ui(int id, const char* what, double value, bool isBool) { if (!ctx) return; JSValue a[3] = {JS_NewInt32(ctx, id), JS_NewString(ctx, what), isBool ? JS_NewBool(ctx, value != 0) : JS_NewFloat64(ctx, value)}; callGlobal("__ui", 3, a); }
 void planesChanged(const std::string& json) { if (!ctx) return; JSValue a[1] = {jstr(json)}; callGlobal("__planesChanged", 1, a); }
+void contacts(const std::vector<Physics::Contact>& cs) {
+    if (!ctx || cs.empty()) return;
+    std::string j = "[";
+    for (size_t i = 0; i < cs.size(); ++i) {
+        const auto& c = cs[i];
+        j += std::string(i ? "," : "") + "{\"a\":" + std::to_string(c.a) + ",\"b\":" + std::to_string(c.b) + ",\"enter\":" + (c.enter ? "true" : "false") +
+             ",\"trigger\":" + (c.trigger ? "true" : "false") + ",\"point\":[" + fmt(c.point[0]) + "," + fmt(c.point[1]) + "," + fmt(c.point[2]) +
+             "],\"normal\":[" + fmt(c.normal[0]) + "," + fmt(c.normal[1]) + "," + fmt(c.normal[2]) + "],\"speed\":" + fmt(c.speed) + "}";
+    }
+    JSValue a[1] = {jstr(j + "]")};
+    callGlobal("__contacts", 1, a);
+}
 void stop() {
     if (ctx) { JS_FreeContext(ctx); ctx = nullptr; }
     if (rt) { JS_FreeRuntime(rt); rt = nullptr; }

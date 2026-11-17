@@ -26,6 +26,24 @@ bool isPrimitive(int k) { return k >= PLANE && k <= QUAD; }
 int newId(Project& p) { return p.nextId++; }
 
 const char* UI_NAMES[UI_COUNT] = {"", "Text", "Button", "Slider", "Toggle", "Image", "Panel"};
+const char* COLLIDER_NAMES[COL_COUNT] = {"Box Collider", "Sphere Collider", "Capsule Collider", "Mesh Collider"};
+// a collider fitted to the object's look, as Unity fits one when it's added (in the object's own units, before its scale)
+void fitCollider(Object& o, int shape, const float lo[3], const float hi[3]) {
+    o.colShape = shape;
+    float a[3] = {-0.5f, -0.5f, -0.5f}, b[3] = {0.5f, 0.5f, 0.5f};   // the look's bounds
+    switch (o.kind) {
+    case PLANE: a[0] = a[2] = -5; b[0] = b[2] = 5; a[1] = b[1] = 0; break;   // Unity's plane: 10 across, flat
+    case CAPSULE: case CYLINDER: a[1] = -1; b[1] = 1; break;                 // 2 high
+    case QUAD: case PICTURE: case WORDS: a[2] = b[2] = 0; break;            // flat, facing +Z
+    case MODEL: if (lo && hi) for (int i = 0; i < 3; ++i) { a[i] = lo[i]; b[i] = hi[i]; } break;
+    default: break;
+    }
+    for (int i = 0; i < 3; ++i) { o.colCentre[i] = (a[i] + b[i]) / 2; o.colSize[i] = b[i] - a[i]; }
+    o.colRadius = 0.5f * std::max(o.colSize[0], o.colSize[2]);
+    o.colHeight = std::max(o.colSize[1], 2 * o.colRadius);
+    if (shape == COL_SPHERE) o.colRadius = 0.5f * std::max({o.colSize[0], o.colSize[1], o.colSize[2]});
+}
+
 Object make(Project& p, int kind, int parent) {
     Object o;
     o.id = newId(p); o.parent = parent; o.kind = kind;
@@ -119,7 +137,7 @@ static std::string markersJson(const std::vector<Marker>& list) {
         w.key("sun"); w.out += arr(k.sun, 3);
         w.key("portalSize"); w.out += arr(k.portalSize, 2);
         w.i("arucoId", k.arucoId);
-        w.b("sunShadows", k.sunShadows).b("shadowCatcher", k.shadowCatcher);
+        w.b("sunShadows", k.sunShadows).b("shadowCatcher", k.shadowCatcher).b("physicsFloor", k.physicsFloor);
         w.i("planeDetect", k.planeDetect).b("showPlanes", k.showPlanes).s("planePrefab", k.planePrefab).i("placement", k.placement);
         w.f("webcamTilt", k.webcamTilt).f("webcamHeight", k.webcamHeight).f("webcamFov", k.webcamFov).i("webcamSurface", k.webcamSurface);
         w.key("planeColour"); w.out += arr(k.planeColour, 4);
@@ -151,7 +169,13 @@ static std::string markersJson(const std::vector<Marker>& list) {
               .b("hasParticles", o.hasParticles).b("particlesOn", o.particlesOn).s("particleFile", o.particleFile).f("pRate", o.pRate).f("pLife", o.pLife).f("pSpeed", o.pSpeed)
               .f("pSpread", o.pSpread).f("pSizeStart", o.pSizeStart).f("pSizeEnd", o.pSizeEnd).f("pGravity", o.pGravity).b("pGlow", o.pGlow)
               .b("hasLine", o.hasLine).b("lineOn", o.lineOn).b("lineLoop", o.lineLoop).f("lineWidth", o.lineWidth)
-              .b("hasTrail", o.hasTrail).b("trailOn", o.trailOn).f("trailTime", o.trailTime).f("trailWidth", o.trailWidth);
+              .b("hasTrail", o.hasTrail).b("trailOn", o.trailOn).f("trailTime", o.trailTime).f("trailWidth", o.trailWidth)
+              .b("hasBody", o.hasBody).f("mass", o.mass).f("drag", o.drag).f("angularDrag", o.angularDrag).b("useGravity", o.useGravity)
+              .b("isKinematic", o.isKinematic).i("freeze", o.freeze)
+              .b("hasCollider", o.hasCollider).b("colliderOn", o.colliderOn).b("isTrigger", o.isTrigger).i("colShape", o.colShape)
+              .f("colRadius", o.colRadius).f("colHeight", o.colHeight).f("friction", o.friction).f("bounciness", o.bounciness);
+            ow.key("colCentre"); ow.out += arr(o.colCentre, 3);
+            ow.key("colSize"); ow.out += arr(o.colSize, 3);
             ow.key("lightColour"); ow.out += arr(o.lightColour, 3);
             ow.key("pColourStart"); ow.out += arr(o.pColourStart, 4);
             ow.key("pColourEnd"); ow.out += arr(o.pColourEnd, 4);
@@ -190,7 +214,7 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
     k.planeDetect = (int)mv.num("planeDetect", 2);
     k.arucoId = (int)mv.num("arucoId", 0);
     k.patt = mv.str("patt", "");   // a build's pattern file (the native player reads it)
-    k.sunShadows = readBool(mv, "sunShadows", true); k.shadowCatcher = readBool(mv, "shadowCatcher", true); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
+    k.sunShadows = readBool(mv, "sunShadows", true); k.shadowCatcher = readBool(mv, "shadowCatcher", true); k.physicsFloor = readBool(mv, "physicsFloor", true); k.showPlanes = readBool(mv, "showPlanes", true); k.planePrefab = mv.str("planePrefab"); k.placement = (int)mv.num("placement", 0);
     readArr(mv, "planeColour", k.planeColour, 4);
     if (const Json::Value* os = mv.get("objects"))
         for (const Json::Value& ov : os->a) {
@@ -239,6 +263,12 @@ static Marker markerFrom(const Json::Value& mv, Project& p) {
             o.hasTrail = readBool(ov, "hasTrail", false); o.trailOn = readBool(ov, "trailOn", true); o.trailTime = (float)ov.num("trailTime", o.trailTime); o.trailWidth = (float)ov.num("trailWidth", o.trailWidth);
             readArr(ov, "lightColour", o.lightColour, 3); readArr(ov, "pColourStart", o.pColourStart, 4); readArr(ov, "pColourEnd", o.pColourEnd, 4);
             readArr(ov, "lineColour", o.lineColour, 4); readArr(ov, "trailColour", o.trailColour, 4);
+            o.hasBody = readBool(ov, "hasBody", false); o.mass = (float)ov.num("mass", 1); o.drag = (float)ov.num("drag", 0); o.angularDrag = (float)ov.num("angularDrag", 0.05);
+            o.useGravity = readBool(ov, "useGravity", true); o.isKinematic = readBool(ov, "isKinematic", false); o.freeze = (int)ov.num("freeze", 0);
+            o.hasCollider = readBool(ov, "hasCollider", false); o.colliderOn = readBool(ov, "colliderOn", true); o.isTrigger = readBool(ov, "isTrigger", false);
+            o.colShape = (int)ov.num("colShape", 0); o.colRadius = (float)ov.num("colRadius", 0.5); o.colHeight = (float)ov.num("colHeight", 2);
+            o.friction = (float)ov.num("friction", 0.6); o.bounciness = (float)ov.num("bounciness", 0);
+            readArr(ov, "colCentre", o.colCentre, 3); readArr(ov, "colSize", o.colSize, 3);
             if (const Json::Value* lp = ov.get("linePoints")) if (lp->type == Json::Value::ARR && lp->a.size() >= 6) {
                 o.linePoints.clear(); for (const auto& v : lp->a) o.linePoints.push_back((float)v.n);
                 o.linePoints.resize(o.linePoints.size() / 3 * 3);
@@ -283,7 +313,7 @@ std::string toJson(const Project& p) {
     // the Main Camera: its children ride with the phone; and how it draws
     out += "\n  ],\n  \"camera\": " + markersJson({p.camera}).substr(5) +
            ",\n  \"camClear\": " + std::to_string(p.camClear) + ", \"camNear\": " + fnum(p.camNear) + ", \"camFar\": " + fnum(p.camFar) +
-           ", \"camFov\": " + fnum(p.camFov) + ", \"camColour\": " + arr(p.camColour, 3);
+           ", \"camFov\": " + fnum(p.camFov) + ", \"camColour\": " + arr(p.camColour, 3) + ", \"gravity\": " + arr(p.gravity, 3);
     return out + "\n}\n";
 }
 
@@ -322,6 +352,7 @@ bool fromJson(const std::string& text, Project& p, std::string& err) {
     if (const Json::Value* cv = v.get("camera")) if (cv->type == Json::Value::OBJ) p.camera = markerFrom(*cv, p);
     p.camClear = (int)v.num("camClear", 0); p.camNear = (float)v.num("camNear", p.camNear); p.camFar = (float)v.num("camFar", p.camFar); p.camFov = (float)v.num("camFov", p.camFov);
     readArr(v, "camColour", p.camColour, 3);
+    readArr(v, "gravity", p.gravity, 3);
     const Json::Value* ms = v.get("markers");
     if (!ms || ms->type != Json::Value::ARR) return true;
     for (const Json::Value& mv : ms->a) p.markers.push_back(markerFrom(mv, p));
@@ -396,6 +427,47 @@ Project navigationTemplate() {
     p.markers.push_back(k);
     return p;
 }
+Project physicsTemplate() {
+    // Rigidbodies and Colliders on Hiro: things fall onto the paper, a paddle (kinematic, spinning) sweeps a stack over,
+    // a trigger zone glows while something's in it, a tap drops another ball (the scripts: gui.cpp writes them)
+    Project p;
+    p.title = "Physics";
+    Marker k; k.id = newId(p); k.name = "Hiro"; k.preset = "hiro";
+    auto body = [&](int kind, const char* name, float x, float y, float z, float size, int shape) {
+        Object o = make(p, kind, -1); o.name = name; o.pos[0] = x; o.pos[1] = y; o.pos[2] = z;
+        o.scl[0] = o.scl[1] = o.scl[2] = size;
+        if (kind == CAPSULE) o.scl[1] = size;   // Unity's capsule: 2 high
+        o.hasBody = true; o.hasCollider = true; fitCollider(o, shape);
+        return o;
+    };
+    for (int i = 0; i < 4; ++i) {   // a stack
+        Object c = body(CUBE, "Crate", -0.25f, 0.1f + 0.2f * i, -0.1f, 0.2f, COL_BOX); c.name += " " + std::to_string(i + 1);
+        const float sh = i % 2 ? 0.85f : 1.0f;
+        c.colour[0] = 0.62f * sh; c.colour[1] = 0.45f * sh; c.colour[2] = 0.28f * sh; c.mass = 0.5f; k.objects.push_back(c);
+    }
+    Object ball = body(SPHERE, "Ball", 0.25f, 0.9f, 0.05f, 0.15f, COL_SPHERE);
+    ball.colour[0] = 0; ball.colour[1] = 0.48f; ball.colour[2] = 0.72f; ball.bounciness = 0.7f; ball.metallic = 0.2f; ball.roughness = 0.3f;
+    k.objects.push_back(ball);
+    Object pill = body(CAPSULE, "Pill", 0.05f, 0.7f, 0.3f, 0.08f, COL_CAPSULE); pill.rot[2] = 70;
+    pill.colour[0] = 0.9f; pill.colour[1] = 0.9f; pill.colour[2] = 0.92f; k.objects.push_back(pill);
+    Object paddle = make(p, CUBE, -1); paddle.name = "Paddle";   // kinematic: moved by Animate, pushes, isn't pushed; its end sweeps the stack
+    paddle.pos[0] = 0.1f; paddle.pos[1] = 0.04f; paddle.pos[2] = -0.1f; paddle.scl[0] = 0.8f; paddle.scl[1] = 0.08f; paddle.scl[2] = 0.06f;
+    paddle.colour[0] = 0.25f; paddle.colour[1] = 0.25f; paddle.colour[2] = 0.27f;
+    paddle.hasAnim = true; paddle.anim = A_SPIN; paddle.animSpeed = 0.15f;
+    paddle.hasBody = true; paddle.isKinematic = true; paddle.hasCollider = true; fitCollider(paddle, COL_BOX);
+    k.objects.push_back(paddle);
+    Object zone = make(p, CUBE, -1); zone.name = "Zone";   // a trigger: things pass through, its script hears them
+    zone.pos[0] = 0.3f; zone.pos[1] = 0.125f; zone.pos[2] = -0.3f; zone.scl[0] = zone.scl[1] = zone.scl[2] = 0.25f;
+    zone.colour[0] = 0.2f; zone.colour[1] = 0.9f; zone.colour[2] = 0.5f; zone.colour[3] = 0.35f; zone.castShadows = false;
+    zone.hasCollider = true; zone.isTrigger = true; fitCollider(zone, COL_BOX);
+    k.objects.push_back(zone);
+    Object words = make(p, WORDS, -1); words.name = "Tap"; words.text = "Tap to drop a ball"; words.pos[1] = 1.0f; words.scl[0] = words.scl[1] = words.scl[2] = 0.35f;
+    k.objects.push_back(words);
+    Object spawner = make(p, EMPTY, -1); spawner.name = "Spawner"; k.objects.push_back(spawner);
+    p.markers.push_back(k);
+    return p;
+}
+
 Project basicTemplate() {
     Project p;
     p.title = "My diorama";

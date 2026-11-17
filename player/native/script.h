@@ -1,6 +1,7 @@
 // Diorama's native player: the game's scripts in QuickJS (quickjs-ng), with runtime.js (the web game's script runtime,
 // the same hooks and API) on __dio: the C++ scene's objects to read and change. See runtime.js.
 #pragma once
+#include "physics.h"
 #include "scene.h"
 
 #include <functional>
@@ -19,6 +20,7 @@ struct Env {
     std::function<bool(float view[16])> surface;   // Surfaces: the locked surface's view (false: none)
     struct Plane { std::string id; bool vertical; float view[16]; std::vector<float> boundary; };   // boundary: x z pairs on it
     std::function<std::vector<Plane>()> planes;     // Surfaces: every plane locked and seen now
+    Physics::World* physics = nullptr;             // the Rigidbodies and Colliders (null: the game has none)
 };
 
 bool start(const Env& env, std::string& err);   // the runtime, then every active object's scripts
@@ -27,6 +29,7 @@ void seen(int anchor, bool on);                 // anchor -1: the Main Camera
 void tap(int objectId);
 void ui(int objectId, const char* what, double value, bool isBool);   // a Toggle's value is true / false
 void planesChanged(const std::string& eventJson);
+void contacts(const std::vector<Physics::Contact>& c);   // after physics: onCollisionEnter / Exit, onTriggerEnter / Exit
 void stop();
 
 }

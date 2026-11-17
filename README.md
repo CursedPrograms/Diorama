@@ -40,6 +40,7 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
   - [4. Indoor navigation](#4-indoor-navigation)
   - [5. ArUco markers: one model per number](#5-aruco-markers-one-model-per-number)
   - [6. Calibrate the camera](#6-calibrate-the-camera)
+  - [7. Physics: things that fall, bounce and push](#7-physics-things-that-fall-bounce-and-push)
 - [Scripting reference](#scripting-reference)
 - [The native player](#the-native-player)
 - [Install](#install) · [Build](#build) · [Credits](#credits)
@@ -73,8 +74,14 @@ the markers. Part of [Atelier](https://github.com/CursedPrograms/Atelier).
   4444 / PNG, GIF; or a green screen), Particle System, Line Renderer, Trail Renderer, Occluder, Animate, **AR Path**
   (route marking with arrows) and **AR Path Follower** (a guide that walks it), **Canvas UI** (Text, Button, Slider,
   Toggle, Image, Panel as real HTML/CSS), **Scripts**.
+- **Physics** like Unity's: **Rigidbody** (mass, drag, gravity, kinematic, freeze position and rotation) and **Box,
+  Sphere, Capsule and Mesh (convex) Colliders**, triggers, friction and bounciness, all as sliders. Things land on the
+  real paper, table or floor (each anchor's **Physics floor**), moved things push, and **Simulate** in the Scene view
+  plays it (Stop puts everything back). Scripts get `addForce`, velocities, `onCollisionEnter`, `onTriggerEnter` and
+  raycasts. **Jolt Physics** underneath, the same engine everywhere: C++ in the editor and the native player, WASM in
+  the web game (loaded only when a scene has colliders); `tools/physicstest` checks the two against each other.
 - **Scenes from templates** (Window > Scenes > From Template): Place cubes (planes found, tap one, a cube lands),
-  Indoor navigation, A cube on a marker, The art gallery. **Delete** removes whatever's selected (objects, anchors).
+  Indoor navigation, A cube on a marker, The art gallery, Physics. **Delete** removes whatever's selected (objects, anchors).
 - **Frustum culling:** what the camera can't see isn't drawn (and what a light can't see isn't in its shadows); the
   Profiler counts it.
 - **Windows like Unity's:** Hierarchy, Scene, Inspector, Project and Console dock, resize, tab and float; the layout is
@@ -226,6 +233,38 @@ it knows the lens: its focal length, centre and distortion.
 `tools\calibrate --board board.png` writes the board; `tools\calibrate <video | camera number> camera.json` does the
 same calibration in C++ (`src/calibrate.cpp`, the twin of `assets/web/calibrate.js`).
 
+### 7. Physics: things that fall, bounce and push
+
+**File > New from template > Physics** makes this one; here it is by hand.
+
+1. A Hiro marker. Select it: **Physics floor** is on, so things land on the paper instead of falling through it.
+2. **GameObject > 3D Object > Sphere**, Position `0.25 0.9 0`, Scale `0.15`. **Add Component > Physics > Rigidbody**:
+   a Sphere Collider comes with it, fitted to the ball (the green outline). Set **Bounciness** to `0.7`.
+3. Four Cubes, Scale `0.2`, stacked at Y `0.1`, `0.3`, `0.5`, `0.7`, each with a Rigidbody (Mass `0.5`).
+4. A paddle: a Cube, Scale `0.8 0.08 0.06`, beside the stack. **Add Component > Animate**, Spin, Speed `0.15`; a
+   Rigidbody with **Is Kinematic** on: Animate moves it, it pushes the crates, nothing pushes it.
+5. A zone: a Cube, Scale `0.25`, colour with opacity `0.35`. **Add Component > Physics > Box Collider**, **Is Trigger**
+   on, and a script:
+
+```js
+function onTriggerEnter(e) { gameObject.getComponent("Material").colour.set(1, 0.55, 0.1); log("in:", e.gameObject.name); }
+function onTriggerExit(e)  { gameObject.getComponent("Material").colour.set(0.2, 0.9, 0.5); }
+```
+
+6. **Simulate** (Scene view): the ball drops and bounces, the paddle sweeps the stack over. **Stop** puts it all back.
+7. An empty with this script drops a ball wherever you tap:
+
+```js
+function update(dt) {
+  if (!input.tapped) return;
+  var ball = spawn("Ball", { position: { x: (Math.random() - 0.5) * 0.6, y: 1.2, z: 0 } });
+  if (ball) ball.getComponent("Rigidbody").velocity = { x: 0, y: -0.5, z: 0 };
+}
+```
+
+On a marker 1 unit is the marker's width, so a small marker's world falls fast for its size: Project Settings >
+Physics > Gravity (Earth, Moon, None, or any).
+
 ## Scripting reference
 
 Scripts are JavaScript files on objects (Add Component > Script). A script's functions are called by name; `this` (and
@@ -244,6 +283,8 @@ Console.
 | `onChange(value)` | a Slider or Toggle this script is on changed |
 | `onPlanesChanged(e)` | planes found / changed / gone: `e.added`, `e.updated`, `e.removed` (each `{ id, alignment, center, size, boundary }`) |
 | `onArrived(path)` | an AR Path Follower on this object reached its path's end |
+| `onCollisionEnter(e)` / `onCollisionExit(e)` | it hit something / stopped touching it: `e.gameObject` (`null` and `e.floor` true for the floor), `e.point`, `e.normal` (the way it was pushed), `e.speed` |
+| `onTriggerEnter(e)` / `onTriggerExit(e)` | something came into / left its trigger collider (or it went into one): `e.gameObject` |
 
 ### Everywhere
 
@@ -258,13 +299,15 @@ Console.
 | `input.tapped`, `input.x`, `input.y` | a tap this frame, where (-1..1 across the screen) |
 | `loadScene("Name")`, `loadScene(1)` | another scene (scene 0 is `index.html`) |
 | `scene.name`, `scene.index`, `scene.count`, `scene.names` | this scene |
+| `physics.raycast(from, direction, maxDistance)` | the first collider along a ray in this object's anchor space: `{ gameObject, floor, point, normal, distance }` or `null` (triggers left out) |
+| `physics.gravity` | the gravity (`.x .y .z`, `.set(x, y, z)`); `physics.ready` (Jolt loaded in the web game) |
 | `planes.list`, `planes.raycast(x, y)` | the planes found; where a screen point meets them: `[{ position, distance, plane }]` |
 | `nav.record(name)`, `nav.save(name)`, `nav.toggle(name)`, `nav.follow(name)`, `nav.stopFollowing()`, `nav.reset()`, `nav.paths()`, `nav.points(name)`, `nav.forget(name)`, `nav.recording` | walked paths (path marking and following) |
 
 ### An object
 
 `obj.name`, `obj.position` / `obj.rotation` (degrees) / `obj.scale` (each `.x .y .z`, `.set(x, y, z)`, `.toArray()`),
-`obj.active`, `obj.velocity` (moves it each frame), `obj.toCamera()` (direction to the phone and `.distance`),
+`obj.active`, `obj.velocity` (moves it each frame; with a Rigidbody it is the body's velocity), `obj.toCamera()` (direction to the phone and `.distance`),
 `obj.lookAtCamera()`, `obj.find("Child")`, `obj.getComponent(type)`.
 
 | `getComponent(...)` | Gives |
@@ -279,6 +322,8 @@ Console.
 | `"ParticleSystem"` | `on`, `speed`, `gravity`, `colourStart`, `colourEnd` |
 | `"LineRenderer"` | `on`, `width`, `colour`, `point(i).set(x, y, z)`, `count` |
 | `"TrailRenderer"` | `on`, `time`, `width`, `clear()` |
+| `"Rigidbody"` | `velocity`, `angularVelocity` (radians a second), `addForce(x, y, z, mode)`, `addTorque(x, y, z, mode)` (mode: `"force"`, `"impulse"`, `"acceleration"`, `"velocityChange"`), `mass`, `drag`, `angularDrag`, `useGravity`, `isKinematic`, `constraints`, `sleep()`, `wakeUp()`, `isSleeping`, `movePosition(x, y, z)`, `moveRotation(x, y, z)` |
+| `"Collider"` (or `"BoxCollider"`, ...) | `enabled`, `isTrigger`, `friction`, `bounciness`, `size`, `centre`, `radius`, `height`, `shape` (changes rebuild it) |
 | `"Canvas"` | `visible`, `element` |
 | `"Text"`, `"Button"`, `"Slider"`, `"Toggle"`, `"Image"`, `"Panel"` | `text`, `value`, `isOn`, `picture`, `on`, `position`, `colour`, `onClick(fn)`, `onChange(fn)`, `element` (the HTML) |
 | a script's name | that script's object (what it put on `this`, e.g. `this.clear`) |
@@ -353,10 +398,11 @@ SDK and Java 17 (Android Studio has both).
 ## Credits
 
 Games are built on [three.js](https://threejs.org) (MIT), [jsartoolkit5](https://github.com/artoolkitx/jsartoolkit5)
-(LGPL-3.0), [MindAR](https://github.com/hiukim/mind-ar-js) (MIT) and [OpenCV.js](https://opencv.org) (Apache 2.0),
+(LGPL-3.0), [MindAR](https://github.com/hiukim/mind-ar-js) (MIT), [OpenCV.js](https://opencv.org) (Apache 2.0) and
+[JoltPhysics.js](https://github.com/jrouwe/JoltPhysics.js) (MIT),
 shipped with their licences; Windows builds run on Microsoft's WebView2. Diorama itself uses
 [Dear ImGui](https://github.com/ocornut/imgui), [SDL2](https://www.libsdl.org), [cgltf](https://github.com/jkuhlmann/cgltf),
-[stb](https://github.com/nothings/stb), [ImGuiColorTextEdit](https://github.com/BalazsJako/ImGuiColorTextEdit) and,
+[stb](https://github.com/nothings/stb), [Jolt Physics](https://github.com/jrouwe/JoltPhysics) (MIT), [ImGuiColorTextEdit](https://github.com/BalazsJako/ImGuiColorTextEdit) and,
 for the native tracker, [OpenCV](https://opencv.org). The surface tracker follows
 [AR-Plane-Detection](https://github.com/CursedPrograms/AR-Plane-Detection); indoor navigation follows "Augmented Reality
 in Indoor Navigation" (IJSREM, 2023). The art gallery's pictures and frame are from

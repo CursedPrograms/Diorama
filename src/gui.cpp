@@ -4,6 +4,8 @@
 //   Diorama [project folder]
 //   Diorama --capture out.bmp [--template gallery|basic] [--select N]   a screenshot from a hidden window, then quit
 #include "marker.h"
+#include "model.h"
+#include "physics.h"
 #include "scene.h"
 #include "splash.h"
 #include "serve.h"
@@ -163,6 +165,7 @@ static bool sceneFromFile(const std::string& name, std::vector<Scene::Marker>& o
 static std::vector<Scene::Marker> sceneMarkers(const std::string& name);
 static void copyCamera(Project& to, const Project& from);
 static void attachPlaceCubes();
+static void attachPhysicsScripts();
 // where projects live: Documents/Diorama, or the home folder's Diorama when Windows guards Documents
 // (Controlled Folder Access refuses unknown apps there, without a word)
 static bool writable(const fs::path& d) {
@@ -204,8 +207,26 @@ static void beginEdit() {
     if (undoStack.size() > 200) undoStack.erase(undoStack.begin());
     redoStack.clear();
 }
-static void undo() { if (undoStack.empty()) return; redoStack.push_back(proj); proj = undoStack.back(); undoStack.pop_back(); if (!curObject()) selObject = -1; }
-static void redo() { if (redoStack.empty()) return; undoStack.push_back(proj); proj = redoStack.back(); redoStack.pop_back(); if (!curObject()) selObject = -1; }
+// ---------- Simulate: the physics in the Scene view (Unity's Play mode, for physics): the Rigidbodies fall, bounce and
+// push; when it stops everything goes back where it was (edits made while it runs go too, as in Unity)
+static Physics::World* simWorld = nullptr;
+static Project simBefore;
+static size_t simUndo = 0;
+static void stopSimulate() {
+    if (!simWorld) return;
+    Physics::destroy(simWorld); simWorld = nullptr;
+    proj = simBefore; frameStart = proj;
+    if (undoStack.size() > simUndo) undoStack.resize(simUndo);
+    redoStack.clear();
+    if (!curObject()) selObject = -1;
+}
+static void startSimulate() {
+    stopSimulate();
+    simBefore = proj; simUndo = undoStack.size();
+    simWorld = Physics::create(proj);
+}
+static void undo() { stopSimulate(); if (undoStack.empty()) return; redoStack.push_back(proj); proj = undoStack.back(); undoStack.pop_back(); if (!curObject()) selObject = -1; }
+static void redo() { stopSimulate(); if (redoStack.empty()) return; undoStack.push_back(proj); proj = redoStack.back(); redoStack.pop_back(); if (!curObject()) selObject = -1; }
 
 // ---------- the printed marker ----------
 static std::string markerAssets() { return (fs::u8path(exeDir) / "assets" / "markers").u8string(); }
@@ -286,6 +307,7 @@ static void forEachFile(Project& p, const std::function<void(std::string&)>& f) 
     for (auto& m : p.markers) { f(m.picture); f(m.target); for (auto& o : m.objects) { f(o.file); f(o.audioFile); f(o.particleFile); f(o.videoFile); f(o.uiFile); f(o.canvasCss); for (auto& sc : o.scripts) f(sc.file); } }
 }
 static bool saveProject(bool askFolder) {
+    stopSimulate();   // what's saved is the scene as made, not where things fell
     if (folder.empty() || askFolder) {
         const std::string base = (fs::u8path(projectsHome())).u8string();
         std::error_code ec; fs::create_directories(fs::u8path(base), ec);
@@ -313,6 +335,7 @@ static void openProject(const std::string& path) {
     Project np; std::string err;
     if (!Scene::load(np, p.u8string(), err)) { say(err); return; }
     forEachFile(np, [&](std::string& s) { if (!s.empty() && fs::u8path(s).is_relative()) s = (p / fs::u8path(s)).u8string(); });
+    stopSimulate();
     proj = np; folder = p.u8string(); selMarker = 0; selObject = -1; shownMarker = -1;
     { std::vector<Scene::Marker> ms; if (sceneFromFile(proj.scene, ms)) proj.markers = ms; }
     rememberProject();
@@ -384,11 +407,44 @@ function onPlanesChanged(e) {
 )JS";
     for (auto& m : proj.markers) for (auto& o : m.objects) if (o.name == "Spawner") o.scripts.push_back({f.u8string(), true});
 }
+// the Physics demo's scripts: a tap drops a ball; the zone glows while something's in it
+static void attachPhysicsScripts() {
+    const fs::path d = fs::u8path(projectsHome()) / "scripts";
+    std::error_code ec; fs::create_directories(d, ec);
+    const fs::path drop = d / "Drop.js", zone = d / "Zone.js";
+    std::ofstream(drop, std::ios::binary) << R"JS(// Drop: a tap anywhere drops a ball from above (a copy of "Ball": its Rigidbody, its Collider and all).
+function update(dt) {
+  if (!input.tapped) return;
+  var x = (Math.random() - 0.5) * 0.6, z = (Math.random() - 0.5) * 0.6;
+  var ball = spawn("Ball", { position: { x: x, y: 1.2, z: z } });
+  if (ball) ball.getComponent("Rigidbody").velocity = { x: 0, y: -0.5, z: 0 };
+}
+)JS";
+    std::ofstream(zone, std::ios::binary) << R"JS(// Zone: a trigger. It glows orange while something's inside, and says what came and went.
+var inside = 0;
+function onTriggerEnter(e) {
+  inside++;
+  gameObject.getComponent("Material").colour.set(1, 0.55, 0.1);
+  log("in:", e.gameObject ? e.gameObject.name : "?");
+}
+function onTriggerExit(e) {
+  inside = Math.max(0, inside - 1);
+  if (!inside) gameObject.getComponent("Material").colour.set(0.2, 0.9, 0.5);
+  log("out:", e.gameObject ? e.gameObject.name : "?");
+}
+)JS";
+    for (auto& m : proj.markers) for (auto& o : m.objects) {
+        if (o.name == "Spawner") o.scripts.push_back({drop.u8string(), true});
+        if (o.name == "Zone") o.scripts.push_back({zone.u8string(), true});
+    }
+}
 static void newFromTemplate(int which) {
     const std::string dir = (fs::u8path(exeDir) / "templates" / "gallery").u8string() + "/";
-    proj = which == 3 ? planeDemoTemplate() : which == 2 ? navigationTemplate() : which == 1 ? galleryTemplate(dir) : basicTemplate();
+    stopSimulate();
+    proj = which == 4 ? physicsTemplate() : which == 3 ? planeDemoTemplate() : which == 2 ? navigationTemplate() : which == 1 ? galleryTemplate(dir) : basicTemplate();
     folder.clear(); selMarker = 0; selObject = -1; shownMarker = -1;
     if (which == 3) attachPlaceCubes();
+    if (which == 4) attachPhysicsScripts();
     Viewer::frameMarker();
     if (!autosaveFolders) return;
     // its own folder at once (Documents/Diorama/<title>), like a Unity project: the Project window needs one
@@ -907,6 +963,12 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     }
     fs::create_directories(o / "lib", ec);
     fs::copy_file(web / "diorama.js", o / "lib" / "diorama.js", fs::copy_options::overwrite_existing, ec);
+    {   // physics: physics.js always (it does nothing without colliders); Jolt (3 MB of WASM) only when a scene has colliders
+        fs::copy_file(web / "physics.js", o / "lib" / "physics.js", fs::copy_options::overwrite_existing, ec);
+        bool phys = false;
+        for (const auto& sn : proj.scenes) { Project t; t.markers = sceneMarkers(sn); if (Physics::any(t)) { phys = true; break; } }
+        if (phys && !copyTree(web / "jolt", o / "lib" / "jolt")) { err = "Couldn't copy Jolt Physics into " + out; return false; }
+    }
     // the files the scene uses, each once, under assets/
     std::map<std::string, std::string> done, scriptSrc;
     std::vector<std::pair<Markers::Image, std::string>> sheet;
@@ -1067,7 +1129,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     const char* gpu = proj.renderer == 1 ? "true" : "false";
     if (aruco)
         h << importMap <<
-             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
+             "  <script src=\"lib/physics.js\"></script>\n  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
              "  <script type=\"module\">\n"
              "    import * as THREE from 'three';\n"
              "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
@@ -1075,7 +1137,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
              "  </script>\n  <!-- Made with Diorama (Cursed Entertainment). three.js: MIT; OpenCV.js: Apache 2.0 (see lib/). -->\n";
     else if (surfaces)
         h << importMap <<
-             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
+             "  <script src=\"lib/physics.js\"></script>\n  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
              "  <script type=\"module\">\n"
              "    import * as THREE from 'three';\n"
              "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
@@ -1083,7 +1145,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
              "  </script>\n  <!-- Made with Diorama (Cursed Entertainment). three.js: MIT (see lib/three/). WebXR: the phone's own AR (ARCore). -->\n";
     else if (!mind)
         h << importMap <<
-             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
+             "  <script src=\"lib/physics.js\"></script>\n  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
              "  <script type=\"module\">\n"
              "    import * as THREE from 'three';\n"
              "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
@@ -1093,7 +1155,7 @@ static bool buildGame(const std::string& out, std::string& err, bool play = fals
     else {
         const bool faces = proj.tracking == TRACK_FACES;
         h << "  <script type=\"importmap\">{ \"imports\": { \"three\": \"./lib/mindar/three/three.module.min.js\", \"three/addons/\": \"./lib/mindar/three/addons/\" } }</script>\n"
-             "  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
+             "  <script src=\"lib/physics.js\"></script>\n  <script src=\"lib/diorama.js\"></script>\n  <script src=\"" << jsName << "\"></script>\n"
              "  <script type=\"module\">\n"
              "    import * as THREE from 'three';\n"
              "    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';\n"
@@ -2014,10 +2076,10 @@ static void newScene(bool duplicateOpen) {
 static void newSceneFromTemplate(int which) {
     if (folder.empty()) { say("Save the project first"); return; }
     const std::string dir = (fs::u8path(exeDir) / "templates" / "gallery").u8string() + "/";
-    const Project tmpl = which == 3 ? planeDemoTemplate() : which == 2 ? navigationTemplate() : which == 1 ? galleryTemplate(dir) : basicTemplate();
+    const Project tmpl = which == 4 ? physicsTemplate() : which == 3 ? planeDemoTemplate() : which == 2 ? navigationTemplate() : which == 1 ? galleryTemplate(dir) : basicTemplate();
     if (tmpl.tracking != proj.tracking) { say(std::string("That template is for ") + TRACKING_NAMES[tmpl.tracking] + " games (Edit > Project Settings)"); return; }
     saveProject(false);
-    const char* names[] = {"Cube on a marker", "Art gallery", "Indoor navigation", "Place cubes"};
+    const char* names[] = {"Cube on a marker", "Art gallery", "Indoor navigation", "Place cubes", "Physics"};
     const std::string name = uniqueSceneName(names[which]);
     Project t = proj;
     t.markers = tmpl.markers;
@@ -2027,6 +2089,7 @@ static void newSceneFromTemplate(int which) {
     openScene(name);
     proj.nextId = std::max(proj.nextId, tmpl.nextId);
     if (which == 3) { attachPlaceCubes(); saveProject(false); }   // its script (tap a plane: a cube)
+    if (which == 4) { attachPhysicsScripts(); saveProject(false); }   // its scripts (a tap drops a ball; the zone)
     say("Made the scene " + name);
 }
 static void sceneManager() {
@@ -2081,7 +2144,7 @@ static void sceneManager() {
     if (ImGui::BeginPopup("tmplscene")) {
         struct T { int which; const char* label; int tracking; };
         const T ts[] = {{3, "Place cubes: planes found, tap one, a cube lands", TRACK_SURFACES}, {2, "Indoor navigation: a path with arrows", TRACK_SURFACES},
-                        {0, "A cube on a marker", TRACK_MARKERS}, {1, "The art gallery: a window into the marker", TRACK_MARKERS}};
+                        {0, "A cube on a marker", TRACK_MARKERS}, {4, "Physics: a stack, balls, a spinning paddle, a trigger; tap to drop a ball", TRACK_MARKERS}, {1, "The art gallery: a window into the marker", TRACK_MARKERS}};
         for (const T& x : ts) {
             if (ImGui::MenuItem(x.label, nullptr, false, x.tracking == proj.tracking)) newSceneFromTemplate(x.which);
             if (x.tracking != proj.tracking && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("For %s games (Edit > Project Settings)", TRACKING_NAMES[x.tracking]);
@@ -2145,6 +2208,7 @@ static void menuBar() {
             if (ImGui::MenuItem("Indoor navigation (surfaces)")) newFromTemplate(2);
             if (ImGui::MenuItem("Plane detection demo (tap to place cubes)")) newFromTemplate(3);
             if (ImGui::MenuItem("A cube on Hiro")) newFromTemplate(0);
+            if (ImGui::MenuItem("Physics (falling, bouncing, a trigger)")) newFromTemplate(4);
             ImGui::EndMenu();
         }
         if (ImGui::MenuItem("Open...", "Ctrl+O")) { const std::string f = openDialog(L"Diorama project\0*.diorama\0\0"); if (!f.empty()) openProject(f); }
@@ -2584,6 +2648,7 @@ static void markerInspector(Scene::Marker& m) {
         labelled("Height"); ImGui::SliderFloat("##pitch", &m.sunPitch, 5, 90, "%.0f\xc2\xb0 up");
         ImGui::Checkbox("The sun casts shadows", &m.sunShadows);
         ImGui::Checkbox("Shadows on the real world", &m.shadowCatcher); tip("An invisible floor that only shows shadows: they fall on the printed paper, the table or the floor");
+        ImGui::Checkbox("Physics floor", &m.physicsFloor); tip("Things with a Rigidbody land on the real paper, table or floor (y = 0) instead of falling through it");
     }
     if ((proj.tracking == TRACK_MARKERS || proj.tracking == TRACK_IMAGES) && section("Window into the marker")) {
         ImGui::Checkbox("Show what's under the paper only through an opening", &m.portal);
@@ -2633,12 +2698,18 @@ static void copyComponent(const std::string& key, const Object& f, Object& t) {
         t.hasVideo = true; t.videoOn = f.videoOn; t.videoFile = f.videoFile; t.videoLoop = f.videoLoop; t.videoPlayOnStart = f.videoPlayOnStart; t.videoMuted = f.videoMuted;
         t.videoVolume = f.videoVolume; t.videoSpeed = f.videoSpeed; t.videoAlpha = f.videoAlpha; cpa(t.videoKey, f.videoKey); t.videoKeyTol = f.videoKeyTol; t.videoKeySoft = f.videoKeySoft;
     } else if (key == "Trail Renderer") { t.hasTrail = true; t.trailOn = f.trailOn; t.trailTime = f.trailTime; t.trailWidth = f.trailWidth; cpa(t.trailColour, f.trailColour); }
+    else if (key == "Rigidbody") { t.hasBody = true; t.mass = f.mass; t.drag = f.drag; t.angularDrag = f.angularDrag; t.useGravity = f.useGravity; t.isKinematic = f.isKinematic; t.freeze = f.freeze; }
+    else if (key == "Collider") {
+        t.hasCollider = true; t.colliderOn = f.colliderOn; t.isTrigger = f.isTrigger; t.colShape = f.colShape; cpa(t.colCentre, f.colCentre); cpa(t.colSize, f.colSize);
+        t.colRadius = f.colRadius; t.colHeight = f.colHeight; t.friction = f.friction; t.bounciness = f.bounciness;
+    }
 }
 static bool hasComponent(const std::string& key, const Object& o) {
     if (key == "Transform") return true; if (key == "Look") return o.kind != EMPTY; if (key == "Animate") return o.hasAnim; if (key == "Canvas") return o.hasCanvas;
     if (key == "UI") return o.ui != UI_NONE; if (key == "Light") return o.hasLight; if (key == "Audio Source") return o.hasAudio; if (key == "Particle System") return o.hasParticles;
     if (key == "Line Renderer") return o.hasLine; if (key == "AR Path") return o.hasPath; if (key == "AR Path Follower") return o.hasFollower;
     if (key == "Video Player") return o.hasVideo; if (key == "Trail Renderer") return o.hasTrail;
+    if (key == "Rigidbody") return o.hasBody; if (key == "Collider") return o.hasCollider;
     return false;
 }
 static void pasteAsNew(Object& t) {   // the copied component onto this object (one of a kind: its values, if it has one already)
@@ -2840,6 +2911,16 @@ static void giveVideo(Object& o, const std::string& file) {
         o.colour[0] = o.colour[1] = o.colour[2] = o.colour[3] = 1; o.lit = false;
     }
 }
+// a collider fitted to the object's look (a model: its bounds, from the file)
+static void addCollider(Object& o, int shape) {
+    o.hasCollider = true; o.colliderOn = true;
+    Model::Model md;
+    if (o.kind == MODEL && !o.file.empty() && Model::load(o.file, md)) fitCollider(o, shape, md.lo, md.hi);
+    else fitCollider(o, shape);
+}
+static int defaultCollider(const Object& o) {   // what Unity gives each primitive
+    return o.kind == SPHERE ? COL_SPHERE : o.kind == CAPSULE || o.kind == CYLINDER ? COL_CAPSULE : COL_BOX;
+}
 static void addComponentMenu(Object& o) {
     const bool hasLook = o.kind != EMPTY;
     if (ImGui::BeginMenu("Mesh", !hasLook)) {
@@ -2858,6 +2939,16 @@ static void addComponentMenu(Object& o) {
         if (ImGui::MenuItem("Light", nullptr, false, !o.hasLight)) { o.hasLight = true; o.lightOn = true; }
         if (ImGui::MenuItem("Line Renderer", nullptr, false, !o.hasLine)) { o.hasLine = true; o.lineOn = true; }
         if (ImGui::MenuItem("Trail Renderer", nullptr, false, !o.hasTrail)) { o.hasTrail = true; o.trailOn = true; }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Physics")) {
+        if (ImGui::MenuItem("Rigidbody", nullptr, false, !o.hasBody)) {
+            o.hasBody = true;
+            if (!o.hasCollider) { addCollider(o, defaultCollider(o)); say(std::string("Added a Rigidbody, and a ") + COLLIDER_NAMES[o.colShape] + " to give it a shape"); }
+        }
+        ImGui::Separator();
+        for (int k = 0; k < COL_COUNT; ++k) if (ImGui::MenuItem(COLLIDER_NAMES[k], nullptr, false, !o.hasCollider)) addCollider(o, k);
+        if (o.hasCollider) ImGui::TextDisabled("(it has a collider: change its shape in the Inspector)");
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("XR")) {
@@ -3274,6 +3365,54 @@ static void objectInspector(Scene::Marker& m, Object& o) {
             }
         }
     }
+    // Rigidbody
+    if (o.hasBody) {
+        h = componentHeader("Rigidbody", nullptr, true);
+        if ((h & 0xff) == C_REMOVE) o.hasBody = false;
+        else {
+            if ((h & 0xff) == C_RESET) { o.mass = D.mass; o.drag = D.drag; o.angularDrag = D.angularDrag; o.useGravity = D.useGravity; o.isKinematic = D.isKinematic; o.freeze = D.freeze; }
+            if (h & 0x100) {
+                labelled("Mass"); ImGui::SliderFloat("##rbm", &o.mass, 0.01f, 1000, "%.2f kg", ImGuiSliderFlags_Logarithmic); tip("How heavy: heavy things push light ones aside");
+                labelled("Drag"); ImGui::SliderFloat("##rbd", &o.drag, 0, 10, "%.2f"); tip("How much the air slows it (0: not at all; a feather: 5)");
+                labelled("Angular drag"); ImGui::SliderFloat("##rba", &o.angularDrag, 0, 10, "%.2f"); tip("How much the air slows its turning");
+                ImGui::Checkbox("Use Gravity", &o.useGravity); tip("Off: it floats where it's left (Project Settings > Physics sets gravity)");
+                ImGui::SameLine(160); ImGui::Checkbox("Is Kinematic", &o.isKinematic);
+                tip("Moved only by its Transform (Animate, scripts, paths): it pushes things, nothing pushes it. A moving platform, a paddle, a door");
+                ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Freeze position"); ImGui::SameLine(120);
+                ImGui::CheckboxFlags("X##fpx", &o.freeze, 1); ImGui::SameLine(); ImGui::CheckboxFlags("Y##fpy", &o.freeze, 2); ImGui::SameLine(); ImGui::CheckboxFlags("Z##fpz", &o.freeze, 4);
+                ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Freeze rotation"); ImGui::SameLine(120);
+                ImGui::CheckboxFlags("X##frx", &o.freeze, 8); ImGui::SameLine(); ImGui::CheckboxFlags("Y##fry", &o.freeze, 16); ImGui::SameLine(); ImGui::CheckboxFlags("Z##frz", &o.freeze, 32);
+                tip("Constraints: it never moves or turns along these (in its anchor's axes). A ball that only rolls on the table: freeze Y");
+                if (!o.hasCollider) ImGui::TextColored(col4(IM_COL32(0xf0, 0xb0, 0x60, 255)), "It needs a Collider to take part: Add Component > Physics.");
+                else ImGui::TextDisabled("It falls, bounces and is pushed. Simulate in the Scene view (or Play) to see it.");
+            }
+        }
+    }
+    // Collider
+    if (o.hasCollider) {
+        o.colShape = std::clamp(o.colShape, 0, COL_COUNT - 1);
+        hdrKey = "Collider"; h = componentHeader(COLLIDER_NAMES[o.colShape], &o.colliderOn, true); hdrKey = nullptr;
+        if ((h & 0xff) == C_REMOVE) o.hasCollider = false;
+        else {
+            if ((h & 0xff) == C_RESET) { addCollider(o, o.colShape); o.isTrigger = D.isTrigger; o.friction = D.friction; o.bounciness = D.bounciness; }
+            if (h & 0x100) {
+                const char* shapes[] = {"Box", "Sphere", "Capsule", "Mesh (convex)"};
+                int shape = o.colShape;
+                labelled("Shape"); if (ImGui::Combo("##csh", &shape, shapes, COL_COUNT)) addCollider(o, shape);
+                ImGui::Checkbox("Is Trigger", &o.isTrigger);
+                tip("Things pass through it, and scripts hear them come and go: onTriggerEnter(other), onTriggerExit(other)");
+                if (o.colShape != COL_MESH) vec3Row("Centre", o.colCentre, 0.005f);
+                if (o.colShape == COL_BOX) vec3Row("Size", o.colSize, 0.005f);
+                if (o.colShape == COL_SPHERE || o.colShape == COL_CAPSULE) { labelled("Radius"); ImGui::SliderFloat("##crad", &o.colRadius, 0.001f, 10, "%.3f", ImGuiSliderFlags_Logarithmic); }
+                if (o.colShape == COL_CAPSULE) { labelled("Height"); ImGui::SliderFloat("##chei", &o.colHeight, 0.001f, 20, "%.3f", ImGuiSliderFlags_Logarithmic); tip("End to end, along its Y"); }
+                if (o.colShape == COL_MESH) ImGui::TextDisabled("Its look's points, wrapped tight (a convex hull: hollows are filled in).");
+                labelled("Friction"); ImGui::SliderFloat("##cfr", &o.friction, 0, 1, "%.2f"); tip("0: ice; 1: rubber");
+                labelled("Bounciness"); ImGui::SliderFloat("##cbo", &o.bounciness, 0, 1, "%.2f"); tip("0: it lands dead; 1: it bounces back as high as it fell");
+                if (ImGui::Button("Fit to its look", ImVec2(-1, 0))) addCollider(o, o.colShape);
+                ImGui::TextDisabled("%s", o.hasBody ? "The green outline in the Scene view." : "Without a Rigidbody it stays put (moved by its Transform, it still pushes).");
+            }
+        }
+    }
     // Scripts
     for (size_t si = 0; si < o.scripts.size(); ++si) {
         ImGui::PushID((int)si);
@@ -3546,6 +3685,14 @@ static void sceneView() {
     ImGui::SameLine();
     if (ImGui::Button(lk.animate ? "Pause" : "Animate", ImVec2(80, 0))) lk.animate = !lk.animate;
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("The animations in this view");
+    ImGui::SameLine();
+    {
+        const bool on = simWorld != nullptr;
+        if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_BLUE));
+        if (ImGui::Button(on ? "Stop" : "Simulate", ImVec2(80, 0))) { if (on) stopSimulate(); else startSimulate(); }
+        if (on) ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(on ? "Stop: everything goes back where it was" : "Physics in this view: Rigidbodies fall, bounce and push (scripts run in Play)");
+    }
     ImGui::SameLine(0, 14);
     const char* toolNames[4] = {"Hand (Q)", "Move (W)", "Rotate (E)", "Scale (R)"};
     const char* toolLabels[4] = {"Q", "W", "E", "R"};
@@ -3587,6 +3734,7 @@ static void sceneView() {
     static bool handleHasMouse = false;
     int picked = -1;
     static bool uiHasMouse = false;
+    if (simWorld) { Physics::step(simWorld, proj, ImGui::GetIO().DeltaTime, lk.time); Physics::takeContacts(simWorld); }
     const unsigned tex = Viewer::render(proj, selMarker, selObject, (int)avail.x, (int)avail.y, hov && !handleHasMouse && !uiHasMouse, picked);
     if (!uiHasMouse) {
         if (picked >= 0) { selMarker = ownerOf(picked); selObject = picked; }
@@ -3679,6 +3827,14 @@ static void projectSettings() {
         }
     }
     if (proj.calibW > 0) { ImGui::SameLine(); if (ImGui::Button("Forget it", ImVec2(100, 0))) { beginEdit(); proj.calibW = 0; proj.calibDist.clear(); } }
+    ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+    ImGui::PushFont(boldFont); ImGui::TextUnformatted("Physics"); ImGui::PopFont();
+    labelled("Gravity"); if (ImGui::SliderFloat3("##grav", proj.gravity, -30, 30, "%.2f")) beginEdit();
+    tip("In each anchor's space, units a second a second: Y is up out of a marker, or up from the floor. Earth: 0, -9.81, 0");
+    if (ImGui::Button("Earth", ImVec2(80, 0))) { beginEdit(); proj.gravity[0] = proj.gravity[2] = 0; proj.gravity[1] = -9.81f; }
+    ImGui::SameLine(); if (ImGui::Button("Moon", ImVec2(80, 0))) { beginEdit(); proj.gravity[0] = proj.gravity[2] = 0; proj.gravity[1] = -1.62f; }
+    ImGui::SameLine(); if (ImGui::Button("None", ImVec2(80, 0))) { beginEdit(); proj.gravity[0] = proj.gravity[1] = proj.gravity[2] = 0; }
+    ImGui::TextDisabled("On a marker 1 unit is the marker's width: a small marker's world is small, so things fall fast\nfor their size. Lower it for a slower, toy-like fall.");
     ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
     ImGui::PushFont(boldFont); ImGui::TextUnformatted("Location"); ImGui::PopFont();
     if (ImGui::Checkbox("Use the player's location (GPS)", &proj.gps)) beginEdit();
@@ -3809,7 +3965,7 @@ static void frame() {
 }
 
 int main(int argc, char** argv) {
-    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false; std::string buildFor, addVideoArg;
+    std::string capture, tmpl = "gallery", openArg, buildArg; int selectArg = -1, pickX = -1, pickY = -1; bool buildWin = false; std::string buildFor, addVideoArg; float simulateArg = -1;
     std::vector<std::string> args;
 #ifdef _WIN32
     { int n; LPWSTR* wa = CommandLineToArgvW(GetCommandLineW(), &n); if (wa) { for (int i = 1; i < n; ++i) args.push_back(fs::path(wa[i]).u8string()); LocalFree(wa); } }
@@ -3834,6 +3990,7 @@ int main(int argc, char** argv) {
         else if (args[i] == "--scenes") showScenes = true;
         else if (args[i] == "--profiler") showProfiler = true;
         else if (args[i] == "--2d") Viewer::look().view2D = true;   // tests: the 2D view   // tests: the Profiler open
+        else if (args[i] == "--simulate" && i + 1 < args.size()) simulateArg = (float)atof(args[++i].c_str());   // tests: Simulate, run this long
         else if (args[i] == "--select-camera") selectArg = -100;   // tests: the Main Camera selected
         else if (args[i] == "--select-asset" && i + 1 < args.size()) { selAsset = args[++i]; selAssetMarker = 0; selAssetObject = -1; }   // tests: a file selected in the Project window
         else if (args[i] == "--add-video" && i + 1 < args.size()) addVideoArg = args[++i];   // tests: a video, as dropped on the first anchor   // opens the Scenes window (for screenshots)   // opens the Marker Maker (for screenshots)
@@ -3906,10 +4063,15 @@ int main(int argc, char** argv) {
     const std::string last = autosaveFolders && openArg.empty() && prefs.reopenLast ? lastProject() : "";
     if (!openArg.empty()) openProject(openArg);
     else if (!last.empty()) openProject(last);
-    else newFromTemplate(tmpl == "basic" ? 0 : tmpl == "navigation" ? 2 : tmpl == "planes" ? 3 : 1);
+    else newFromTemplate(tmpl == "basic" ? 0 : tmpl == "navigation" ? 2 : tmpl == "planes" ? 3 : tmpl == "physics" ? 4 : 1);
     if (!addVideoArg.empty() && !proj.markers.empty()) dropAsset(proj.markers[0], 0, -1, addVideoArg);
     if (!buildArg.empty()) { std::string err, apk; const bool ok = buildFor == "android" ? buildAndroid(buildArg, err, apk) : buildFor == "linux" ? buildLinux(buildArg, false, err) : buildFor == "pi" ? buildLinux(buildArg, true, err) : (buildWin || buildFor == "windows") ? buildWindows(buildArg, err) : buildGame(buildArg, err); printf("%s\n", ok ? "built" : err.c_str()); return ok ? 0 : 1; }
     if (selectArg >= 0 && curMarker() && selectArg < (int)curMarker()->objects.size()) selObject = curMarker()->objects[selectArg].id;
+    if (simulateArg >= 0) {   // tests: Simulate, stepped this many seconds at 60 a second
+        startSimulate();
+        for (int k = 1; k <= (int)std::lround(simulateArg * 60); ++k) Physics::step(simWorld, proj, 1.0f / 60, k / 60.0f);
+        Physics::takeContacts(simWorld);
+    }
     if (selectArg == -100) { selMarker = -2; selObject = -1; }
     if (capture.empty()) { SDL_ShowWindow(window); SDL_MaximizeWindow(window); SDL_RaiseWindow(window); }
 

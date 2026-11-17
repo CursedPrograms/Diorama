@@ -36,8 +36,10 @@
     this.id = id; this.name = D.get(id, 'name');
     this.transform = { position: field(id, 'position'), rotation: field(id, 'rotation'), scale: field(id, 'scale') };
     this.position = this.transform.position; this.rotation = this.transform.rotation; this.scale = this.transform.scale;
-    var vel = [0, 0, 0]; this._vel = vel;
-    this.velocity = vec(function (i) { return vel[i]; }, function (i, n) { vel[i] = n; });
+    var vel = [0, 0, 0]; this._vel = vel;   // moves it by itself; with a Rigidbody, velocity is the body's
+    var own = vec(function (i) { return vel[i]; }, function (i, n) { vel[i] = n; });
+    Object.defineProperty(this, 'velocity', { get: function () { return D.get(id, 'hasBody') ? rigidbody(self).velocity : own; },
+      set: function (v) { var to = self.velocity; to.set(v.x, v.y, v.z); }, enumerable: true });
     Object.defineProperty(this, 'active', { get: function () { return D.get(id, 'active'); }, set: function (v) { D.set(id, 'active', !!v); } });
     this.scripts = [];
     this.uiListeners = {};
@@ -86,6 +88,14 @@
             point: function (i) { return vec(function (k) { return D.getv(id, 'linePoints', i * 3 + k); }, function (k, n) { D.setv(id, 'linePoints', i * 3 + k, n); }); } };
       prop(c, 'on', id, 'lineOn', bool); prop(c, 'width', id, 'lineWidth', num);
       Object.defineProperty(c, 'count', { get: function () { return D.get(id, 'linePointCount'); } });
+      return c;
+    case 'rigidbody': case 'body': return D.get(id, 'hasBody') ? rigidbody(this) : null;
+    case 'collider': case 'boxcollider': case 'spherecollider': case 'capsulecollider': case 'meshcollider':
+      if (!D.get(id, 'hasCollider')) return null;
+      c = { size: field(id, 'colSize'), centre: field(id, 'colCentre') }; c.center = c.centre;
+      prop(c, 'enabled', id, 'colliderOn', bool); prop(c, 'isTrigger', id, 'isTrigger', bool); prop(c, 'friction', id, 'friction', num);
+      prop(c, 'bounciness', id, 'bounciness', num); prop(c, 'radius', id, 'colRadius', num); prop(c, 'height', id, 'colHeight', num);
+      Object.defineProperty(c, 'shape', { get: function () { return ['Box', 'Sphere', 'Capsule', 'Mesh'][D.get(id, 'colShape') | 0]; } });
       return c;
     case 'trail': case 'trailrenderer':
       if (!D.get(id, 'hasTrail')) return null;
@@ -144,13 +154,15 @@
       if (code === null || code === undefined) { report('error', sc.file, 0, 'not found'); return; }
       var name = sc.file.split('/').pop().replace(/\.js$/, '');
       try {
-        var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input', 'loadScene', 'scene', 'nav', 'planes',
-          '"use strict";\n' + code + '\n;return { start: typeof start === "function" ? start : null, update: typeof update === "function" ? update : null,' +
+        var f = new Function('gameObject', 'find', 'spawn', 'destroy', 'log', 'time', 'camera', 'input', 'loadScene', 'scene', 'nav', 'planes', 'physics',
+          '"use strict";\n' + code + '\n;return { onCollisionEnter: typeof onCollisionEnter === "function" ? onCollisionEnter : null,' +
+          ' onCollisionExit: typeof onCollisionExit === "function" ? onCollisionExit : null, onTriggerEnter: typeof onTriggerEnter === "function" ? onTriggerEnter : null,' +
+          ' onTriggerExit: typeof onTriggerExit === "function" ? onTriggerExit : null, start: typeof start === "function" ? start : null, update: typeof update === "function" ? update : null,' +
           ' onTap: typeof onTap === "function" ? onTap : null, onFound: typeof onFound === "function" ? onFound : null, onLost: typeof onLost === "function" ? onLost : null,' +
           ' onClick: typeof onClick === "function" ? onClick : null, onChange: typeof onChange === "function" ? onChange : null,' +
           ' onPlanesChanged: typeof onPlanesChanged === "function" ? onPlanesChanged : null, onArrived: typeof onArrived === "function" ? onArrived : null };');
         var log = function () { report('log', sc.file, 0, Array.prototype.map.call(arguments, function (a) { return typeof a === 'object' ? JSON.stringify(a) : String(a); }).join(' ')); };
-        var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, cameraApi, input, loadScene, sceneInfo(), nav, planes);
+        var api = f.call(go, go, function (p) { return find(p); }, spawn, destroy, log, function () { return R.t; }, cameraApi, input, loadScene, sceneInfo(), nav, planes, physicsApi(go));
         go.scripts.push({ name: name, file: sc.file, fns: api, self: go, started: false });
       } catch (e) { report('error', sc.file, lineOf(e), e.message); }
     });
@@ -187,7 +199,7 @@
     R.objects.forEach(function (g) {
       if (g.dead) return;
       g.scripts.forEach(function (s) { if (!s.started) { s.started = true; call(g, s, 'start'); } call(g, s, 'update', dt); });
-      var v = g._vel; if (v[0] || v[1] || v[2]) { D.setv(g.id, 'position', 0, D.getv(g.id, 'position', 0) + v[0] * dt); D.setv(g.id, 'position', 1, D.getv(g.id, 'position', 1) + v[1] * dt); D.setv(g.id, 'position', 2, D.getv(g.id, 'position', 2) + v[2] * dt); }
+      var v = g._vel; if (!D.get(g.id, 'hasBody') && (v[0] || v[1] || v[2])) { D.setv(g.id, 'position', 0, D.getv(g.id, 'position', 0) + v[0] * dt); D.setv(g.id, 'position', 1, D.getv(g.id, 'position', 1) + v[1] * dt); D.setv(g.id, 'position', 2, D.getv(g.id, 'position', 2) + v[2] * dt); }
     });
     R.objects = R.objects.filter(function (g) { return !g.dead; });
     input.tapped = false;
@@ -214,6 +226,70 @@
   G.__planesChanged = function (json) {
     var ev = JSON.parse(json);
     R.objects.forEach(function (g) { if (!g.dead) g.scripts.forEach(function (sc) { call(g, sc, 'onPlanesChanged', ev); }); });
+  };
+  // ---- physics (src/physics.cpp underneath; the web game's physics.js the same): as diorama.js gives them to scripts
+  function xyz(x, y, z) { return x && typeof x === 'object' ? [+x.x || 0, +x.y || 0, +x.z || 0] : [+x || 0, +y || 0, +z || 0]; }
+  function liveVec(get, set) {
+    var v = {};
+    ['x', 'y', 'z'].forEach(function (k, i) { Object.defineProperty(v, k, { get: function () { return get()[i]; }, set: function (n) { var a = get().slice(); a[i] = +n; set(a); }, enumerable: true }); });
+    v.set = function (x, y, z) { set(xyz(x, y, z)); return v; };
+    v.toArray = function () { return get().slice(); };
+    return v;
+  }
+  var FORCE_MODES = { force: 0, impulse: 1, acceleration: 2, velocitychange: 3 };
+  function rigidbody(go) {
+    var id = go.id;
+    var vel = function (angular) {
+      return liveVec(function () { return D.physVel(id, angular) || [0, 0, 0]; }, function (a) { D.physSetVel(id, angular, a[0], a[1], a[2]); });
+    };
+    var push = function (torque) {
+      return function (x, y, z, mode) {
+        if (x && typeof x === 'object') mode = y;
+        var m = typeof mode === 'number' ? mode : FORCE_MODES[String(mode || 'force').toLowerCase().replace(/[^a-z]/g, '')] || 0, f = xyz(x, y, z);
+        D.physForce(id, f[0], f[1], f[2], m, torque);
+      };
+    };
+    var rb = { addForce: push(false), addTorque: push(true),
+      sleep: function () { D.physWake(id, false); }, wakeUp: function () { D.physWake(id, true); },
+      movePosition: function (x, y, z) { var p = xyz(x, y, z); for (var i = 0; i < 3; ++i) D.setv(id, 'position', i, p[i]); },
+      moveRotation: function (x, y, z) { var r = xyz(x, y, z); for (var i = 0; i < 3; ++i) D.setv(id, 'rotation', i, r[i]); } };
+    Object.defineProperty(rb, 'velocity', { get: function () { return vel(false); }, set: function (v) { vel(false).set(v); } });
+    Object.defineProperty(rb, 'angularVelocity', { get: function () { return vel(true); }, set: function (v) { vel(true).set(v); } });
+    Object.defineProperty(rb, 'isSleeping', { get: function () { return D.physSleeping(id); } });
+    Object.defineProperty(rb, 'ready', { get: function () { return D.physReady(); } });
+    prop(rb, 'mass', id, 'mass', num); prop(rb, 'drag', id, 'drag', num); prop(rb, 'angularDrag', id, 'angularDrag', num);
+    prop(rb, 'useGravity', id, 'useGravity', bool); prop(rb, 'isKinematic', id, 'isKinematic', bool);
+    Object.defineProperty(rb, 'constraints', { get: function () { return D.get(id, 'freeze'); }, set: function (v) { D.set(id, 'freeze', v | 0); } });
+    rb.go = go;
+    return rb;
+  }
+  function physicsApi(go) {
+    var api = {
+      raycast: function (from, dir, maxDistance) {
+        var f = xyz(from), d = xyz(dir), h = D.physRay(D.anchorOf(go.id), f[0], f[1], f[2], d[0], d[1], d[2], maxDistance > 0 ? maxDistance : 1e4);
+        if (!h) return null;
+        return { gameObject: h.id >= 0 ? wrap(h.id) : null, floor: h.floor, point: { x: h.point[0], y: h.point[1], z: h.point[2] },
+                 normal: { x: h.normal[0], y: h.normal[1], z: h.normal[2] }, distance: h.distance };
+      }
+    };
+    Object.defineProperty(api, 'gravity', { get: function () {
+      return liveVec(function () { return D.gravity(); }, function (a) { D.gravity(a[0], a[1], a[2]); }); }, set: function (v) { var a = xyz(v); D.gravity(a[0], a[1], a[2]); } });
+    Object.defineProperty(api, 'ready', { get: function () { return D.physReady(); } });
+    return api;
+  }
+  G.__contacts = function (json) {   // after physics: who met whom (b -1: the floor)
+    JSON.parse(json).forEach(function (c) {
+      var hook = c.trigger ? (c.enter ? 'onTriggerEnter' : 'onTriggerExit') : (c.enter ? 'onCollisionEnter' : 'onCollisionExit');
+      var tell = function (me, other, floor, k) {
+        var g = R.go[me]; if (!g || g.dead) return;
+        var n = c.normal || [0, 1, 0], pt = c.point || [0, 0, 0];
+        var info = { gameObject: other >= 0 ? wrap(other) : null, floor: floor, point: { x: pt[0], y: pt[1], z: pt[2] },
+                     normal: { x: n[0] * k, y: n[1] * k, z: n[2] * k }, speed: c.speed || 0 };
+        g.scripts.forEach(function (s) { call(g, s, hook, info); });
+      };
+      tell(c.a, c.b, c.b === -1, 1);
+      if (c.b >= 0) tell(c.b, c.a, false, -1);
+    });
   };
   G.__arrived = function (id, path) { var g = R.go[id]; if (g && !g.dead) g.scripts.forEach(function (s) { call(g, s, 'onArrived', path); }); };
 })(globalThis);

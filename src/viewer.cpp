@@ -1333,6 +1333,55 @@ static unsigned scenePass(const Project& p, int mi, int selected, int w, int h, 
     }
     clickX = clickY = -1;
 
+    // the selected object's collider: Unity's green outline, the shape the physics gives it (sphere and capsule sizes
+    // follow its largest scale, as in physics.cpp)
+    if (lk.gizmo && selected >= 0 && !previewing) {
+        for (const Draw& d : draws) if (d.o->id == selected && d.o->hasCollider) {
+            const Object& o = *d.o;
+            const float sc[3] = {lengthCol(d.world, 0), lengthCol(d.world, 1), lengthCol(d.world, 2)};
+            M4 frame = d.world;   // its place and turn, without its scale
+            for (int k = 0; k < 3; ++k) for (int r = 0; r < 3; ++r) frame.m[k * 4 + r] = d.world.m[k * 4 + r] / std::max(1e-6f, sc[k]);
+            const float c[3] = {o.colCentre[0] * sc[0], o.colCentre[1] * sc[1], o.colCentre[2] * sc[2]};
+            std::vector<float> v;
+            auto seg = [&](float x0, float y0, float z0, float x1, float y1, float z1) { v.insert(v.end(), {x0, y0, z0, x1, y1, z1}); };
+            auto circle = [&](float cx, float cy, float cz, float r, int axis, float a0 = 0, float a1 = 6.2831853f) {   // around axis 0 x, 1 y, 2 z
+                const int n = 32;
+                for (int i = 0; i < n; ++i) {
+                    const float t0 = a0 + (a1 - a0) * i / n, t1 = a0 + (a1 - a0) * (i + 1) / n;
+                    float p0[3] = {cx, cy, cz}, p1[3] = {cx, cy, cz};
+                    const int u = (axis + 1) % 3, w2 = (axis + 2) % 3;
+                    p0[u] += std::cos(t0) * r; p0[w2] += std::sin(t0) * r; p1[u] += std::cos(t1) * r; p1[w2] += std::sin(t1) * r;
+                    seg(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]);
+                }
+            };
+            const float smax = std::max({sc[0], sc[1], sc[2]});
+            if (o.colShape == COL_SPHERE) {
+                const float r = o.colRadius * smax;
+                for (int ax = 0; ax < 3; ++ax) circle(c[0], c[1], c[2], r, ax);
+            } else if (o.colShape == COL_CAPSULE) {
+                const float r = o.colRadius * std::max(sc[0], sc[2]), half = std::max(0.0f, o.colHeight * sc[1] / 2 - r);
+                circle(c[0], c[1] + half, c[2], r, 1); circle(c[0], c[1] - half, c[2], r, 1);
+                for (int k = 0; k < 4; ++k) {
+                    const float ax = k == 0 ? r : k == 1 ? -r : 0, az = k == 2 ? r : k == 3 ? -r : 0;
+                    seg(c[0] + ax, c[1] - half, c[2] + az, c[0] + ax, c[1] + half, c[2] + az);
+                }
+                circle(c[0], c[1] + half, c[2], r, 2, 0, 3.14159265f); circle(c[0], c[1] - half, c[2], r, 2, 3.14159265f, 6.2831853f);
+                circle(c[0], c[1] + half, c[2], r, 0, 0, 3.14159265f);  circle(c[0], c[1] - half, c[2], r, 0, 3.14159265f, 6.2831853f);
+            } else {   // a box (a mesh collider: its bounds)
+                const float hx = o.colSize[0] * sc[0] / 2, hy = o.colSize[1] * sc[1] / 2, hz = o.colSize[2] * sc[2] / 2;
+                for (int i = 0; i < 4; ++i) {
+                    const float x = i & 1 ? hx : -hx, z = i & 2 ? hz : -hz;
+                    seg(c[0] + x, c[1] - hy, c[2] + z, c[0] + x, c[1] + hy, c[2] + z);
+                    seg(c[0] - hx, c[1] + (i & 1 ? hy : -hy), c[2] + (i & 2 ? hz : -hz), c[0] + hx, c[1] + (i & 1 ? hy : -hy), c[2] + (i & 2 ? hz : -hz));
+                    seg(c[0] + (i & 1 ? hx : -hx), c[1] + (i & 2 ? hy : -hy), c[2] - hz, c[0] + (i & 1 ? hx : -hx), c[1] + (i & 2 ? hy : -hy), c[2] + hz);
+                }
+            }
+            const float green[4] = {0.57f, 0.96f, 0.47f, o.colliderOn ? 1.0f : 0.35f};
+            glDisable(GL_DEPTH_TEST);
+            lines(v, green, frame);
+            glEnable(GL_DEPTH_TEST);
+        }
+    }
     // the selected object: its axes (red x, green y, blue z), drawn over everything
     if (lk.gizmo && selected >= 0 && !previewing) {
         for (const Draw& d : draws) if (d.o->id == selected) {

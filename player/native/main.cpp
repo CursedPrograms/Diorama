@@ -9,6 +9,7 @@
 // Keys: Space or a click locks a surface (Surfaces); F11 full screen; Esc quits.
 #include "arucotrack.h"
 #include "markertrack.h"
+#include "physics.h"
 #include "scene.h"
 #include "surfacetrack.h"
 #include "slam.h"
@@ -260,6 +261,7 @@ int main(int argc, char** argv) {
     { std::error_code le; logFile.open(fs::u8path("log.txt"), std::ios::binary | std::ios::trunc); (void)le; }
     const auto t0 = std::chrono::steady_clock::now();
     auto clock = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
+    Physics::World* physics = nullptr;   // the scene's Rigidbodies and Colliders (none: no world)
     auto startScene = [&](int i) {
         if (i != 0) {
             Project next; std::string e2;
@@ -269,8 +271,9 @@ int main(int argc, char** argv) {
         sceneIndex = i;
         seen.assign(proj.markers.size(), Seen());
         makeTrackers();
+        Physics::destroy(physics); physics = Physics::any(proj) ? Physics::create(proj) : nullptr;
         Scripts::Env env;
-        env.proj = &proj; env.projection = P; env.sceneIndex = i;
+        env.proj = &proj; env.projection = P; env.sceneIndex = i; env.physics = physics;
         env.anchorView = [&](int a, float v[16]) { if (a < 0 || a >= (int)seen.size() || !seen[a].on) return false; std::memcpy(v, seen[a].view, 16 * sizeof(float)); return true; };
         env.surface = [&](float v[16]) { const int a = anchorPlane(); if (a < 0 || !planes[a].on) return false; std::memcpy(v, planes[a].view, 16 * sizeof(float)); return true; };
         env.planes = [&]() { std::vector<Scripts::Env::Plane> v;
@@ -524,6 +527,7 @@ int main(int argc, char** argv) {
             if (best >= 0) Scripts::tap(best);
         }
         Scripts::frame(dt, t, tapped, tapX, tapY);
+        if (physics) { Physics::step(physics, proj, (float)dt, (float)t); Scripts::contacts(Physics::takeContacts(physics)); }
         tapped = false;
         if (pendingScene >= 0) { const int n = pendingScene; pendingScene = -1; planesSent = false; startScene(n); continue; }
 
@@ -585,6 +589,7 @@ int main(int argc, char** argv) {
     }
     if (rec.isOpened()) { rec.release(); recLog.close(); }
     Scripts::stop();
+    Physics::destroy(physics);
     ImGui_ImplOpenGL3_Shutdown(); ImGui_ImplSDL2_Shutdown(); ImGui::DestroyContext();
     SDL_GL_DeleteContext(gl);
     SDL_DestroyWindow(win);
